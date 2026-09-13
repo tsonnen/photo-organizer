@@ -1,0 +1,105 @@
+{
+  "completed_ops": [
+    {
+      "source": "/run/media/tobye/Code/Photos/Unsorted/IMG_3500.JPG",
+      "destination": "/home/tobye/Documents/test/Wicket/2026/09/IMG_3500.JPG",
+      "sidecars": []
+    },
+    {
+      "source": "/run/media/tobye/Code/Photos/Unsorted/IMG_3520.JPG",
+      "destination": "/home/tobye/Documents/test/Wicket/2026/09/IMG_3520.JPG",
+      "sidecars": []
+    },
+    {
+      "source": "/run/media/tobye/Code/Photos/Unsorted/IMG_3540.JPG",
+      "destination": "/home/tobye/Documents/test/Unsorted/2026/09/IMG_3540.JPG",
+      "sidecars": []
+    },
+    {
+      "source": "/run/media/tobye/Code/Photos/Unsorted/IMG_2150.JPG",
+      "destination": "/home/tobye/Documents/test/Unsorted/2026/05/IMG_2150.JPG",
+      "sidecars": []
+    },
+    {
+      "source": "/run/media/tobye/Code/Photos/Unsorted/IMG_3264.JPG",
+      "destination": "/home/tobye/Documents/test/Unsorted/2026/08/IMG_3264.JPG",
+      "sidecars": []
+    },
+    {
+      "source": "/run/media/tobye/Code/Photos/Unsorted/IMG_3265.JPG",
+      "destination": "/home/tobye/Documents/test/Bird/2026/08/IMG_3265.JPG",
+      "sidecars": []
+    },
+    {
+      "source": "/run/media/tobye/Code/Photos/Unsorted/IMG_3266.JPG",
+      "destination": "/home/tobye/Documents/test/Bird/2026/08/IMG_3266.JPG",
+      "sidecars": []
+    },
+    {
+      "source": "/run/media/tobye/Code/Photos/Unsorted/IMG_3267.JPG",
+      "destination": "/home/tobye/Documents/test/Bird/2026/08/IMG_3267.JPG",
+      "sidecars": []
+    },
+    {
+      "source": "/run/media/tobye/Code/Photos/Unsorted/IMG_3268.JPG",
+      "destination": "/home/tobye/Documents/test/Bird/2026/08/IMG_3268.JPG",
+      "sidecars": []
+    },
+    {
+      "source": "/run/media/tobye/Code/Photos/Unsorted/IMG_3269.JPG",
+      "destination": "/home/tobye/Documents/test/Bird/2026/08/IMG_3269.JPG",
+      "sidecars": []
+    },
+    {
+      "source": "/run/media/tobye/Code/Photos/Unsorted/IMG_3270.JPG",
+      "destination": "/home/tobye/Documents/test/Bird/2026/08/IMG_3270.JPG",
+      "sidecars": []
+    },
+    {
+      "source": "/run/media/tobye/Code/Photos/Unsorted/IMG_3271.JPG",
+      "destination": "/home/tobye/Documents/test/Bird/2026/08/IMG_3271.JPG",
+      "sidecars": []
+    },
+    {
+      "source": "/run/media/tobye/Code/Photos/Unsorted/IMG_3272.JPG",
+      "destination": "/home/tobye/Documents/test/Bird/2026/08/IMG_3272.JPG",
+      "sidecars": []
+    },
+    {
+      "source": "/run/media/tobye/Code/Photos/Unsorted/IMG_3273.JPG",
+      "destination": "/home/tobye/Documents/test/Bird/2026/08/IMG_3273.JPG",
+      "sidecars": []
+    },
+    {
+      "source": "/run/media/tobye/Code/Photos/Unsorted/IMG_3274.JPG",
+      "destination": "/home/tobye/Documents/test/Jaime/2026/08/IMG_3274.JPG",
+      "sidecars": []
+    },
+    {
+      "source": "/run/media/tobye/Code/Photos/Unsorted/IMG_3275.JPG",
+      "destination": "/home/tobye/Documents/test/Jaime/2026/08/IMG_3275.JPG",
+      "sidecars": []
+    },
+    {
+      "source": "/run/media/tobye/Code/Photos/Unsorted/IMG_3466.JPG",
+      "destination": "/home/tobye/Documents/test/Cat/2026/08/IMG_3466.JPG",
+      "sidecars": []
+    },
+    {
+      "source": "/run/media/tobye/Code/Photos/Unsorted/IMG_3467.JPG",
+      "destination": "/home/tobye/Documents/test/Cat/2026/08/IMG_3467.JPG",
+      "sidecars": []
+    },
+    {
+      "source": "/run/media/tobye/Code/Photos/Unsorted/IMG_3468.JPG",
+      "destination": "/home/tobye/Documents/test/Cat/2026/08/IMG_3468.JPG",
+      "sidecars": []
+    },
+    {
+      "source": "/run/media/tobye/Code/Photos/Unsorted/IMG_3469.JPG",
+      "destination": "/home/tobye/Documents/test/Unsorted/2026/08/IMG_3469.JPG",
+      "sidecars": []
+    }
+  ],
+  "failed_ops": []
+}

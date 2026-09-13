@@ -37,7 +37,9 @@ impl Database {
         let mut buffer = [0u8; 65536];
         loop {
             let count = file.read(&mut buffer)?;
-            if count == 0 { break; }
+            if count == 0 {
+                break;
+            }
             hasher.update(&buffer[..count]);
         }
         Ok(hasher.finalize().to_hex().to_string())
@@ -82,5 +84,61 @@ impl Database {
             params![hash, data.year, data.month, data.is_exif_date as i32, blob],
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn test_db_insert_and_get() {
+        let db = Database::init(":memory:").expect("init in-memory db");
+        let hash = "abc123hash";
+        let photo_data = CachedPhotoData {
+            year: 2025,
+            month: 12,
+            is_exif_date: true,
+            embedding: vec![0.123, 0.456, -0.789, 1.0],
+        };
+
+        db.insert_cache(hash, &photo_data).expect("insert cache");
+        let retrieved = db
+            .get_cached(hash)
+            .expect("query cache")
+            .expect("found record");
+
+        assert_eq!(retrieved.year, 2025);
+        assert_eq!(retrieved.month, 12);
+        assert!(retrieved.is_exif_date);
+        assert_eq!(retrieved.embedding.len(), 4);
+        for (a, b) in retrieved.embedding.iter().zip(&photo_data.embedding) {
+            assert!((a - b).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn test_db_get_missing() {
+        let db = Database::init(":memory:").expect("init in-memory db");
+        let retrieved = db.get_cached("nonexistent").expect("query cache");
+        assert!(retrieved.is_none());
+    }
+
+    #[test]
+    fn test_compute_file_hash() {
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join(format!("test_hash_{}.tmp", std::process::id()));
+        {
+            let mut f = File::create(&test_file).expect("create file");
+            f.write_all(b"hello photo organizer").expect("write bytes");
+        }
+
+        let hash1 = Database::compute_file_hash(&test_file).expect("compute hash");
+        let hash2 = Database::compute_file_hash(&test_file).expect("compute hash again");
+        let _ = std::fs::remove_file(&test_file);
+
+        assert_eq!(hash1, hash2);
+        assert!(!hash1.is_empty());
     }
 }
