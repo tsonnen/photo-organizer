@@ -1,0 +1,111 @@
+use anyhow::{anyhow, Result};
+use chrono::{Datelike, NaiveDateTime, Utc};
+use eframe::egui;
+use image::DynamicImage;
+use kamadak_exif::{In, Reader, Tag, Value};
+use std::fs::{self, File};
+use std::io::BufReader;
+use std::path::Path;
+
+/// Extracts year, month, and whether the date was extracted from EXIF metadata.
+/// Falls back to file creation/modification time if EXIF is missing or unparseable.
+pub fn extract_date(path: &Path) -> (u32, u32, bool) {
+    if let Ok(file) = File::open(path) {
+        let mut buf = BufReader::new(file);
+        if let Ok(exif_data) = Reader::new().read_from_container(&mut buf) {
+            if let Some(field) = exif_data.get_field(Tag::DateTimeOriginal, In::PRIMARY) {
+                if let Value::Ascii(ref v) = field.value {
+                    if let Some(bytes) = v.first() {
+                        if let Ok(s) = std::str::from_utf8(bytes) {
+                            if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y:%m:%d %H:%M:%S") {
+                                return (dt.year() as u32, dt.month(), true);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let dt: chrono::DateTime<Utc> = fs::metadata(path)
+        .and_then(|m| m.created())
+        .unwrap_or(std::time::SystemTime::now())
+        .into();
+    (dt.year() as u32, dt.month(), false)
+}
+
+/// Loads an image from disk. Supports standard image formats as well as various
+/// RAW camera formats (CR2, CR3, NEF, ARW, DNG, RAF, ORF, PEF) using `rawloader`.
+pub fn load_image(path: &Path) -> Result<DynamicImage> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let raw_extensions = ["cr2", "cr3", "nef", "arw", "dng", "raf", "orf", "pef"];
+
+    if raw_extensions.contains(&ext.as_str()) {
+        let raw =
+            rawloader::decode_file(path).map_err(|e| anyhow!("RAW decoding failed: {:?}", e))?;
+
+        let width = raw.width;
+        let height = raw.height;
+        let mut image_buf = image::RgbImage::new(width as u32, height as u32);
+
+        if let rawloader::RawImageData::Integer(data) = raw.data {
+            for (idx, pixel) in image_buf.pixels_mut().enumerate() {
+                if idx < data.len() {
+                    let val = (data[idx] >> 6) as u8; // Scale 14-bit raw down to 8-bit
+                    *pixel = image::Rgb([val, val, val]);
+                }
+            }
+            return Ok(DynamicImage::ImageRgb8(image_buf));
+        }
+        Err(anyhow!("Could not decode RAW frame"))
+    } else {
+        Ok(image::open(path)?)
+    }
+}
+
+/// Converts a DynamicImage to an egui::ColorImage thumbnail for UI display.
+pub fn dynamic_to_egui(img: &DynamicImage) -> egui::ColorImage {
+    let thumb = img.thumbnail(200, 140).to_rgba8();
+    let size = [thumb.width() as usize, thumb.height() as usize];
+    egui::ColorImage::from_rgba_unmultiplied(size, thumb.as_raw())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn test_extract_date_fallback_to_metadata() {
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join(format!("test_extract_date_{}.tmp", std::process::id()));
+        {
+            let mut f = File::create(&test_file).expect("create test file");
+            f.write_all(b"not an image").expect("write bytes");
+        }
+
+        let (year, month, is_exif) = extract_date(&test_file);
+        let _ = fs::remove_file(&test_file);
+
+        let now = Utc::now();
+        assert!(!is_exif);
+        assert_eq!(year, now.year() as u32);
+        assert_eq!(month, now.month());
+    }
+
+    #[test]
+    fn test_dynamic_to_egui_thumbnail() {
+        let img = DynamicImage::ImageRgb8(image::RgbImage::new(400, 300));
+        let color_img = dynamic_to_egui(&img);
+        // Thumbnail fits within 200x140 while preserving aspect ratio (400:300 -> 186x140 approx)
+        assert!(color_img.width() <= 200);
+        assert!(color_img.height() <= 140);
+        assert_eq!(
+            color_img.pixels.len(),
+            color_img.width() * color_img.height()
+        );
+    }
+}

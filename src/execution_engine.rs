@@ -30,7 +30,10 @@ pub struct ExecutionEngine {
 
 impl ExecutionEngine {
     pub fn new(base_output_dir: PathBuf, mode: TransferMode) -> Self {
-        Self { base_output_dir, mode }
+        Self {
+            base_output_dir,
+            mode,
+        }
     }
 
     pub fn plan_batch(&self, inputs: &[RawPhotoInput]) -> Vec<FileOperation> {
@@ -43,10 +46,19 @@ impl ExecutionEngine {
                 .join(format!("{:02}", input.month));
 
             let target_dir = self.base_output_dir.join(rel_dir);
-            let stem = input.source_path.file_stem().and_then(|s| s.to_str()).unwrap_or("file");
-            let ext = input.source_path.extension().and_then(|e| e.to_str()).unwrap_or("");
+            let stem = input
+                .source_path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("file");
+            let ext = input
+                .source_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
 
-            let (destination, final_stem) = resolve_destination(&target_dir, stem, ext, &reserved_paths);
+            let (destination, final_stem) =
+                resolve_destination(&target_dir, stem, ext, &reserved_paths);
             reserved_paths.insert(destination.clone());
 
             // Detect matching sidecar files (.xmp, .aae)
@@ -112,7 +124,9 @@ fn transfer_file(src: &Path, dst: &Path, mode: TransferMode) -> Result<()> {
     }
 
     match mode {
-        TransferMode::Copy => { fs::copy(src, dst)?; },
+        TransferMode::Copy => {
+            fs::copy(src, dst)?;
+        }
         TransferMode::Move => {
             if fs::rename(src, dst).is_err() {
                 fs::copy(src, dst)?;
@@ -128,16 +142,102 @@ fn transfer_file(src: &Path, dst: &Path, mode: TransferMode) -> Result<()> {
     Ok(())
 }
 
-fn resolve_destination(target_dir: &Path, stem: &str, ext: &str, reserved: &HashSet<PathBuf>) -> (PathBuf, String) {
+fn resolve_destination(
+    target_dir: &Path,
+    stem: &str,
+    ext: &str,
+    reserved: &HashSet<PathBuf>,
+) -> (PathBuf, String) {
     let mut counter = 0;
     loop {
-        let cur_stem = if counter == 0 { stem.to_string() } else { format!("{}_{}", stem, counter) };
-        let filename = if ext.is_empty() { cur_stem.clone() } else { format!("{}.{}", cur_stem, ext) };
+        let cur_stem = if counter == 0 {
+            stem.to_string()
+        } else {
+            format!("{}_{}", stem, counter)
+        };
+        let filename = if ext.is_empty() {
+            cur_stem.clone()
+        } else {
+            format!("{}.{}", cur_stem, ext)
+        };
         let candidate = target_dir.join(&filename);
 
         if !candidate.exists() && !reserved.contains(&candidate) {
             return (candidate, cur_stem);
         }
         counter += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write;
+
+    #[test]
+    fn test_plan_batch_basic_and_collision() {
+        let base = PathBuf::from("/test/output");
+        let engine = ExecutionEngine::new(base.clone(), TransferMode::Copy);
+
+        let inputs = vec![
+            RawPhotoInput {
+                source_path: PathBuf::from("/photos/pic.jpg"),
+                subject: "Nature".to_string(),
+                year: 2024,
+                month: 5,
+            },
+            RawPhotoInput {
+                source_path: PathBuf::from("/other/pic.jpg"),
+                subject: "Nature".to_string(),
+                year: 2024,
+                month: 5,
+            },
+        ];
+
+        let ops = engine.plan_batch(&inputs);
+        assert_eq!(ops.len(), 2);
+        assert_eq!(ops[0].destination, base.join("Nature/2024/05/pic.jpg"));
+        assert_eq!(ops[1].destination, base.join("Nature/2024/05/pic_1.jpg"));
+    }
+
+    #[test]
+    fn test_execute_batch_copy_and_move() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_exec_engine_{}", std::process::id()));
+        let src_dir = temp_dir.join("src");
+        let out_dir = temp_dir.join("out");
+        fs::create_dir_all(&src_dir).unwrap();
+
+        let photo_file = src_dir.join("photo.jpg");
+        {
+            let mut f = File::create(&photo_file).unwrap();
+            f.write_all(b"image data").unwrap();
+        }
+
+        // Test Copy
+        let engine_copy = ExecutionEngine::new(out_dir.clone(), TransferMode::Copy);
+        let input = vec![RawPhotoInput {
+            source_path: photo_file.clone(),
+            subject: "Vacation".to_string(),
+            year: 2023,
+            month: 7,
+        }];
+        let plan = engine_copy.plan_batch(&input);
+        let manifest = engine_copy.execute_batch(&plan, |_, _, _| {});
+        assert_eq!(manifest.completed_ops.len(), 1);
+        assert_eq!(manifest.failed_ops.len(), 0);
+        assert!(photo_file.exists());
+        assert!(plan[0].destination.exists());
+
+        // Test Move
+        let engine_move = ExecutionEngine::new(out_dir.clone(), TransferMode::Move);
+        let plan_move = engine_move.plan_batch(&input);
+        let manifest_move = engine_move.execute_batch(&plan_move, |_, _, _| {});
+        assert_eq!(manifest_move.completed_ops.len(), 1);
+        assert!(!photo_file.exists()); // Source should have been moved
+        assert!(plan_move[0].destination.exists());
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 }
