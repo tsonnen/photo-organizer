@@ -20,3 +20,4 @@ rustc-ice-*.txt
 
 last_execution_manifest.json
 photo_cache.db
+profiles.json
