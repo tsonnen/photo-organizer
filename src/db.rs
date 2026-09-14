@@ -56,6 +56,7 @@ impl Database {
             let month: u32 = row.get(1)?;
             let is_exif: i32 = row.get(2)?;
             let blob: Vec<u8> = row.get(3)?;
+            #[allow(clippy::chunks_exact_to_as_chunks)]
             let embedding: Vec<f32> = blob
                 .chunks_exact(4)
                 .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
