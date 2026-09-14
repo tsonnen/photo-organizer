@@ -7,6 +7,8 @@ use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::Path;
 
+use crate::db::CachedThumbnail;
+
 /// Extracts year, month, and whether the date was extracted from EXIF metadata.
 /// Falls back to file creation/modification time if EXIF is missing or unparseable.
 pub fn extract_date(path: &Path) -> (u32, u32, bool) {
@@ -27,7 +29,7 @@ pub fn extract_date(path: &Path) -> (u32, u32, bool) {
         }
     }
     let dt: chrono::DateTime<Utc> = fs::metadata(path)
-        .and_then(|m| m.created())
+        .and_then(|m| m.created().or_else(|_| m.modified()))
         .unwrap_or(std::time::SystemTime::now())
         .into();
     (dt.year() as u32, dt.month(), false)
@@ -66,11 +68,28 @@ pub fn load_image(path: &Path) -> Result<DynamicImage> {
     }
 }
 
-/// Converts a DynamicImage to an egui::ColorImage thumbnail for UI display.
-pub fn dynamic_to_egui(img: &DynamicImage) -> egui::ColorImage {
+/// Converts a DynamicImage to a CachedThumbnail and an egui::ColorImage.
+pub fn dynamic_to_cached_thumb(img: &DynamicImage) -> (CachedThumbnail, egui::ColorImage) {
     let thumb = img.thumbnail(200, 140).to_rgba8();
-    let size = [thumb.width() as usize, thumb.height() as usize];
-    egui::ColorImage::from_rgba_unmultiplied(size, thumb.as_raw())
+    let width = thumb.width();
+    let height = thumb.height();
+    let rgba = thumb.into_raw();
+    let size = [width as usize, height as usize];
+    let color_img = egui::ColorImage::from_rgba_unmultiplied(size, &rgba);
+    (
+        CachedThumbnail {
+            width,
+            height,
+            rgba,
+        },
+        color_img,
+    )
+}
+
+/// Converts a CachedThumbnail to an egui::ColorImage.
+pub fn cached_thumb_to_egui(thumb: &CachedThumbnail) -> egui::ColorImage {
+    let size = [thumb.width as usize, thumb.height as usize];
+    egui::ColorImage::from_rgba_unmultiplied(size, &thumb.rgba)
 }
 
 #[cfg(test)]
@@ -97,15 +116,34 @@ mod tests {
     }
 
     #[test]
-    fn test_dynamic_to_egui_thumbnail() {
+    fn test_dynamic_to_cached_thumb_dimensions() {
         let img = DynamicImage::ImageRgb8(image::RgbImage::new(400, 300));
-        let color_img = dynamic_to_egui(&img);
+        let (thumb, color_img) = dynamic_to_cached_thumb(&img);
         // Thumbnail fits within 200x140 while preserving aspect ratio (400:300 -> 186x140 approx)
-        assert!(color_img.width() <= 200);
-        assert!(color_img.height() <= 140);
+        assert!(thumb.width <= 200);
+        assert!(thumb.height <= 140);
+        assert_eq!(color_img.width(), thumb.width as usize);
+        assert_eq!(color_img.height(), thumb.height as usize);
         assert_eq!(
             color_img.pixels.len(),
             color_img.width() * color_img.height()
         );
+    }
+
+    #[test]
+    fn test_cached_thumbnail_roundtrip() {
+        let img = DynamicImage::ImageRgb8(image::RgbImage::new(100, 100));
+        let (cached, color_img) = dynamic_to_cached_thumb(&img);
+        assert_eq!(cached.width as usize, color_img.width());
+        assert_eq!(cached.height as usize, color_img.height());
+        assert_eq!(
+            cached.rgba.len(),
+            color_img.width() * color_img.height() * 4
+        );
+
+        let restored_img = cached_thumb_to_egui(&cached);
+        assert_eq!(restored_img.width(), color_img.width());
+        assert_eq!(restored_img.height(), color_img.height());
+        assert_eq!(restored_img.pixels, color_img.pixels);
     }
 }
