@@ -2,7 +2,31 @@ use anyhow::Result;
 use image::DynamicImage;
 use ort::session::Session;
 use ort::value::Tensor;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// Searches for the CLIP visual model in multiple standard locations.
+pub fn find_model_path() -> Option<PathBuf> {
+    let candidate_paths = [
+        PathBuf::from("models/clip_visual.onnx"),
+        PathBuf::from("../models/clip_visual.onnx"),
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("models/clip_visual.onnx")))
+            .unwrap_or_default(),
+    ];
+
+    for candidate in &candidate_paths {
+        if !candidate.as_os_str().is_empty() && candidate.exists() {
+            return Some(candidate.clone());
+        }
+    }
+    None
+}
+
+/// Checks if a valid CLIP visual model is reachable.
+pub fn is_model_available() -> bool {
+    find_model_path().is_some()
+}
 
 /// Initializes an ONNX runtime session from a model file.
 pub fn init_clip_session<P: AsRef<Path>>(model_path: P) -> Result<Session> {
@@ -60,5 +84,22 @@ pub fn extract_embedding(session: &mut Session, img: &DynamicImage) -> Result<Ve
         Ok(slice.to_vec())
     } else {
         Ok(slice.iter().map(|x| x / norm).collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_find_model_path_nonexistent() {
+        // When running in tests where model doesn't exist, is_model_available should return bool without panicking
+        let _ = is_model_available();
+    }
+
+    #[test]
+    fn test_init_clip_session_missing_error() {
+        let res = init_clip_session("nonexistent_model_file_12345.onnx");
+        assert!(res.is_err());
     }
 }

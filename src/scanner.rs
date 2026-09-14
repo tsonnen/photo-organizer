@@ -1,7 +1,7 @@
 use crate::db::{CachedPhotoData, Database};
-use crate::inference::{extract_embedding, init_clip_session};
+use crate::inference::{extract_embedding, find_model_path, init_clip_session};
 use crate::media::{cached_thumb_to_egui, dynamic_to_cached_thumb, extract_date, load_image};
-use crate::profile_store::ProfileStore;
+use crate::profile_store::{ClassificationSource, ProfileStore};
 use eframe::egui;
 use rayon::prelude::*;
 use std::fs;
@@ -17,6 +17,8 @@ pub struct ProcessedPayload {
     pub is_exif: bool,
     pub category: String,
     pub confidence: f32,
+    pub source: ClassificationSource,
+    pub embedding: Vec<f32>,
     pub image: egui::ColorImage,
 }
 
@@ -29,6 +31,8 @@ pub enum ScanMessage {
         is_exif: bool,
         category: String,
         confidence: f32,
+        source: ClassificationSource,
+        embedding: Vec<f32>,
     },
     Complete,
 }
@@ -63,12 +67,22 @@ pub fn is_supported_image(path: &Path) -> bool {
 
 /// Spawns a background thread that leverages a Rayon thread pool to scan the folder in parallel.
 /// It immediately emits thumbnails to the UI as soon as they are ready (or from SQLite cache),
-/// then asynchronously updates AI classifications in the background.
+/// then asynchronously updates AI / heuristic classifications in the background.
 pub fn scan_folder(
     folder: PathBuf,
     profiles: ProfileStore,
     tx: Sender<ScanMessage>,
     ctx: egui::Context,
+) {
+    scan_folder_with_db(folder, profiles, tx, ctx, PathBuf::from("photo_cache.db"));
+}
+
+pub fn scan_folder_with_db(
+    folder: PathBuf,
+    profiles: ProfileStore,
+    tx: Sender<ScanMessage>,
+    ctx: egui::Context,
+    db_path: PathBuf,
 ) {
     thread::spawn(move || {
         let mut paths = Vec::new();
@@ -87,9 +101,10 @@ pub fn scan_folder(
             return;
         }
 
-        let db = Arc::new(Mutex::new(Database::init("photo_cache.db").ok()));
+        let db = Arc::new(Mutex::new(Database::init(&db_path).ok()));
+        let model_path = find_model_path();
         let session = Arc::new(Mutex::new(
-            init_clip_session("models/clip_visual.onnx").ok(),
+            model_path.and_then(|p| init_clip_session(p).ok()),
         ));
 
         paths.par_iter().for_each(|path| {
@@ -106,7 +121,14 @@ pub fn scan_folder(
             };
 
             if let Some(c) = cached {
-                let (category, confidence) = profiles.classify(&c.embedding);
+                let (w, h) = if let Some(ref thumb) = c.thumbnail {
+                    (thumb.width, thumb.height)
+                } else {
+                    (1920, 1080)
+                };
+                let class_res =
+                    profiles.classify_with_heuristics(&c.embedding, path, c.is_exif_date, w, h);
+
                 let image = if let Some(ref thumb) = c.thumbnail {
                     cached_thumb_to_egui(thumb)
                 } else if let Ok(dyn_img) = load_image(path) {
@@ -134,8 +156,10 @@ pub fn scan_folder(
                     year: c.year,
                     month: c.month,
                     is_exif: c.is_exif_date,
-                    category,
-                    confidence,
+                    category: class_res.category,
+                    confidence: class_res.confidence,
+                    source: class_res.source,
+                    embedding: c.embedding,
                     image,
                 }));
                 ctx.request_repaint();
@@ -160,6 +184,8 @@ pub fn scan_folder(
                 is_exif: date_info.2,
                 category: "Classifying...".to_string(),
                 confidence: 0.0,
+                source: ClassificationSource::UnsortedFallback,
+                embedding: Vec::new(),
                 image,
             }));
             ctx.request_repaint();
@@ -174,7 +200,13 @@ pub fn scan_folder(
                 }
             };
 
-            let (category, confidence) = profiles.classify(&emb);
+            let class_res = profiles.classify_with_heuristics(
+                &emb,
+                path,
+                date_info.2,
+                dyn_img.width(),
+                dyn_img.height(),
+            );
 
             // 4. Save to cache with thumbnail
             {
@@ -186,7 +218,7 @@ pub fn scan_folder(
                             year: date_info.0,
                             month: date_info.1,
                             is_exif_date: date_info.2,
-                            embedding: emb,
+                            embedding: emb.clone(),
                             thumbnail: Some(cached_thumb),
                         },
                     );
@@ -199,8 +231,10 @@ pub fn scan_folder(
                 year: date_info.0,
                 month: date_info.1,
                 is_exif: date_info.2,
-                category,
-                confidence,
+                category: class_res.category,
+                confidence: class_res.confidence,
+                source: class_res.source,
+                embedding: emb,
             });
             ctx.request_repaint();
         });
@@ -235,7 +269,13 @@ mod tests {
 
         let (tx, rx) = std::sync::mpsc::channel();
         let ctx = egui::Context::default();
-        scan_folder(temp_dir.clone(), ProfileStore::default(), tx, ctx);
+        scan_folder_with_db(
+            temp_dir.clone(),
+            ProfileStore::default(),
+            tx,
+            ctx,
+            temp_dir.join("empty_cache.db"),
+        );
 
         let mut received_complete = false;
         while let Ok(msg) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
@@ -254,23 +294,36 @@ mod tests {
         let temp_dir =
             std::env::temp_dir().join(format!("test_scan_images_{}", std::process::id()));
         fs::create_dir_all(&temp_dir).unwrap();
+        let test_db_path = temp_dir.join("isolated_cache.db");
 
-        // Create 2 test PNG images and 1 non-image file
-        for i in 0..2 {
-            let img_path = temp_dir.join(format!("test_pic_{}.png", i));
-            let mut img = image::RgbImage::new(40, 40);
-            for p in img.pixels_mut() {
-                *p = image::Rgb([i as u8 * 50, 100, 150]);
-            }
-            img.save(&img_path).unwrap();
+        // Create 2 test PNG images (one screenshot-like naming, one generic)
+        let img_path1 = temp_dir.join("screenshot_test.png");
+        let mut img1 = image::RgbImage::new(40, 40);
+        for p in img1.pixels_mut() {
+            *p = image::Rgb([10, 100, 150]);
         }
+        img1.save(&img_path1).unwrap();
+
+        let img_path2 = temp_dir.join("test_pic_1.png");
+        let mut img2 = image::RgbImage::new(40, 40);
+        for p in img2.pixels_mut() {
+            *p = image::Rgb([50, 100, 150]);
+        }
+        img2.save(&img_path2).unwrap();
+
         let txt_path = temp_dir.join("readme.txt");
         fs::write(&txt_path, b"not a photo").unwrap();
 
         // 1st scan: uncached
         let (tx, rx) = std::sync::mpsc::channel();
         let ctx = egui::Context::default();
-        scan_folder(temp_dir.clone(), ProfileStore::default(), tx, ctx);
+        scan_folder_with_db(
+            temp_dir.clone(),
+            ProfileStore::default(),
+            tx,
+            ctx,
+            test_db_path.clone(),
+        );
 
         let mut items = Vec::new();
         let mut updates = Vec::new();
@@ -279,7 +332,11 @@ mod tests {
         while let Ok(msg) = rx.recv_timeout(std::time::Duration::from_secs(5)) {
             match msg {
                 ScanMessage::Item(payload) => items.push(payload),
-                ScanMessage::Update { source_path, .. } => updates.push(source_path),
+                ScanMessage::Update {
+                    source_path,
+                    category,
+                    ..
+                } => updates.push((source_path, category)),
                 ScanMessage::Complete => {
                     completed = true;
                     break;
@@ -289,13 +346,25 @@ mod tests {
 
         assert!(completed);
         assert_eq!(items.len(), 2);
-        // Only 2 PNG images should be processed (readme.txt ignored)
         assert_eq!(updates.len(), 2);
+
+        // Verify screenshot got heuristic category
+        let screenshot_update = updates
+            .iter()
+            .find(|(p, _)| p.file_name().unwrap() == "screenshot_test.png");
+        assert!(screenshot_update.is_some());
+        assert_eq!(screenshot_update.unwrap().1, "Screenshots");
 
         // 2nd scan: should hit cache and complete
         let (tx2, rx2) = std::sync::mpsc::channel();
         let ctx2 = egui::Context::default();
-        scan_folder(temp_dir.clone(), ProfileStore::default(), tx2, ctx2);
+        scan_folder_with_db(
+            temp_dir.clone(),
+            ProfileStore::default(),
+            tx2,
+            ctx2,
+            test_db_path,
+        );
 
         let mut cached_items = Vec::new();
         let mut cached_completed = false;
