@@ -240,4 +240,69 @@ mod tests {
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
+
+    #[test]
+    fn test_plan_batch_multi_collision_chain() {
+        let base = PathBuf::from("/test/output");
+        let engine = ExecutionEngine::new(base.clone(), TransferMode::Copy);
+
+        let inputs = (0..5)
+            .map(|i| RawPhotoInput {
+                source_path: PathBuf::from(format!("/src_{}/sample.png", i)),
+                subject: "Events".to_string(),
+                year: 2025,
+                month: 1,
+            })
+            .collect::<Vec<_>>();
+
+        let ops = engine.plan_batch(&inputs);
+        assert_eq!(ops.len(), 5);
+        assert_eq!(ops[0].destination, base.join("Events/2025/01/sample.png"));
+        assert_eq!(ops[1].destination, base.join("Events/2025/01/sample_1.png"));
+        assert_eq!(ops[2].destination, base.join("Events/2025/01/sample_2.png"));
+        assert_eq!(ops[3].destination, base.join("Events/2025/01/sample_3.png"));
+        assert_eq!(ops[4].destination, base.join("Events/2025/01/sample_4.png"));
+    }
+
+    #[test]
+    fn test_plan_batch_special_characters_and_spaces() {
+        let base = PathBuf::from("/test/output");
+        let engine = ExecutionEngine::new(base.clone(), TransferMode::Copy);
+
+        let inputs = vec![RawPhotoInput {
+            source_path: PathBuf::from("/photos/Summer Party & Fireworks (2024).jpg"),
+            subject: "Vacation / Japan 2024".to_string(),
+            year: 2024,
+            month: 7,
+        }];
+
+        let ops = engine.plan_batch(&inputs);
+        assert_eq!(ops.len(), 1);
+        assert_eq!(
+            ops[0].destination,
+            base.join("Vacation / Japan 2024/2024/07/Summer Party & Fireworks (2024).jpg")
+        );
+    }
+
+    #[test]
+    fn test_execute_batch_missing_source_failure() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_exec_failure_{}", std::process::id()));
+        let out_dir = temp_dir.join("out");
+
+        let engine = ExecutionEngine::new(out_dir, TransferMode::Copy);
+        let input = vec![RawPhotoInput {
+            source_path: PathBuf::from("/nonexistent/file/does_not_exist_12345.jpg"),
+            subject: "Fail".to_string(),
+            year: 2024,
+            month: 1,
+        }];
+
+        let plan = engine.plan_batch(&input);
+        let manifest = engine.execute_batch(&plan, |_, _, _| {});
+        assert_eq!(manifest.completed_ops.len(), 0);
+        assert_eq!(manifest.failed_ops.len(), 1);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
 }

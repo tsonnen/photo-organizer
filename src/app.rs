@@ -1,6 +1,6 @@
 use crate::execution_engine::{ExecutionEngine, RawPhotoInput, TransferMode};
 use crate::profile_store::ProfileStore;
-use crate::scanner::{scan_folder, ProcessedPayload};
+use crate::scanner::{scan_folder, ScanMessage};
 use crate::undo_engine::UndoEngine;
 use eframe::egui;
 use std::fs;
@@ -26,8 +26,8 @@ pub struct PhotoOrganizerApp {
     items: Vec<StagedItem>,
     is_processing: bool,
     profiles: ProfileStore,
-    tx: Sender<ProcessedPayload>,
-    rx: Receiver<ProcessedPayload>,
+    tx: Sender<ScanMessage>,
+    rx: Receiver<ScanMessage>,
 }
 
 impl Default for PhotoOrganizerApp {
@@ -92,24 +92,49 @@ impl PhotoOrganizerApp {
 
 impl eframe::App for PhotoOrganizerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        while let Ok(payload) = self.rx.try_recv() {
-            let filename = payload
-                .source_path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy();
-            let texture = ctx.load_texture(filename, payload.image, egui::TextureOptions::LINEAR);
+        while let Ok(msg) = self.rx.try_recv() {
+            match msg {
+                ScanMessage::Item(payload) => {
+                    let filename = payload
+                        .source_path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy();
+                    let texture =
+                        ctx.load_texture(filename, payload.image, egui::TextureOptions::LINEAR);
 
-            self.items.push(StagedItem {
-                source_path: payload.source_path,
-                year: payload.year,
-                month: payload.month,
-                is_exif: payload.is_exif,
-                category: payload.category,
-                confidence: payload.confidence,
-                texture,
-                selected: true,
-            });
+                    self.items.push(StagedItem {
+                        source_path: payload.source_path,
+                        year: payload.year,
+                        month: payload.month,
+                        is_exif: payload.is_exif,
+                        category: payload.category,
+                        confidence: payload.confidence,
+                        texture,
+                        selected: true,
+                    });
+                }
+                ScanMessage::Update {
+                    source_path,
+                    year,
+                    month,
+                    is_exif,
+                    category,
+                    confidence,
+                } => {
+                    if let Some(item) = self.items.iter_mut().find(|i| i.source_path == source_path)
+                    {
+                        item.year = year;
+                        item.month = month;
+                        item.is_exif = is_exif;
+                        item.category = category;
+                        item.confidence = confidence;
+                    }
+                }
+                ScanMessage::Complete => {
+                    self.is_processing = false;
+                }
+            }
         }
 
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
@@ -136,6 +161,12 @@ impl eframe::App for PhotoOrganizerApp {
                         "last_execution_manifest.json",
                         |_, _, _| {},
                     );
+                }
+
+                if self.is_processing {
+                    ui.separator();
+                    ui.spinner();
+                    ui.label("Processing photos in parallel...");
                 }
             });
         });
