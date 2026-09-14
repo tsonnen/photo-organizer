@@ -133,4 +133,70 @@ mod tests {
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
+
+    #[test]
+    fn test_rollback_batch_multiple_files_with_sidecars() {
+        let temp_dir = std::env::temp_dir().join(format!("test_undo_multi_{}", std::process::id()));
+        let orig_dir = temp_dir.join("orig");
+        let dest_dir = temp_dir.join("dest");
+        fs::create_dir_all(&orig_dir).unwrap();
+        fs::create_dir_all(&dest_dir).unwrap();
+
+        let mut completed_ops = Vec::new();
+        for i in 0..3 {
+            let src = orig_dir.join(format!("photo_{}.jpg", i));
+            let dst = dest_dir.join(format!("photo_{}.jpg", i));
+            let src_sidecar = orig_dir.join(format!("photo_{}.xmp", i));
+            let dst_sidecar = dest_dir.join(format!("photo_{}.xmp", i));
+
+            fs::write(&dst, format!("image {}", i)).unwrap();
+            fs::write(&dst_sidecar, format!("xmp {}", i)).unwrap();
+
+            completed_ops.push(FileOperation {
+                source: src,
+                destination: dst,
+                sidecars: vec![(src_sidecar, dst_sidecar)],
+            });
+        }
+
+        let manifest = ExecutionManifest {
+            completed_ops,
+            failed_ops: Vec::new(),
+        };
+
+        let manifest_path = temp_dir.join("manifest.json");
+        fs::write(&manifest_path, serde_json::to_string(&manifest).unwrap()).unwrap();
+
+        let statuses = UndoEngine::rollback_from_file(&manifest_path, |_, _, _| {}).unwrap();
+        assert_eq!(statuses.len(), 3);
+        for status in statuses {
+            match status {
+                UndoStatus::Restored(p) => assert!(p.exists()),
+                _ => panic!("Expected Restored status"),
+            }
+        }
+
+        // Verify sidecars were restored as well
+        for i in 0..3 {
+            assert!(orig_dir.join(format!("photo_{}.xmp", i)).exists());
+            assert!(!dest_dir.join(format!("photo_{}.xmp", i)).exists());
+        }
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_rollback_malformed_json_returns_err() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_undo_malformed_{}", std::process::id()));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let manifest_path = temp_dir.join("bad_manifest.json");
+        fs::write(&manifest_path, b"{ not valid json }").unwrap();
+
+        let res = UndoEngine::rollback_from_file(&manifest_path, |_, _, _| {});
+        assert!(res.is_err());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
 }

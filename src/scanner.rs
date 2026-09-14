@@ -227,4 +227,93 @@ mod tests {
         assert!(!is_supported_image(Path::new("script.sh")));
         assert!(!is_supported_image(Path::new("no_extension")));
     }
+
+    #[test]
+    fn test_scan_folder_empty() {
+        let temp_dir = std::env::temp_dir().join(format!("test_scan_empty_{}", std::process::id()));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = egui::Context::default();
+        scan_folder(temp_dir.clone(), ProfileStore::default(), tx, ctx);
+
+        let mut received_complete = false;
+        while let Ok(msg) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
+            if let ScanMessage::Complete = msg {
+                received_complete = true;
+                break;
+            }
+        }
+        assert!(received_complete);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_scan_folder_with_real_images_and_rescan_cache() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_scan_images_{}", std::process::id()));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        // Create 2 test PNG images and 1 non-image file
+        for i in 0..2 {
+            let img_path = temp_dir.join(format!("test_pic_{}.png", i));
+            let mut img = image::RgbImage::new(40, 40);
+            for p in img.pixels_mut() {
+                *p = image::Rgb([i as u8 * 50, 100, 150]);
+            }
+            img.save(&img_path).unwrap();
+        }
+        let txt_path = temp_dir.join("readme.txt");
+        fs::write(&txt_path, b"not a photo").unwrap();
+
+        // 1st scan: uncached
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = egui::Context::default();
+        scan_folder(temp_dir.clone(), ProfileStore::default(), tx, ctx);
+
+        let mut items = Vec::new();
+        let mut updates = Vec::new();
+        let mut completed = false;
+
+        while let Ok(msg) = rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            match msg {
+                ScanMessage::Item(payload) => items.push(payload),
+                ScanMessage::Update { source_path, .. } => updates.push(source_path),
+                ScanMessage::Complete => {
+                    completed = true;
+                    break;
+                }
+            }
+        }
+
+        assert!(completed);
+        assert_eq!(items.len(), 2);
+        // Only 2 PNG images should be processed (readme.txt ignored)
+        assert_eq!(updates.len(), 2);
+
+        // 2nd scan: should hit cache and complete
+        let (tx2, rx2) = std::sync::mpsc::channel();
+        let ctx2 = egui::Context::default();
+        scan_folder(temp_dir.clone(), ProfileStore::default(), tx2, ctx2);
+
+        let mut cached_items = Vec::new();
+        let mut cached_completed = false;
+
+        while let Ok(msg) = rx2.recv_timeout(std::time::Duration::from_secs(5)) {
+            match msg {
+                ScanMessage::Item(payload) => cached_items.push(payload),
+                ScanMessage::Complete => {
+                    cached_completed = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(cached_completed);
+        assert_eq!(cached_items.len(), 2);
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
 }

@@ -146,4 +146,58 @@ mod tests {
         assert_eq!(restored_img.height(), color_img.height());
         assert_eq!(restored_img.pixels, color_img.pixels);
     }
+
+    #[test]
+    fn test_dynamic_to_cached_thumb_aspect_ratios() {
+        // Ultra wide panorama (1000x100)
+        let wide_img = DynamicImage::ImageRgb8(image::RgbImage::new(1000, 100));
+        let (wide_thumb, _) = dynamic_to_cached_thumb(&wide_img);
+        assert!(wide_thumb.width <= 200);
+        assert!(wide_thumb.height <= 140);
+        assert!(wide_thumb.width > wide_thumb.height);
+
+        // Ultra tall portrait (100x1000)
+        let tall_img = DynamicImage::ImageRgb8(image::RgbImage::new(100, 1000));
+        let (tall_thumb, _) = dynamic_to_cached_thumb(&tall_img);
+        assert!(tall_thumb.width <= 200);
+        assert!(tall_thumb.height <= 140);
+        assert!(tall_thumb.height > tall_thumb.width);
+
+        // 1x1 micro pixel
+        let micro_img = DynamicImage::ImageRgb8(image::RgbImage::new(1, 1));
+        let (micro_thumb, _) = dynamic_to_cached_thumb(&micro_img);
+        assert!(micro_thumb.width >= 1);
+        assert!(micro_thumb.height >= 1);
+    }
+
+    #[test]
+    fn test_load_image_real_png() {
+        let temp_dir = std::env::temp_dir();
+        let test_file = temp_dir.join(format!("test_real_{}.png", std::process::id()));
+        let mut img = image::RgbImage::new(50, 50);
+        for pixel in img.pixels_mut() {
+            *pixel = image::Rgb([120, 200, 50]);
+        }
+        img.save(&test_file).expect("save png");
+
+        let loaded = load_image(&test_file).expect("load real image");
+        assert_eq!(loaded.width(), 50);
+        assert_eq!(loaded.height(), 50);
+
+        let _ = fs::remove_file(&test_file);
+    }
+
+    #[test]
+    fn test_load_image_corrupted_or_empty() {
+        let temp_dir = std::env::temp_dir();
+        let empty_file = temp_dir.join(format!("test_empty_{}.jpg", std::process::id()));
+        {
+            let _ = File::create(&empty_file).unwrap();
+        }
+
+        let result = load_image(&empty_file);
+        assert!(result.is_err());
+
+        let _ = fs::remove_file(&empty_file);
+    }
 }

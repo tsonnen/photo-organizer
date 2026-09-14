@@ -6,7 +6,11 @@ use std::path::Path;
 
 /// Initializes an ONNX runtime session from a model file.
 pub fn init_clip_session<P: AsRef<Path>>(model_path: P) -> Result<Session> {
-    let session = Session::builder()?.commit_from_file(model_path)?;
+    let p = model_path.as_ref();
+    if !p.exists() {
+        return Err(anyhow::anyhow!("Model file does not exist: {:?}", p));
+    }
+    let session = Session::builder()?.commit_from_file(p)?;
     Ok(session)
 }
 
