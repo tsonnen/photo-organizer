@@ -30,6 +30,7 @@ pub struct PhotoOrganizerApp {
     model_available: bool,
     show_categories_panel: bool,
     target_training_category: String,
+    status_message: Option<(String, egui::Color32)>,
     tx: Sender<ScanMessage>,
     rx: Receiver<ScanMessage>,
 }
@@ -56,6 +57,7 @@ impl PhotoOrganizerApp {
             model_available,
             show_categories_panel: false,
             target_training_category: String::new(),
+            status_message: None,
             tx,
             rx,
         }
@@ -63,6 +65,7 @@ impl PhotoOrganizerApp {
 
     fn start_scan(&mut self, ctx: egui::Context, folder: PathBuf) {
         self.items.clear();
+        self.status_message = None;
         self.is_processing = true;
         let tx = self.tx.clone();
         let profiles = self.profiles.clone();
@@ -87,17 +90,83 @@ impl PhotoOrganizerApp {
     }
 
     pub fn train_selected_as_category(&mut self, category: &str) {
-        if category.trim().is_empty() {
+        let category = category.trim();
+        if category.is_empty() {
+            self.status_message = Some((
+                "Please enter a category name to train.".to_string(),
+                egui::Color32::from_rgb(240, 180, 0),
+            ));
             return;
         }
-        let category = category.trim();
+
+        let selected_count = self.items.iter().filter(|i| i.selected).count();
+        if selected_count == 0 {
+            self.status_message = Some((
+                "No photos selected to train. Check at least one photo.".to_string(),
+                egui::Color32::from_rgb(240, 180, 0),
+            ));
+            return;
+        }
+
+        let mut trained_count = 0;
         for item in &self.items {
             if item.selected && !item.embedding.is_empty() {
                 self.profiles.add_exemplar(category, &item.embedding);
+                trained_count += 1;
             }
         }
-        let _ = self.profiles.save_to_file("profiles.json");
-        self.reclassify_all();
+
+        if trained_count == 0 {
+            self.status_message = Some((
+                format!(
+                    "⚠️ Could not train '{}': Selected photo(s) have no visual embeddings (CLIP model missing). Place clip_visual.onnx in models/",
+                    category
+                ),
+                egui::Color32::from_rgb(240, 70, 70),
+            ));
+        } else {
+            let _ = self.profiles.save_to_file("profiles.json");
+            self.reclassify_all();
+            self.status_message = Some((
+                format!(
+                    "✅ Successfully trained category '{}' from {} photo(s)!",
+                    category, trained_count
+                ),
+                egui::Color32::from_rgb(40, 200, 40),
+            ));
+        }
+    }
+
+    pub fn train_single_item(&mut self, item_index: usize, category: &str) {
+        let category = category.trim();
+        if category.is_empty() {
+            self.status_message = Some((
+                "Category name cannot be empty.".to_string(),
+                egui::Color32::from_rgb(240, 180, 0),
+            ));
+            return;
+        }
+
+        if let Some(item) = self.items.get(item_index) {
+            if item.embedding.is_empty() {
+                self.status_message = Some((
+                    format!(
+                        "⚠️ Cannot train '{}': Photo has no visual embedding (CLIP model missing). Place clip_visual.onnx in models/",
+                        category
+                    ),
+                    egui::Color32::from_rgb(240, 70, 70),
+                ));
+                return;
+            }
+            let emb = item.embedding.clone();
+            self.profiles.add_exemplar(category, &emb);
+            let _ = self.profiles.save_to_file("profiles.json");
+            self.reclassify_all();
+            self.status_message = Some((
+                format!("✅ Successfully trained category '{}' from this photo!", category),
+                egui::Color32::from_rgb(40, 200, 40),
+            ));
+        }
     }
 
     fn execute_transfer(&mut self, mode: TransferMode) {
@@ -187,24 +256,36 @@ impl eframe::App for PhotoOrganizerApp {
 
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("📁 Select Source Folder").clicked() {
+                if ui.button("📁 Source Folder").clicked() {
                     if let Some(p) = rfd::FileDialog::new().pick_folder() {
                         self.input_folder = Some(p.clone());
                         self.start_scan(ctx.clone(), p);
                     }
                 }
-                if ui.button("📂 Select Output Folder").clicked() {
+                if ui.button("📂 Output Folder").clicked() {
                     self.output_folder = rfd::FileDialog::new().pick_folder();
                 }
 
                 ui.separator();
-                if ui.button("🚀 Execute Move").clicked() {
+                if ui.button("☑ All").clicked() {
+                    for item in &mut self.items {
+                        item.selected = true;
+                    }
+                }
+                if ui.button("☐ None").clicked() {
+                    for item in &mut self.items {
+                        item.selected = false;
+                    }
+                }
+
+                ui.separator();
+                if ui.button("🚀 Move").clicked() {
                     self.execute_transfer(TransferMode::Move);
                 }
-                if ui.button("📋 Execute Copy").clicked() {
+                if ui.button("📋 Copy").clicked() {
                     self.execute_transfer(TransferMode::Copy);
                 }
-                if ui.button("↩ Undo Last Run").clicked() {
+                if ui.button("↩ Undo").clicked() {
                     let _ = UndoEngine::rollback_from_file(
                         "last_execution_manifest.json",
                         |_, _, _| {},
@@ -224,9 +305,24 @@ impl eframe::App for PhotoOrganizerApp {
                 if self.is_processing {
                     ui.separator();
                     ui.spinner();
-                    ui.label("Processing photos in parallel...");
+                    ui.label("Processing...");
                 }
             });
+
+            let mut clear_status = false;
+            if let Some((ref msg, color)) = self.status_message {
+                let msg = msg.clone();
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.colored_label(color, &msg);
+                    if ui.small_button("✖").clicked() {
+                        clear_status = true;
+                    }
+                });
+            }
+            if clear_status {
+                self.status_message = None;
+            }
 
             if self.show_categories_panel {
                 ui.separator();
@@ -277,7 +373,7 @@ impl eframe::App for PhotoOrganizerApp {
                 });
 
                 ui.horizontal(|ui| {
-                    ui.label("Add/Train Category from Selected Photos:");
+                    ui.label("Train Category from Selected Photos:");
                     ui.text_edit_singleline(&mut self.target_training_category);
                     if ui.button("🎓 Train Selected").clicked() {
                         let cat = self.target_training_category.clone();
@@ -289,6 +385,8 @@ impl eframe::App for PhotoOrganizerApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
+                let mut single_train_request = None;
+
                 egui::Grid::new("grid")
                     .num_columns(4)
                     .spacing([14.0, 14.0])
@@ -323,16 +421,31 @@ impl eframe::App for PhotoOrganizerApp {
                                     );
                                 });
 
-                                let changed = ui.text_edit_singleline(&mut item.category).changed();
-                                if changed {
-                                    item.source = ClassificationSource::Manual;
-                                }
+                                ui.horizontal(|ui| {
+                                    let changed =
+                                        ui.text_edit_singleline(&mut item.category).changed();
+                                    if changed {
+                                        item.source = ClassificationSource::Manual;
+                                    }
+                                    if ui
+                                        .button("🎓")
+                                        .on_hover_text("Train category from this photo")
+                                        .clicked()
+                                    {
+                                        single_train_request =
+                                            Some((idx, item.category.clone()));
+                                    }
+                                });
                             });
                             if (idx + 1) % 4 == 0 {
                                 ui.end_row();
                             }
                         }
                     });
+
+                if let Some((idx, category)) = single_train_request {
+                    self.train_single_item(idx, &category);
+                }
             });
         });
     }

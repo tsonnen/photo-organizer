@@ -16,6 +16,7 @@ pub fn find_model_path() -> Option<PathBuf> {
     ];
 
     for candidate in &candidate_paths {
+        println!("{:?}", candidate.as_os_str());
         if !candidate.as_os_str().is_empty() && candidate.exists() {
             return Some(candidate.clone());
         }
@@ -41,6 +42,7 @@ pub fn init_clip_session<P: AsRef<Path>>(model_path: P) -> Result<Session> {
 /// Preprocesses the image (resizing to 224x224 and ImageNet normalization),
 /// evaluates the CLIP visual model, and returns an L2-normalized embedding vector.
 pub fn extract_embedding(session: &mut Session, img: &DynamicImage) -> Result<Vec<f32>> {
+    println!("We in the function");
     const IMAGE_HEIGHT: usize = 224;
     const IMAGE_WIDTH: usize = 224;
     const NUM_CHANNELS: usize = 3;
@@ -69,7 +71,7 @@ pub fn extract_embedding(session: &mut Session, img: &DynamicImage) -> Result<Ve
             }
         }
     }
-
+    println!("Embedding is being extracted");
     // Using shape tuple directly avoids ndarray trait version mismatches
     let input_tensor =
         Tensor::from_array((vec![1usize, NUM_CHANNELS, IMAGE_WIDTH, IMAGE_HEIGHT], data))?;
