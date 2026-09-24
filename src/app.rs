@@ -119,7 +119,7 @@ impl PhotoOrganizerApp {
         if trained_count == 0 {
             self.status_message = Some((
                 format!(
-                    "⚠️ Could not train '{}': Selected photo(s) have no visual embeddings (CLIP model missing). Place clip_visual.onnx in models/",
+                    "⚠️ Could not train '{}': Selected photo(s) have no visual embeddings (CLIP model missing). Place clip_vision.safetensors in models/",
                     category
                 ),
                 egui::Color32::from_rgb(240, 70, 70),
@@ -151,7 +151,7 @@ impl PhotoOrganizerApp {
             if item.embedding.is_empty() {
                 self.status_message = Some((
                     format!(
-                        "⚠️ Cannot train '{}': Photo has no visual embedding (CLIP model missing). Place clip_visual.onnx in models/",
+                        "⚠️ Cannot train '{}': Photo has no visual embedding (CLIP model missing). Place clip_vision.safetensors in models/",
                         category
                     ),
                     egui::Color32::from_rgb(240, 70, 70),

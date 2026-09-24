@@ -23,6 +23,7 @@ pub fn find_model_path() -> Option<PathBuf> {
         PathBuf::from("models/model.safetensors"),
         PathBuf::from("../models/clip_vision.safetensors"),
         PathBuf::from("src/models/clip_vision.safetensors"),
+        PathBuf::from("src/models/model.safetensors"),
         std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.join("models/clip_vision.safetensors")))
@@ -34,7 +35,17 @@ pub fn find_model_path() -> Option<PathBuf> {
             return Some(candidate.clone());
         }
     }
+
     None
+}
+
+/// Downloads standard CLIP visual model weights from Hugging Face Hub if not already cached.
+#[allow(dead_code)]
+pub fn download_model_from_hub() -> Result<PathBuf> {
+    let api = hf_hub::api::sync::Api::new().context("Failed to initialize Hugging Face API")?;
+    let repo = api.model("laion/CLIP-ViT-B-32-laion2B-s34B-b79K".to_string());
+    let path = repo.get("model.safetensors").context("Failed to download CLIP model from Hugging Face Hub")?;
+    Ok(path)
 }
 
 /// Checks if a valid CLIP visual model is reachable.
