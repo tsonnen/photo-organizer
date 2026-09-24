@@ -112,24 +112,6 @@ impl ProfileStore {
         Ok(())
     }
 
-    pub fn add_or_update_category(&mut self, name: &str, centroid: Vec<f32>, sample_count: usize) {
-        let norm_centroid = normalize_vector(&centroid);
-        if let Some(existing) = self
-            .profiles
-            .iter_mut()
-            .find(|p| p.name.eq_ignore_ascii_case(name))
-        {
-            existing.centroid = norm_centroid;
-            existing.sample_count = sample_count;
-        } else {
-            self.profiles.push(CategoryProfile {
-                name: name.to_string(),
-                centroid: norm_centroid,
-                sample_count,
-            });
-        }
-    }
-
     pub fn remove_category(&mut self, name: &str) -> bool {
         let initial_len = self.profiles.len();
         self.profiles.retain(|p| !p.name.eq_ignore_ascii_case(name));
@@ -416,7 +398,11 @@ mod tests {
         let file_path = temp_dir.join(format!("test_profiles_{}.json", std::process::id()));
 
         let mut store = ProfileStore::default();
-        store.add_or_update_category("Sunsets", vec![0.8, 0.6], 3);
+        store.profiles.push(CategoryProfile {
+            name: "Sunsets".to_string(),
+            centroid: vec![0.8, 0.6],
+            sample_count: 3,
+        });
         store.confidence_threshold = 0.72;
 
         store.save_to_file(&file_path).expect("save profiles");
