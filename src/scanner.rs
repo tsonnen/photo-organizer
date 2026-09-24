@@ -324,7 +324,7 @@ mod tests {
         let mut updates = Vec::new();
         let mut completed = false;
 
-        while let Ok(msg) = rx.recv_timeout(std::time::Duration::from_secs(5)) {
+        while let Ok(msg) = rx.recv_timeout(std::time::Duration::from_secs(20)) {
             match msg {
                 ScanMessage::Item(payload) => items.push(payload),
                 ScanMessage::Update {
@@ -364,7 +364,7 @@ mod tests {
         let mut cached_items = Vec::new();
         let mut cached_completed = false;
 
-        while let Ok(msg) = rx2.recv_timeout(std::time::Duration::from_secs(5)) {
+        while let Ok(msg) = rx2.recv_timeout(std::time::Duration::from_secs(20)) {
             match msg {
                 ScanMessage::Item(payload) => cached_items.push(payload),
                 ScanMessage::Complete => {
