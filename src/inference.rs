@@ -429,6 +429,16 @@ mod tests {
     #[test]
     fn test_init_clip_session_real_file() {
         if let Some(path) = find_model_path() {
+            // Skip if the file is a Git LFS pointer (tiny stub, not the real model).
+            // A real SafeTensors model is at least several MB; LFS pointers are ~130 bytes.
+            let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            if file_size < 1024 {
+                println!(
+                    "Skipping test: model file {:?} appears to be a Git LFS pointer ({} bytes)",
+                    path, file_size
+                );
+                return;
+            }
             println!("Testing real model load from {:?}", path);
             let session = init_clip_session(&path).expect("Failed to initialize clip session");
             let dummy_img = DynamicImage::new_rgb8(100, 100);
