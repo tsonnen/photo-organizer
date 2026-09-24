@@ -8,8 +8,8 @@ flowchart TD
     B --> C["SQLite Photo Cache"]
     C -->|"Cache Hit (Embedding & Thumbnail)"| G["Classifier"]
     C -->|"Cache Miss"| D["Decode Image & Generate Thumbnail"]
-    D --> E{"CLIP Visual ONNX Model Available?"}
-    E -->|"Yes"| F1["Extract L2-Normalized Embedding Vector"]
+    D --> E{"Candle CLIP Vision Model Available?"}
+    E -->|"Yes (SafeTensors)"| F1["Extract L2-Normalized Embedding Vector"]
     E -->|"No"| F2["Empty Embedding (Graceful Fallback)"]
     F1 --> F3["Cache in SQLite"]
     F3 --> G

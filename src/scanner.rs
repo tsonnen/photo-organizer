@@ -103,10 +103,7 @@ pub fn scan_folder_with_db(
 
         let db = Arc::new(Mutex::new(Database::init(&db_path).ok()));
         let model_path = find_model_path();
-        println!("{:?}", model_path);
-        let session = Arc::new(Mutex::new(
-            model_path.and_then(|p| init_clip_session(p).ok()),
-        ));
+        let session = Arc::new(model_path.and_then(|p| init_clip_session(p).ok()));
 
         paths.par_iter().for_each(|path| {
             let file_hash = Database::compute_file_hash(path).unwrap_or_default();
@@ -191,16 +188,11 @@ pub fn scan_folder_with_db(
             }));
             ctx.request_repaint();
 
-           // 3. Extract embedding in background
-            let emb = {
-                let mut sess_guard = session.lock().unwrap();
-                if let Some(ref mut sess) = *sess_guard {
-                    println!("in the dew");
-                    extract_embedding(sess, &dyn_img).unwrap_or_default()
-                } else {
-                    println!("not in the dew");
-                    Vec::new()
-                }
+            // 3. Extract embedding in background
+            let emb = if let Some(ref sess) = *session {
+                extract_embedding(sess, &dyn_img).unwrap_or_default()
+            } else {
+                Vec::new()
             };
 
             let class_res = profiles.classify_with_heuristics(

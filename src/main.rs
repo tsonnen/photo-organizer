@@ -11,7 +11,6 @@ use app::PhotoOrganizerApp;
 use eframe::egui;
 
 fn main() -> eframe::Result<()> {
-    let _ = ort::init().commit();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1240.0, 840.0])
