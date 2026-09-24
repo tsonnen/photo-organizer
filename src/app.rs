@@ -73,6 +73,8 @@ impl PhotoOrganizerApp {
     }
 
     pub fn reclassify_all(&mut self) {
+        let mut visual_count = 0;
+        let total_count = self.items.len();
         for item in &mut self.items {
             let width = item.texture.size()[0] as u32;
             let height = item.texture.size()[1] as u32;
@@ -83,9 +85,24 @@ impl PhotoOrganizerApp {
                 width,
                 height,
             );
+            if res.source == crate::profile_store::ClassificationSource::VisualModel {
+                visual_count += 1;
+            }
             item.category = res.category;
             item.confidence = res.confidence;
             item.source = res.source;
+        }
+        if total_count > 0 {
+            self.status_message = Some((
+                format!(
+                    "⚡ Re-classified {} photo(s) ({} visual AI match(es), {} active category profile(s), threshold {:.2})",
+                    total_count,
+                    visual_count,
+                    self.profiles.profiles.len(),
+                    self.profiles.confidence_threshold
+                ),
+                egui::Color32::from_rgb(180, 220, 255),
+            ));
         }
     }
 
@@ -347,6 +364,7 @@ impl eframe::App for PhotoOrganizerApp {
 
                     if threshold_changed {
                         let _ = self.profiles.save_to_file("profiles.json");
+                        self.reclassify_all();
                     }
 
                     if ui.button("⚡ Re-classify All").clicked() {

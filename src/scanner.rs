@@ -118,7 +118,33 @@ pub fn scan_folder_with_db(
                 }
             };
 
-            if let Some(c) = cached {
+            if let Some(mut c) = cached {
+                // If photo was previously cached without embedding, backfill it now
+                if c.embedding.is_empty() {
+                    if let Some(ref sess) = *session {
+                        if let Ok(dyn_img) = load_image(path) {
+                            if let Ok(emb) = extract_embedding(sess, &dyn_img) {
+                                if !emb.is_empty() {
+                                    c.embedding = emb.clone();
+                                    let db_guard = db.lock().unwrap();
+                                    if let Some(ref db_conn) = *db_guard {
+                                        let _ = db_conn.insert_cache(
+                                            &file_hash,
+                                            &CachedPhotoData {
+                                                year: c.year,
+                                                month: c.month,
+                                                is_exif_date: c.is_exif_date,
+                                                embedding: emb,
+                                                thumbnail: c.thumbnail.clone(),
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let (w, h) = if let Some(ref thumb) = c.thumbnail {
                     (thumb.width, thumb.height)
                 } else {
