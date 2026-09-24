@@ -28,7 +28,11 @@ impl OpenClipAttention {
         let in_proj_weights = vs
             .get((embed_dim * 3, embed_dim), "in_proj_weight")?
             .chunk(3, 0)?;
-        let (q_w, k_w, v_w) = (&in_proj_weights[0], &in_proj_weights[1], &in_proj_weights[2]);
+        let (q_w, k_w, v_w) = (
+            &in_proj_weights[0],
+            &in_proj_weights[1],
+            &in_proj_weights[2],
+        );
 
         let (q_b, k_b, v_b) = if vs.contains_tensor("in_proj_bias") {
             let in_proj_biases = vs.get(embed_dim * 3, "in_proj_bias")?.chunk(3, 0)?;
@@ -379,8 +383,11 @@ pub fn extract_embedding(session: &ClipVisionSession, img: &DynamicImage) -> Res
         }
     }
 
-    let input_tensor =
-        Tensor::from_vec(data, (1, NUM_CHANNELS, IMAGE_HEIGHT, IMAGE_WIDTH), &session.device)?;
+    let input_tensor = Tensor::from_vec(
+        data,
+        (1, NUM_CHANNELS, IMAGE_HEIGHT, IMAGE_WIDTH),
+        &session.device,
+    )?;
 
     let embedding = match &session.backend {
         ModelBackend::OpenClip(model) => model.forward(&input_tensor)?,
@@ -428,7 +435,11 @@ mod tests {
             let emb = extract_embedding(&session, &dummy_img).expect("Failed to extract embedding");
             assert_eq!(emb.len(), 512);
             let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
-            println!("Embedding extracted with length {} and norm {:.6}", emb.len(), norm);
+            println!(
+                "Embedding extracted with length {} and norm {:.6}",
+                emb.len(),
+                norm
+            );
             assert!((norm - 1.0).abs() < 1e-4);
         }
     }

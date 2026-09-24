@@ -487,24 +487,14 @@ mod tests {
         assert_eq!(res1.source, ClassificationSource::VisualModel);
 
         // 2. Visual below threshold or missing, falls back to heuristic
-        let res2 = store.classify_with_heuristics(
-            &[],
-            Path::new("my_screenshot.png"),
-            false,
-            1920,
-            1080,
-        );
+        let res2 =
+            store.classify_with_heuristics(&[], Path::new("my_screenshot.png"), false, 1920, 1080);
         assert_eq!(res2.category, "Screenshots");
         assert_eq!(res2.source, ClassificationSource::Heuristic);
 
         // 3. Neither matches -> Unsorted
-        let res3 = store.classify_with_heuristics(
-            &[],
-            Path::new("unknown_file.xyz"),
-            false,
-            500,
-            500,
-        );
+        let res3 =
+            store.classify_with_heuristics(&[], Path::new("unknown_file.xyz"), false, 500, 500);
         assert_eq!(res3.category, "Unsorted");
         assert_eq!(res3.source, ClassificationSource::UnsortedFallback);
     }

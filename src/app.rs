@@ -44,8 +44,8 @@ impl Default for PhotoOrganizerApp {
 impl PhotoOrganizerApp {
     pub fn new() -> Self {
         let (tx, rx) = channel();
-        let profiles =
-            ProfileStore::load_from_file("profiles.json").unwrap_or_else(|_| ProfileStore::default());
+        let profiles = ProfileStore::load_from_file("profiles.json")
+            .unwrap_or_else(|_| ProfileStore::default());
         let model_available = is_model_available();
 
         Self {
@@ -180,7 +180,10 @@ impl PhotoOrganizerApp {
             let _ = self.profiles.save_to_file("profiles.json");
             self.reclassify_all();
             self.status_message = Some((
-                format!("✅ Successfully trained category '{}' from this photo!", category),
+                format!(
+                    "✅ Successfully trained category '{}' from this photo!",
+                    category
+                ),
                 egui::Color32::from_rgb(40, 200, 40),
             ));
         }
@@ -435,7 +438,11 @@ impl eframe::App for PhotoOrganizerApp {
                                     };
                                     ui.colored_label(
                                         badge_color,
-                                        format!("{:.0}% [{}]", item.confidence * 100.0, item.source),
+                                        format!(
+                                            "{:.0}% [{}]",
+                                            item.confidence * 100.0,
+                                            item.source
+                                        ),
                                     );
                                 });
 
@@ -450,8 +457,7 @@ impl eframe::App for PhotoOrganizerApp {
                                         .on_hover_text("Train category from this photo")
                                         .clicked()
                                     {
-                                        single_train_request =
-                                            Some((idx, item.category.clone()));
+                                        single_train_request = Some((idx, item.category.clone()));
                                     }
                                 });
                             });
