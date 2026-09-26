@@ -61,7 +61,7 @@ jobs:
         run: |
           cd target/${{ matrix.target }}/release
           cp ${{ matrix.binary_name }} ${{ matrix.asset_name }}
-          tar -czf ${{ matrix.archive_name }} ${{ matrix.binary_name }}
+          tar -czf ${{ matrix.archive_name }} ${{ matrix.binary_name }} models
           cp ${{ matrix.asset_name }} ${{ github.workspace }}/
           cp ${{ matrix.archive_name }} ${{ github.workspace }}/
 
@@ -71,7 +71,7 @@ jobs:
         run: |
           cd target/${{ matrix.target }}/release
           Copy-Item ${{ matrix.binary_name }} -Destination ${{ matrix.asset_name }}
-          Compress-Archive -Path ${{ matrix.binary_name }} -DestinationPath ${{ matrix.archive_name }}
+          Compress-Archive -Path ${{ matrix.binary_name }}, models -DestinationPath ${{ matrix.archive_name }}
           Copy-Item ${{ matrix.asset_name }} -Destination ${{ github.workspace }}
           Copy-Item ${{ matrix.archive_name }} -Destination ${{ github.workspace }}
 
