@@ -404,73 +404,113 @@ impl eframe::App for PhotoOrganizerApp {
             }
         });
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                let mut single_train_request = None;
-
-                egui::Grid::new("grid")
-                    .num_columns(4)
-                    .spacing([14.0, 14.0])
+        let panel_frame = egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin {
+            left: 8.0,
+            right: 0.0,
+            top: 8.0,
+            bottom: 8.0,
+        });
+        egui::CentralPanel::default()
+            .frame(panel_frame)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
                     .show(ui, |ui| {
-                        for (idx, item) in self.items.iter_mut().enumerate() {
-                            ui.vertical(|ui| {
-                                ui.image(&item.texture);
-                                ui.checkbox(
-                                    &mut item.selected,
-                                    item.source_path.file_name().unwrap().to_str().unwrap(),
-                                );
+                        const SPACING: f32 = 14.0;
+                        const MIN_ITEM_WIDTH: f32 = 240.0;
+                        const MAX_ITEM_WIDTH: f32 = 350.0;
 
-                                ui.horizontal(|ui| {
-                                    ui.label(format!("{}/{:02}", item.year, item.month));
-                                    let badge_color = match item.source {
-                                        ClassificationSource::VisualModel => {
-                                            egui::Color32::from_rgb(0, 180, 0)
-                                        }
-                                        ClassificationSource::Heuristic => {
-                                            egui::Color32::from_rgb(0, 150, 220)
-                                        }
-                                        ClassificationSource::Manual => {
-                                            egui::Color32::from_rgb(180, 100, 220)
-                                        }
-                                        ClassificationSource::UnsortedFallback => {
-                                            egui::Color32::GRAY
-                                        }
-                                    };
-                                    ui.colored_label(
-                                        badge_color,
-                                        format!(
-                                            "{:.0}% [{}]",
-                                            item.confidence * 100.0,
-                                            item.source
-                                        ),
-                                    );
-                                });
+                        let mut single_train_request = None;
+                        let available_width = ui.available_width();
+                        let number_columns = ((available_width) / (MIN_ITEM_WIDTH + SPACING))
+                            .floor()
+                            .max(1.0) as usize;
+                        let item_width = ((available_width
+                            - (number_columns as f32 - 1.0) * SPACING)
+                            / number_columns as f32)
+                            .clamp(MIN_ITEM_WIDTH, MAX_ITEM_WIDTH);
+                        egui::Grid::new("grid")
+                            .num_columns(number_columns)
+                            .spacing([SPACING, SPACING])
+                            .show(ui, |ui| {
+                                for (idx, item) in self.items.iter_mut().enumerate() {
+                                    ui.vertical(|ui| {
+                                        let tex_size = item.texture.size_vec2();
+                                        let aspect = tex_size.y / tex_size.x;
+                                        let scaled_height = item_width * aspect;
+                                        ui.image(egui::load::SizedTexture::new(
+                                            item.texture.id(),
+                                            [item_width, scaled_height],
+                                        ));
+                                        ui.checkbox(
+                                            &mut item.selected,
+                                            item.source_path.file_name().unwrap().to_str().unwrap(),
+                                        );
 
-                                ui.horizontal(|ui| {
-                                    let changed =
-                                        ui.text_edit_singleline(&mut item.category).changed();
-                                    if changed {
-                                        item.source = ClassificationSource::Manual;
+                                        ui.horizontal(|ui| {
+                                            ui.label(format!("{}/{:02}", item.year, item.month));
+                                            let badge_color = match item.source {
+                                                ClassificationSource::VisualModel => {
+                                                    egui::Color32::from_rgb(0, 180, 0)
+                                                }
+                                                ClassificationSource::Heuristic => {
+                                                    egui::Color32::from_rgb(0, 150, 220)
+                                                }
+                                                ClassificationSource::Manual => {
+                                                    egui::Color32::from_rgb(180, 100, 220)
+                                                }
+                                                ClassificationSource::UnsortedFallback => {
+                                                    egui::Color32::GRAY
+                                                }
+                                            };
+                                            ui.colored_label(
+                                                badge_color,
+                                                format!(
+                                                    "{:.0}% [{}]",
+                                                    item.confidence * 100.0,
+                                                    item.source
+                                                ),
+                                            );
+                                        });
+
+                                        ui.horizontal(|ui| {
+                                            let button_dimension = 20.0;
+                                            let category_input_width =
+                                                item_width - button_dimension - (SPACING * 2.0);
+                                            println!("categoryWidth {}", category_input_width);
+                                            // Set desired_width explicitly on the TextEdit builder
+                                            let category_input = ui.add(
+                                                egui::TextEdit::singleline(&mut item.category)
+                                                    .desired_width(category_input_width), // Set whatever smaller width you need here
+                                            );
+
+                                            if category_input.changed() {
+                                                item.source = ClassificationSource::Manual;
+                                            }
+
+                                            if ui
+                                                .add_sized(
+                                                    [button_dimension, button_dimension],
+                                                    egui::Button::new("🎓"),
+                                                )
+                                                .on_hover_text("Train category from this photo")
+                                                .clicked()
+                                            {
+                                                single_train_request =
+                                                    Some((idx, item.category.clone()));
+                                            }
+                                        });
+                                    });
+                                    if (idx + 1) % number_columns == 0 {
+                                        ui.end_row();
                                     }
-                                    if ui
-                                        .button("🎓")
-                                        .on_hover_text("Train category from this photo")
-                                        .clicked()
-                                    {
-                                        single_train_request = Some((idx, item.category.clone()));
-                                    }
-                                });
+                                }
                             });
-                            if (idx + 1) % 4 == 0 {
-                                ui.end_row();
-                            }
+
+                        if let Some((idx, category)) = single_train_request {
+                            self.train_single_item(idx, &category);
                         }
                     });
-
-                if let Some((idx, category)) = single_train_request {
-                    self.train_single_item(idx, &category);
-                }
             });
-        });
     }
 }

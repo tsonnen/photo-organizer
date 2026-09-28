@@ -13,7 +13,8 @@ use eframe::egui;
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1240.0, 840.0])
+            .with_inner_size([1240.0, 900.0])
+            .with_min_inner_size([1240.0, 900.0])
             .with_title("Photo Organizer - Integrated Suite"),
         ..Default::default()
     };
