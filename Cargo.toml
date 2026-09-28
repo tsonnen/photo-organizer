@@ -11,7 +11,7 @@ candle-core = "0.8"
 candle-nn = "0.8"
 candle-transformers = "0.8"
 hf-hub = "0.3"
-image = "0.24"
+image = "0.25"
 kamadak_exif = {package = "kamadak-exif", version = "0.5" }
 chrono = { version = "0.4", features = ["serde"] }
 anyhow = "1.0"
