@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-eframe = "0.27"
-egui = "0.27"
+eframe = "0.36"
+egui = "0.36"
 rfd = "0.17"
 candle-core = "0.8"
 candle-nn = "0.8"
