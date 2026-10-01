@@ -351,7 +351,7 @@ impl PhotoOrganizerApp {
 
         let screen_rect = ctx.screen_rect();
         let item_count = self.items.len();
-        let is_loading = self.modal_preview.as_ref().map_or(false, |m| m.is_loading);
+        let is_loading = self.modal_preview.as_ref().is_some_and(|m| m.is_loading);
         let high_res_tex = self
             .modal_preview
             .as_ref()
