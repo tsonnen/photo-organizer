@@ -341,6 +341,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f32::consts::FRAC_1_SQRT_2;
 
     #[test]
     fn test_cosine_similarity() {
@@ -550,7 +551,7 @@ mod tests {
             profiles: vec![
                 CategoryProfile::new("Portrait", vec![0.0, 1.0, 0.0]),
                 CategoryProfile::new("Landscape", vec![1.0, 0.0, 0.0]),
-                CategoryProfile::new("Sunset", vec![0.7071, 0.7071, 0.0]),
+                CategoryProfile::new("Sunset", vec![FRAC_1_SQRT_2, FRAC_1_SQRT_2, 0.0]),
             ],
             confidence_threshold: 0.65,
         };
@@ -558,7 +559,7 @@ mod tests {
         // Query vector is close to Landscape [1.0, 0.0, 0.0]
         // Cosine similarities:
         // Landscape: ~1.0
-        // Sunset: ~0.7071
+        // Sunset: ~0.7071 (FRAC_1_SQRT_2)
         // Portrait: 0.0
         let query = vec![0.98, 0.02, 0.0];
         let ranked = store.rank_profiles(&query);
@@ -567,7 +568,7 @@ mod tests {
         assert_eq!(ranked[0].name, "Landscape");
         assert!(ranked[0].confidence > 0.95);
         assert_eq!(ranked[1].name, "Sunset");
-        assert!((ranked[1].confidence - 0.7071).abs() < 0.05);
+        assert!((ranked[1].confidence - FRAC_1_SQRT_2).abs() < 0.05);
         assert_eq!(ranked[2].name, "Portrait");
         assert!(ranked[2].confidence < 0.05);
     }
