@@ -371,6 +371,12 @@ impl PhotoOrganizerApp {
             .order(egui::Order::Foreground)
             .fixed_pos(screen_rect.min)
             .show(ctx, |ui| {
+                let modal_w = (screen_rect.width() * 0.85).clamp(500.0, 1100.0);
+                let modal_h = (screen_rect.height() * 0.85).clamp(400.0, 800.0);
+                let modal_rect = egui::Rect::from_center_size(
+                    screen_rect.center(),
+                    egui::vec2(modal_w, modal_h),
+                );
                 // 1. Dark translucent masking backdrop
                 let (backdrop_rect, backdrop_resp) =
                     ui.allocate_exact_size(screen_rect.size(), egui::Sense::click());
@@ -378,17 +384,15 @@ impl PhotoOrganizerApp {
                     .rect_filled(backdrop_rect, 0.0, egui::Color32::from_black_alpha(200));
 
                 if backdrop_resp.clicked() {
-                    close_modal = true;
+                    // Only close if the click occurred outside the modal card bounds
+                    if let Some(interact_pos) = backdrop_resp.interact_pointer_pos() {
+                        if !modal_rect.contains(interact_pos) {
+                            close_modal = true;
+                        }
+                    }
                 }
 
                 // 2. Centered Modal Card Container
-                let modal_w = (screen_rect.width() * 0.85).clamp(500.0, 1100.0);
-                let modal_h = (screen_rect.height() * 0.85).clamp(400.0, 800.0);
-                let modal_rect = egui::Rect::from_center_size(
-                    screen_rect.center(),
-                    egui::vec2(modal_w, modal_h),
-                );
-
                 ui.allocate_ui_at_rect(modal_rect, |ui| {
                     egui::Frame::window(&ctx.style())
                         .rounding(8.0)
