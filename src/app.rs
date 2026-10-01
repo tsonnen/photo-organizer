@@ -252,7 +252,7 @@ impl PhotoOrganizerApp {
         let has_embedding = !item.embedding.is_empty();
         let selected_label = Self::category_label(item, &ranked_profiles);
 
-        let mut combo = egui::ComboBox::from_id_source(combo_id);
+        let mut combo = egui::ComboBox::from_id_salt(combo_id);
         if let Some(w) = combo_width {
             combo = combo.width(w);
         }
@@ -450,7 +450,7 @@ impl PhotoOrganizerApp {
                 }
 
                 // 2. Centered Modal Card Container
-                ui.allocate_ui_at_rect(modal_rect, |ui| {
+                ui.scope_builder(egui::UiBuilder::new().max_rect(modal_rect), |ui| {
                     egui::Frame::window(&ctx.style())
                         .rounding(8.0)
                         .show(ui, |ui| {
