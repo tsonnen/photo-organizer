@@ -527,61 +527,59 @@ impl eframe::App for PhotoOrganizerApp {
                                         };
 
                                         let button_dimension = 20.0;
-                                        let combo_width = (item_width
-                                            - button_dimension
-                                            - (SPACING * 2.0))
-                                            .max(60.0);
+                                        let combo_width =
+                                            (item_width - button_dimension - (SPACING * 2.0))
+                                                .max(60.0);
 
                                         ui.horizontal(|ui| {
-                                            egui::ComboBox::from_id_source(
-                                                ui.make_persistent_id((
-                                                    "cat_combo",
-                                                    idx,
-                                                    &item.source_path,
-                                                )),
-                                            )
+                                            egui::ComboBox::from_id_source(ui.make_persistent_id(
+                                                ("cat_combo", idx, &item.source_path),
+                                            ))
                                             .width(combo_width)
                                             .selected_text(&selected_label)
-                                            .show_ui(ui, |ui| {
-                                                for prof in &ranked_profiles {
-                                                    let is_selected = !item.is_custom
-                                                        && item
-                                                            .category
-                                                            .eq_ignore_ascii_case(&prof.name);
-                                                    let label = if has_embedding {
-                                                        format!(
-                                                            "{} ({:.0}%)",
-                                                            prof.name,
-                                                            prof.confidence * 100.0
-                                                        )
-                                                    } else {
-                                                        prof.name.clone()
-                                                    };
+                                            .show_ui(
+                                                ui,
+                                                |ui| {
+                                                    for prof in &ranked_profiles {
+                                                        let is_selected = !item.is_custom
+                                                            && item
+                                                                .category
+                                                                .eq_ignore_ascii_case(&prof.name);
+                                                        let label = if has_embedding {
+                                                            format!(
+                                                                "{} ({:.0}%)",
+                                                                prof.name,
+                                                                prof.confidence * 100.0
+                                                            )
+                                                        } else {
+                                                            prof.name.clone()
+                                                        };
+                                                        if ui
+                                                            .selectable_label(is_selected, label)
+                                                            .clicked()
+                                                        {
+                                                            item.category = prof.name.clone();
+                                                            item.confidence = prof.confidence;
+                                                            item.source =
+                                                                ClassificationSource::Manual;
+                                                            item.is_custom = false;
+                                                        }
+                                                    }
+
+                                                    if !ranked_profiles.is_empty() {
+                                                        ui.separator();
+                                                    }
+
+                                                    let other_selected = item.is_custom;
                                                     if ui
-                                                        .selectable_label(is_selected, label)
+                                                        .selectable_label(other_selected, "Other")
                                                         .clicked()
                                                     {
-                                                        item.category = prof.name.clone();
-                                                        item.confidence = prof.confidence;
-                                                        item.source =
-                                                            ClassificationSource::Manual;
-                                                        item.is_custom = false;
+                                                        item.is_custom = true;
+                                                        item.source = ClassificationSource::Manual;
                                                     }
-                                                }
-
-                                                if !ranked_profiles.is_empty() {
-                                                    ui.separator();
-                                                }
-
-                                                let other_selected = item.is_custom;
-                                                if ui
-                                                    .selectable_label(other_selected, "Other")
-                                                    .clicked()
-                                                {
-                                                    item.is_custom = true;
-                                                    item.source = ClassificationSource::Manual;
-                                                }
-                                            });
+                                                },
+                                            );
 
                                             if ui
                                                 .add_sized(
