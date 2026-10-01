@@ -19,6 +19,7 @@ pub struct StagedItem {
     pub embedding: Vec<f32>,
     pub texture: egui::TextureHandle,
     pub selected: bool,
+    pub is_custom: bool,
 }
 
 pub struct PhotoOrganizerApp {
@@ -76,6 +77,14 @@ impl PhotoOrganizerApp {
         let mut visual_count = 0;
         let total_count = self.items.len();
         for item in &mut self.items {
+            if item.source == ClassificationSource::Manual {
+                item.is_custom = !self
+                    .profiles
+                    .profiles
+                    .iter()
+                    .any(|p| p.name.eq_ignore_ascii_case(&item.category));
+                continue;
+            }
             let width = item.texture.size()[0] as u32;
             let height = item.texture.size()[1] as u32;
             let res = self.profiles.classify_with_heuristics(
@@ -88,6 +97,11 @@ impl PhotoOrganizerApp {
             if res.source == crate::profile_store::ClassificationSource::VisualModel {
                 visual_count += 1;
             }
+            item.is_custom = !self
+                .profiles
+                .profiles
+                .iter()
+                .any(|p| p.name.eq_ignore_ascii_case(&res.category));
             item.category = res.category;
             item.confidence = res.confidence;
             item.source = res.source;
@@ -234,6 +248,12 @@ impl eframe::App for PhotoOrganizerApp {
                     let texture =
                         ctx.load_texture(filename, payload.image, egui::TextureOptions::LINEAR);
 
+                    let is_custom = !self
+                        .profiles
+                        .profiles
+                        .iter()
+                        .any(|p| p.name.eq_ignore_ascii_case(&payload.category));
+
                     self.items.push(StagedItem {
                         source_path: payload.source_path,
                         year: payload.year,
@@ -245,6 +265,7 @@ impl eframe::App for PhotoOrganizerApp {
                         embedding: payload.embedding,
                         texture,
                         selected: true,
+                        is_custom,
                     });
                 }
                 ScanMessage::Update {
@@ -259,13 +280,22 @@ impl eframe::App for PhotoOrganizerApp {
                 } => {
                     if let Some(item) = self.items.iter_mut().find(|i| i.source_path == source_path)
                     {
-                        item.year = year;
-                        item.month = month;
-                        item.is_exif = is_exif;
-                        item.category = category;
-                        item.confidence = confidence;
-                        item.source = source;
-                        item.embedding = embedding;
+                        if item.source != ClassificationSource::Manual {
+                            item.year = year;
+                            item.month = month;
+                            item.is_exif = is_exif;
+                            item.category = category.clone();
+                            item.confidence = confidence;
+                            item.source = source;
+                            item.embedding = embedding;
+                            item.is_custom = !self
+                                .profiles
+                                .profiles
+                                .iter()
+                                .any(|p| p.name.eq_ignore_ascii_case(&category));
+                        } else {
+                            item.embedding = embedding;
+                        }
                     }
                 }
                 ScanMessage::Complete => {
@@ -473,20 +503,83 @@ impl eframe::App for PhotoOrganizerApp {
                                             );
                                         });
 
-                                        ui.horizontal(|ui| {
-                                            let button_dimension = 20.0;
-                                            let category_input_width =
-                                                item_width - button_dimension - (SPACING * 2.0);
-                                            println!("categoryWidth {}", category_input_width);
-                                            // Set desired_width explicitly on the TextEdit builder
-                                            let category_input = ui.add(
-                                                egui::TextEdit::singleline(&mut item.category)
-                                                    .desired_width(category_input_width), // Set whatever smaller width you need here
-                                            );
+                                        let ranked_profiles =
+                                            self.profiles.rank_profiles(&item.embedding);
+                                        let has_embedding = !item.embedding.is_empty();
 
-                                            if category_input.changed() {
-                                                item.source = ClassificationSource::Manual;
+                                        let selected_label = if item.is_custom {
+                                            "Other".to_string()
+                                        } else if let Some(matching) = ranked_profiles
+                                            .iter()
+                                            .find(|p| p.name.eq_ignore_ascii_case(&item.category))
+                                        {
+                                            if has_embedding {
+                                                format!(
+                                                    "{} ({:.0}%)",
+                                                    matching.name,
+                                                    matching.confidence * 100.0
+                                                )
+                                            } else {
+                                                matching.name.clone()
                                             }
+                                        } else {
+                                            "Other".to_string()
+                                        };
+
+                                        let button_dimension = 20.0;
+                                        let combo_width =
+                                            (item_width - button_dimension - (SPACING * 2.0))
+                                                .max(60.0);
+
+                                        ui.horizontal(|ui| {
+                                            egui::ComboBox::from_id_source(ui.make_persistent_id(
+                                                ("cat_combo", idx, &item.source_path),
+                                            ))
+                                            .width(combo_width)
+                                            .selected_text(&selected_label)
+                                            .show_ui(
+                                                ui,
+                                                |ui| {
+                                                    for prof in &ranked_profiles {
+                                                        let is_selected = !item.is_custom
+                                                            && item
+                                                                .category
+                                                                .eq_ignore_ascii_case(&prof.name);
+                                                        let label = if has_embedding {
+                                                            format!(
+                                                                "{} ({:.0}%)",
+                                                                prof.name,
+                                                                prof.confidence * 100.0
+                                                            )
+                                                        } else {
+                                                            prof.name.clone()
+                                                        };
+                                                        if ui
+                                                            .selectable_label(is_selected, label)
+                                                            .clicked()
+                                                        {
+                                                            item.category = prof.name.clone();
+                                                            item.confidence = prof.confidence;
+                                                            item.source =
+                                                                ClassificationSource::Manual;
+                                                            item.is_custom = false;
+                                                        }
+                                                    }
+
+                                                    if !ranked_profiles.is_empty() {
+                                                        ui.separator();
+                                                    }
+
+                                                    let other_selected = item.is_custom;
+                                                    if ui
+                                                        .selectable_label(other_selected, "Other")
+                                                        .clicked()
+                                                    {
+                                                        item.is_custom = true;
+                                                        item.source = ClassificationSource::Manual;
+                                                    }
+                                                },
+                                            );
 
                                             if ui
                                                 .add_sized(
@@ -500,6 +593,21 @@ impl eframe::App for PhotoOrganizerApp {
                                                     Some((idx, item.category.clone()));
                                             }
                                         });
+
+                                        if item.is_custom {
+                                            ui.horizontal(|ui| {
+                                                let category_input_width =
+                                                    (item_width - (SPACING * 2.0)).max(60.0);
+                                                let category_input = ui.add(
+                                                    egui::TextEdit::singleline(&mut item.category)
+                                                        .hint_text("Custom category...")
+                                                        .desired_width(category_input_width),
+                                                );
+                                                if category_input.changed() {
+                                                    item.source = ClassificationSource::Manual;
+                                                }
+                                            });
+                                        }
                                     });
                                     if (idx + 1) % number_columns == 0 {
                                         ui.end_row();
