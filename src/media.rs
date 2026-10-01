@@ -92,6 +92,22 @@ pub fn cached_thumb_to_egui(thumb: &CachedThumbnail) -> egui::ColorImage {
     egui::ColorImage::from_rgba_unmultiplied(size, &thumb.rgba)
 }
 
+/// Converts a DynamicImage to an egui::ColorImage suitable for high-res modal preview,
+/// scaling down to fit within `max_edge` while preserving aspect ratio.
+pub fn dynamic_to_preview_color_image(img: &DynamicImage, max_edge: u32) -> egui::ColorImage {
+    let (orig_w, orig_h) = (img.width(), img.height());
+    let preview = if orig_w > max_edge || orig_h > max_edge {
+        img.thumbnail(max_edge, max_edge).to_rgba8()
+    } else {
+        img.to_rgba8()
+    };
+    let width = preview.width() as usize;
+    let height = preview.height() as usize;
+    let rgba = preview.into_raw();
+    egui::ColorImage::from_rgba_unmultiplied([width, height], &rgba)
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,4 +216,18 @@ mod tests {
 
         let _ = fs::remove_file(&empty_file);
     }
+
+    #[test]
+    fn test_dynamic_to_preview_color_image() {
+        // Large image (4000x2000) scaled to 1000 max edge
+        let large_img = DynamicImage::ImageRgb8(image::RgbImage::new(4000, 2000));
+        let preview = dynamic_to_preview_color_image(&large_img, 1000);
+        assert_eq!(preview.size, [1000, 500]);
+
+        // Small image (300x200) below max edge should retain original dimensions
+        let small_img = DynamicImage::ImageRgb8(image::RgbImage::new(300, 200));
+        let small_preview = dynamic_to_preview_color_image(&small_img, 1000);
+        assert_eq!(small_preview.size, [300, 200]);
+    }
 }
+
