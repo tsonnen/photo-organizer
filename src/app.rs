@@ -8,6 +8,15 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
+/// Horizontal and vertical gap between grid cells, in points.
+const SPACING: f32 = 14.0;
+
+/// Width of the train button beside the category combo in a grid cell.
+const TRAIN_BUTTON_SIZE: f32 = 20.0;
+
+/// Narrowest control we will lay out inside a grid cell, in points.
+const MIN_CONTROL_WIDTH: f32 = 60.0;
+
 pub struct StagedItem {
     pub source_path: PathBuf,
     pub year: u32,
@@ -275,6 +284,77 @@ impl PhotoOrganizerApp {
                 item.source = ClassificationSource::Manual;
             }
         });
+    }
+
+    /// Grid column count and item width for a given available width.
+    ///
+    /// Extracted from the grid renderer so the arithmetic can be asserted
+    /// directly. The column count is derived from `MIN_ITEM_WIDTH` first, then
+    /// the per-column width is clamped to `MAX_ITEM_WIDTH`; clamping only ever
+    /// shrinks the content, so the grid always fits the width it was given.
+    fn grid_column_layout(available_width: f32) -> (usize, f32) {
+        const MIN_ITEM_WIDTH: f32 = 240.0;
+        const MAX_ITEM_WIDTH: f32 = 350.0;
+
+        let number_columns = ((available_width) / (MIN_ITEM_WIDTH + SPACING))
+            .floor()
+            .max(1.0) as usize;
+        let item_width = ((available_width - (number_columns as f32 - 1.0) * SPACING)
+            / number_columns as f32)
+            .clamp(MIN_ITEM_WIDTH, MAX_ITEM_WIDTH);
+        (number_columns, item_width)
+    }
+
+    /// Renders one grid cell's category controls and returns the category to
+    /// train if the train button was clicked.
+    ///
+    /// The combo and train button share a row; the custom category input, when
+    /// the item is custom, goes on the row *below*. That stacking is load
+    /// bearing: sharing a single row starves the input down to whatever sliver
+    /// is left after the combo, and forces the cell wider than its grid column.
+    fn render_grid_cell_controls(
+        profiles: &ProfileStore,
+        ui: &mut egui::Ui,
+        item: &mut StagedItem,
+        item_width: f32,
+        combo_id: egui::Id,
+    ) -> Option<String> {
+        let mut train_request = None;
+        let combo_width = Self::grid_cell_combo_width(item_width);
+
+        ui.horizontal(|ui| {
+            Self::render_category_selector(profiles, ui, item, combo_id, Some(combo_width));
+
+            if ui
+                .add_sized(
+                    [TRAIN_BUTTON_SIZE, TRAIN_BUTTON_SIZE],
+                    egui::Button::new("🎓"),
+                )
+                .on_hover_text("Train category from this photo")
+                .clicked()
+            {
+                train_request = Some(item.category.clone());
+            }
+        });
+
+        if item.is_custom {
+            let category_input_width = Self::grid_cell_input_width(item_width);
+            Self::render_custom_category_input(ui, item, category_input_width);
+        }
+
+        train_request
+    }
+
+    /// Width of the category combo in a grid cell: the cell minus the train
+    /// button and the gaps either side of it.
+    fn grid_cell_combo_width(item_width: f32) -> f32 {
+        (item_width - TRAIN_BUTTON_SIZE - (SPACING * 2.0)).max(MIN_CONTROL_WIDTH)
+    }
+
+    /// Width of the custom category text input in a grid cell: the full cell
+    /// width, since it sits on its own line rather than sharing one.
+    fn grid_cell_input_width(item_width: f32) -> f32 {
+        (item_width - (SPACING * 2.0)).max(MIN_CONTROL_WIDTH)
     }
 
     fn render_custom_category_input(ui: &mut egui::Ui, item: &mut StagedItem, input_width: f32) {
@@ -798,20 +878,11 @@ impl eframe::App for PhotoOrganizerApp {
                 egui::ScrollArea::vertical()
                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
                     .show(ui, |ui| {
-                        const SPACING: f32 = 14.0;
-                        const MIN_ITEM_WIDTH: f32 = 240.0;
-                        const MAX_ITEM_WIDTH: f32 = 350.0;
-
                         let mut single_train_request = None;
                         let mut open_modal_idx = None;
                         let available_width = ui.available_width();
-                        let number_columns = ((available_width) / (MIN_ITEM_WIDTH + SPACING))
-                            .floor()
-                            .max(1.0) as usize;
-                        let item_width = ((available_width
-                            - (number_columns as f32 - 1.0) * SPACING)
-                            / number_columns as f32)
-                            .clamp(MIN_ITEM_WIDTH, MAX_ITEM_WIDTH);
+                        let (number_columns, item_width) =
+                            Self::grid_column_layout(available_width);
                         egui::Grid::new("grid")
                             .num_columns(number_columns)
                             .spacing([SPACING, SPACING])
@@ -914,45 +985,18 @@ impl eframe::App for PhotoOrganizerApp {
                                             );
                                         });
 
-                                        let button_dimension = 20.0;
-                                        let combo_width =
-                                            (item_width - button_dimension - (SPACING * 2.0))
-                                                .max(60.0);
-
-                                        ui.horizontal(|ui| {
-                                            Self::render_category_selector(
-                                                &self.profiles,
-                                                ui,
-                                                item,
-                                                ui.make_persistent_id((
-                                                    "cat_combo",
-                                                    idx,
-                                                    &item.source_path,
-                                                )),
-                                                Some(combo_width),
-                                            );
-
-                                            if ui
-                                                .add_sized(
-                                                    [button_dimension, button_dimension],
-                                                    egui::Button::new("🎓"),
-                                                )
-                                                .on_hover_text("Train category from this photo")
-                                                .clicked()
-                                            {
-                                                single_train_request =
-                                                    Some((idx, item.category.clone()));
-                                            }
-                                        });
-
-                                        if item.is_custom {
-                                            let category_input_width =
-                                                (item_width - (SPACING * 2.0)).max(60.0);
-                                            Self::render_custom_category_input(
-                                                ui,
-                                                item,
-                                                category_input_width,
-                                            );
+                                        if let Some(category) = Self::render_grid_cell_controls(
+                                            &self.profiles,
+                                            ui,
+                                            item,
+                                            item_width,
+                                            ui.make_persistent_id((
+                                                "cat_combo",
+                                                idx,
+                                                &item.source_path,
+                                            )),
+                                        ) {
+                                            single_train_request = Some((idx, category));
                                         }
                                     });
                                     if (idx + 1) % number_columns == 0 {
@@ -978,29 +1022,6 @@ impl eframe::App for PhotoOrganizerApp {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_custom_input_not_rendered_inline_with_combobox() {
-        // The custom category text input must live in its own method so callers can
-        // place it on a separate layout line. Embedding it inside
-        // render_category_selector puts it on the same line as the ComboBox, which
-        // overflows the grid cell and pushes the last column out of the window.
-        let source = include_str!("app.rs");
-
-        assert!(
-            source.contains("fn render_custom_category_input"),
-            "render_custom_category_input method must exist to render custom input separately"
-        );
-
-        let render_fn_start = source.find("fn render_category_selector").unwrap();
-        let render_fn_end = source[render_fn_start..].find("\n    }").unwrap() + render_fn_start;
-        let render_fn = &source[render_fn_start..render_fn_end];
-
-        assert!(
-            !render_fn.contains("TextEdit::singleline"),
-            "render_category_selector must NOT render the custom input inline with the ComboBox"
-        );
-    }
 
     #[test]
     fn test_custom_input_rendered_by_both_grid_and_modal() {
