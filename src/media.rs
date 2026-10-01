@@ -68,6 +68,21 @@ pub fn load_image(path: &Path) -> Result<DynamicImage> {
     }
 }
 
+/// Converts a DynamicImage to an egui::ColorImage, scaling down to fit within
+/// `max_edge` while preserving aspect ratio.
+fn dynamic_to_color_image(img: &DynamicImage, max_edge: u32) -> egui::ColorImage {
+    let (orig_w, orig_h) = (img.width(), img.height());
+    let preview = if orig_w > max_edge || orig_h > max_edge {
+        img.thumbnail(max_edge, max_edge).to_rgba8()
+    } else {
+        img.to_rgba8()
+    };
+    let width = preview.width() as usize;
+    let height = preview.height() as usize;
+    let rgba = preview.into_raw();
+    egui::ColorImage::from_rgba_unmultiplied([width, height], &rgba)
+}
+
 /// Converts a DynamicImage to a CachedThumbnail and an egui::ColorImage.
 pub fn dynamic_to_cached_thumb(img: &DynamicImage) -> (CachedThumbnail, egui::ColorImage) {
     let thumb = img.thumbnail(200, 140).to_rgba8();
@@ -95,16 +110,7 @@ pub fn cached_thumb_to_egui(thumb: &CachedThumbnail) -> egui::ColorImage {
 /// Converts a DynamicImage to an egui::ColorImage suitable for high-res modal preview,
 /// scaling down to fit within `max_edge` while preserving aspect ratio.
 pub fn dynamic_to_preview_color_image(img: &DynamicImage, max_edge: u32) -> egui::ColorImage {
-    let (orig_w, orig_h) = (img.width(), img.height());
-    let preview = if orig_w > max_edge || orig_h > max_edge {
-        img.thumbnail(max_edge, max_edge).to_rgba8()
-    } else {
-        img.to_rgba8()
-    };
-    let width = preview.width() as usize;
-    let height = preview.height() as usize;
-    let rgba = preview.into_raw();
-    egui::ColorImage::from_rgba_unmultiplied([width, height], &rgba)
+    dynamic_to_color_image(img, max_edge)
 }
 
 #[cfg(test)]

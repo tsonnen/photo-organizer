@@ -1,6 +1,6 @@
 use crate::execution_engine::{ExecutionEngine, RawPhotoInput, TransferMode};
 use crate::inference::is_model_available;
-use crate::profile_store::{ClassificationSource, ProfileStore};
+use crate::profile_store::{ClassificationSource, ProfileStore, RankedProfile};
 use crate::scanner::{scan_folder, ScanMessage};
 use crate::undo_engine::UndoEngine;
 use eframe::egui;
@@ -92,11 +92,7 @@ impl PhotoOrganizerApp {
         let total_count = self.items.len();
         for item in &mut self.items {
             if item.source == ClassificationSource::Manual {
-                item.is_custom = !self
-                    .profiles
-                    .profiles
-                    .iter()
-                    .any(|p| p.name.eq_ignore_ascii_case(&item.category));
+                item.is_custom = Self::is_custom_category(&self.profiles, &item.category);
                 continue;
             }
             let width = item.texture.size()[0] as u32;
@@ -111,11 +107,7 @@ impl PhotoOrganizerApp {
             if res.source == crate::profile_store::ClassificationSource::VisualModel {
                 visual_count += 1;
             }
-            item.is_custom = !self
-                .profiles
-                .profiles
-                .iter()
-                .any(|p| p.name.eq_ignore_ascii_case(&res.category));
+            item.is_custom = Self::is_custom_category(&self.profiles, &res.category);
             item.category = res.category;
             item.confidence = res.confidence;
             item.source = res.source;
@@ -217,6 +209,86 @@ impl PhotoOrganizerApp {
         }
     }
 
+    fn is_custom_category(profiles: &ProfileStore, category: &str) -> bool {
+        !profiles
+            .profiles
+            .iter()
+            .any(|p| p.name.eq_ignore_ascii_case(category))
+    }
+
+    fn profile_label(name: &str, confidence: f32, has_embedding: bool) -> String {
+        if has_embedding {
+            format!("{} ({:.0}%)", name, confidence * 100.0)
+        } else {
+            name.to_string()
+        }
+    }
+
+    fn category_label(item: &StagedItem, ranked_profiles: &[RankedProfile]) -> String {
+        if item.is_custom {
+            "Other".to_string()
+        } else if let Some(matching) = ranked_profiles
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(&item.category))
+        {
+            Self::profile_label(
+                &matching.name,
+                matching.confidence,
+                !item.embedding.is_empty(),
+            )
+        } else {
+            "Other".to_string()
+        }
+    }
+
+    fn render_category_selector(
+        profiles: &ProfileStore,
+        ui: &mut egui::Ui,
+        item: &mut StagedItem,
+        combo_id: egui::Id,
+        combo_width: Option<f32>,
+    ) {
+        let ranked_profiles = profiles.rank_profiles(&item.embedding);
+        let has_embedding = !item.embedding.is_empty();
+        let selected_label = Self::category_label(item, &ranked_profiles);
+
+        let mut combo = egui::ComboBox::from_id_source(combo_id);
+        if let Some(w) = combo_width {
+            combo = combo.width(w);
+        }
+        combo.selected_text(&selected_label).show_ui(ui, |ui| {
+            for prof in &ranked_profiles {
+                let is_selected = !item.is_custom && item.category.eq_ignore_ascii_case(&prof.name);
+                let label = Self::profile_label(&prof.name, prof.confidence, has_embedding);
+                if ui.selectable_label(is_selected, label).clicked() {
+                    item.category = prof.name.clone();
+                    item.confidence = prof.confidence;
+                    item.source = ClassificationSource::Manual;
+                    item.is_custom = false;
+                }
+            }
+            if !ranked_profiles.is_empty() {
+                ui.separator();
+            }
+            if ui.selectable_label(item.is_custom, "Other").clicked() {
+                item.is_custom = true;
+                item.source = ClassificationSource::Manual;
+            }
+        });
+
+        if item.is_custom {
+            let input_width = combo_width.unwrap_or(120.0);
+            let custom_input = ui.add(
+                egui::TextEdit::singleline(&mut item.category)
+                    .hint_text("Custom category...")
+                    .desired_width(input_width),
+            );
+            if custom_input.changed() {
+                item.source = ClassificationSource::Manual;
+            }
+        }
+    }
+
     fn execute_transfer(&mut self, mode: TransferMode) {
         let out_dir = match &self.output_folder {
             Some(p) => p.clone(),
@@ -273,28 +345,14 @@ impl PhotoOrganizerApp {
         });
     }
 
-    pub fn navigate_modal_prev(&mut self, ctx: &egui::Context) {
+    pub fn navigate_modal(&mut self, ctx: &egui::Context, delta: isize) {
         if self.items.is_empty() {
             return;
         }
         if let Some(modal) = &self.modal_preview {
-            let current = modal.item_index;
-            let new_index = if current == 0 {
-                self.items.len() - 1
-            } else {
-                current - 1
-            };
-            self.open_modal(new_index, ctx);
-        }
-    }
-
-    pub fn navigate_modal_next(&mut self, ctx: &egui::Context) {
-        if self.items.is_empty() {
-            return;
-        }
-        if let Some(modal) = &self.modal_preview {
-            let current = modal.item_index;
-            let new_index = (current + 1) % self.items.len();
+            let current = modal.item_index as isize;
+            let len = self.items.len() as isize;
+            let new_index = ((current + delta).rem_euclid(len)) as usize;
             self.open_modal(new_index, ctx);
         }
     }
@@ -335,11 +393,11 @@ impl PhotoOrganizerApp {
             return;
         }
         if prev_requested {
-            self.navigate_modal_prev(ctx);
+            self.navigate_modal(ctx, -1);
             return;
         }
         if next_requested {
-            self.navigate_modal_next(ctx);
+            self.navigate_modal(ctx, 1);
             return;
         }
 
@@ -470,73 +528,17 @@ impl PhotoOrganizerApp {
                                 ui.separator();
                                 ui.label("Category:");
 
-                                let ranked_profiles = self.profiles.rank_profiles(&item.embedding);
-                                let has_embedding = !item.embedding.is_empty();
-
-                                let selected_label = if item.is_custom {
-                                    "Other".to_string()
-                                } else if let Some(matching) = ranked_profiles
-                                    .iter()
-                                    .find(|p| p.name.eq_ignore_ascii_case(&item.category))
-                                {
-                                    if has_embedding {
-                                        format!(
-                                            "{} ({:.0}%)",
-                                            matching.name,
-                                            matching.confidence * 100.0
-                                        )
-                                    } else {
-                                        matching.name.clone()
-                                    }
-                                } else {
-                                    "Other".to_string()
-                                };
-
-                                egui::ComboBox::from_id_source(ui.make_persistent_id((
-                                    "modal_cat_combo",
-                                    modal_index,
-                                    &item.source_path,
-                                )))
-                                .selected_text(&selected_label)
-                                .show_ui(ui, |ui| {
-                                    for prof in &ranked_profiles {
-                                        let is_selected = !item.is_custom
-                                            && item.category.eq_ignore_ascii_case(&prof.name);
-                                        let label = if has_embedding {
-                                            format!(
-                                                "{} ({:.0}%)",
-                                                prof.name,
-                                                prof.confidence * 100.0
-                                            )
-                                        } else {
-                                            prof.name.clone()
-                                        };
-                                        if ui.selectable_label(is_selected, label).clicked() {
-                                            item.category = prof.name.clone();
-                                            item.confidence = prof.confidence;
-                                            item.source = ClassificationSource::Manual;
-                                            item.is_custom = false;
-                                        }
-                                    }
-                                    if !ranked_profiles.is_empty() {
-                                        ui.separator();
-                                    }
-                                    if ui.selectable_label(item.is_custom, "Other").clicked() {
-                                        item.is_custom = true;
-                                        item.source = ClassificationSource::Manual;
-                                    }
-                                });
-
-                                if item.is_custom {
-                                    let custom_input = ui.add(
-                                        egui::TextEdit::singleline(&mut item.category)
-                                            .hint_text("Custom category...")
-                                            .desired_width(120.0),
-                                    );
-                                    if custom_input.changed() {
-                                        item.source = ClassificationSource::Manual;
-                                    }
-                                }
+                                Self::render_category_selector(
+                                    &self.profiles,
+                                    ui,
+                                    item,
+                                    ui.make_persistent_id((
+                                        "modal_cat_combo",
+                                        modal_index,
+                                        &item.source_path,
+                                    )),
+                                    Some(120.0),
+                                );
 
                                 if ui
                                     .button("🎓 Train")
@@ -562,9 +564,9 @@ impl PhotoOrganizerApp {
         if close_modal {
             self.modal_preview = None;
         } else if prev_requested {
-            self.navigate_modal_prev(ctx);
+            self.navigate_modal(ctx, -1);
         } else if next_requested {
-            self.navigate_modal_next(ctx);
+            self.navigate_modal(ctx, 1);
         } else if single_train_requested {
             let cat = item.category.clone();
             self.train_single_item(modal_index, &cat);
@@ -603,11 +605,7 @@ impl eframe::App for PhotoOrganizerApp {
                     let texture =
                         ctx.load_texture(filename, payload.image, egui::TextureOptions::LINEAR);
 
-                    let is_custom = !self
-                        .profiles
-                        .profiles
-                        .iter()
-                        .any(|p| p.name.eq_ignore_ascii_case(&payload.category));
+                    let is_custom = Self::is_custom_category(&self.profiles, &payload.category);
 
                     self.items.push(StagedItem {
                         source_path: payload.source_path,
@@ -643,11 +641,7 @@ impl eframe::App for PhotoOrganizerApp {
                             item.confidence = confidence;
                             item.source = source;
                             item.embedding = embedding;
-                            item.is_custom = !self
-                                .profiles
-                                .profiles
-                                .iter()
-                                .any(|p| p.name.eq_ignore_ascii_case(&category));
+                            item.is_custom = Self::is_custom_category(&self.profiles, &category);
                         } else {
                             item.embedding = embedding;
                         }
@@ -917,82 +911,22 @@ impl eframe::App for PhotoOrganizerApp {
                                             );
                                         });
 
-                                        let ranked_profiles =
-                                            self.profiles.rank_profiles(&item.embedding);
-                                        let has_embedding = !item.embedding.is_empty();
-
-                                        let selected_label = if item.is_custom {
-                                            "Other".to_string()
-                                        } else if let Some(matching) = ranked_profiles
-                                            .iter()
-                                            .find(|p| p.name.eq_ignore_ascii_case(&item.category))
-                                        {
-                                            if has_embedding {
-                                                format!(
-                                                    "{} ({:.0}%)",
-                                                    matching.name,
-                                                    matching.confidence * 100.0
-                                                )
-                                            } else {
-                                                matching.name.clone()
-                                            }
-                                        } else {
-                                            "Other".to_string()
-                                        };
-
                                         let button_dimension = 20.0;
                                         let combo_width =
                                             (item_width - button_dimension - (SPACING * 2.0))
                                                 .max(60.0);
 
                                         ui.horizontal(|ui| {
-                                            egui::ComboBox::from_id_source(ui.make_persistent_id(
-                                                ("cat_combo", idx, &item.source_path),
-                                            ))
-                                            .width(combo_width)
-                                            .selected_text(&selected_label)
-                                            .show_ui(
+                                            Self::render_category_selector(
+                                                &self.profiles,
                                                 ui,
-                                                |ui| {
-                                                    for prof in &ranked_profiles {
-                                                        let is_selected = !item.is_custom
-                                                            && item
-                                                                .category
-                                                                .eq_ignore_ascii_case(&prof.name);
-                                                        let label = if has_embedding {
-                                                            format!(
-                                                                "{} ({:.0}%)",
-                                                                prof.name,
-                                                                prof.confidence * 100.0
-                                                            )
-                                                        } else {
-                                                            prof.name.clone()
-                                                        };
-                                                        if ui
-                                                            .selectable_label(is_selected, label)
-                                                            .clicked()
-                                                        {
-                                                            item.category = prof.name.clone();
-                                                            item.confidence = prof.confidence;
-                                                            item.source =
-                                                                ClassificationSource::Manual;
-                                                            item.is_custom = false;
-                                                        }
-                                                    }
-
-                                                    if !ranked_profiles.is_empty() {
-                                                        ui.separator();
-                                                    }
-
-                                                    let other_selected = item.is_custom;
-                                                    if ui
-                                                        .selectable_label(other_selected, "Other")
-                                                        .clicked()
-                                                    {
-                                                        item.is_custom = true;
-                                                        item.source = ClassificationSource::Manual;
-                                                    }
-                                                },
+                                                item,
+                                                ui.make_persistent_id((
+                                                    "cat_combo",
+                                                    idx,
+                                                    &item.source_path,
+                                                )),
+                                                Some(combo_width),
                                             );
 
                                             if ui
@@ -1007,21 +941,6 @@ impl eframe::App for PhotoOrganizerApp {
                                                     Some((idx, item.category.clone()));
                                             }
                                         });
-
-                                        if item.is_custom {
-                                            ui.horizontal(|ui| {
-                                                let category_input_width =
-                                                    (item_width - (SPACING * 2.0)).max(60.0);
-                                                let category_input = ui.add(
-                                                    egui::TextEdit::singleline(&mut item.category)
-                                                        .hint_text("Custom category...")
-                                                        .desired_width(category_input_width),
-                                                );
-                                                if category_input.changed() {
-                                                    item.source = ClassificationSource::Manual;
-                                                }
-                                            });
-                                        }
                                     });
                                     if (idx + 1) % number_columns == 0 {
                                         ui.end_row();
@@ -1042,3 +961,4 @@ impl eframe::App for PhotoOrganizerApp {
         self.render_modal(ctx);
     }
 }
+
