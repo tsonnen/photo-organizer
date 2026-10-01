@@ -17,6 +17,9 @@ const TRAIN_BUTTON_SIZE: f32 = 20.0;
 /// Narrowest control we will lay out inside a grid cell, in points.
 const MIN_CONTROL_WIDTH: f32 = 60.0;
 
+/// Width of the category combo in the inspection modal, in points.
+const MODAL_COMBO_WIDTH: f32 = 120.0;
+
 pub struct StagedItem {
     pub source_path: PathBuf,
     pub year: u32,
@@ -36,6 +39,15 @@ pub struct ModalPreview {
     pub high_res_texture: Option<egui::TextureHandle>,
     pub high_res_path: Option<PathBuf>,
     pub is_loading: bool,
+}
+
+/// Which control in the inspection modal's bottom row was pressed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ModalActions {
+    pub prev: bool,
+    pub next: bool,
+    pub train: bool,
+    pub close: bool,
 }
 
 pub struct PhotoOrganizerApp {
@@ -368,6 +380,75 @@ impl PhotoOrganizerApp {
         }
     }
 
+    /// Renders the inspection modal's bottom control row and reports which
+    /// control was pressed.
+    ///
+    /// The custom category input shares this line with the combo, immediately
+    /// after it, because the modal has a whole window's worth of width to spend
+    /// on one row. A grid cell cannot: its line is only a column wide, so
+    /// `render_grid_cell_controls` keeps the same input on the row below.
+    fn render_modal_controls(
+        profiles: &ProfileStore,
+        ui: &mut egui::Ui,
+        item: &mut StagedItem,
+        modal_index: usize,
+        item_count: usize,
+    ) -> ModalActions {
+        let mut actions = ModalActions::default();
+
+        ui.horizontal(|ui| {
+            if ui.button("◀ Previous (Left)").clicked() {
+                actions.prev = true;
+            }
+            ui.label(format!("{}/{}", modal_index + 1, item_count));
+            if ui.button("Next (Right) ▶").clicked() {
+                actions.next = true;
+            }
+
+            ui.separator();
+            ui.label("Category:");
+
+            Self::render_category_selector(
+                profiles,
+                ui,
+                item,
+                ui.make_persistent_id(("modal_cat_combo", modal_index, &item.source_path)),
+                Some(MODAL_COMBO_WIDTH),
+            );
+
+            if item.is_custom {
+                Self::render_custom_category_input(ui, item, Self::modal_input_width(ui));
+            }
+
+            if ui
+                .button("🎓 Train")
+                .on_hover_text("Train category from this photo")
+                .clicked()
+            {
+                actions.train = true;
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Close (Esc)").clicked() {
+                    actions.close = true;
+                }
+            });
+        });
+
+        actions
+    }
+
+    /// Width the inline custom category input may claim on the modal's control
+    /// row: whatever is left once the train and close buttons still have room.
+    ///
+    /// Clamping to what is actually free keeps a narrow modal from overflowing
+    /// the row, while a wide one gives the input all the slack it wants.
+    fn modal_input_width(ui: &egui::Ui) -> f32 {
+        const TRAILING_CONTROLS: f32 = 170.0;
+
+        (ui.available_width() - TRAILING_CONTROLS).clamp(MIN_CONTROL_WIDTH, 200.0)
+    }
+
     fn execute_transfer(&mut self, mode: TransferMode) {
         let out_dir = match &self.output_folder {
             Some(p) => p.clone(),
@@ -594,52 +675,19 @@ impl PhotoOrganizerApp {
 
                             ui.separator();
 
-                            // Bottom Navigation & Controls
-                            ui.horizontal(|ui| {
-                                if ui.button("◀ Previous (Left)").clicked() {
-                                    prev_requested = true;
-                                }
-                                ui.label(format!("{}/{}", modal_index + 1, item_count));
-                                if ui.button("Next (Right) ▶").clicked() {
-                                    next_requested = true;
-                                }
-
-                                ui.separator();
-                                ui.label("Category:");
-
-                                Self::render_category_selector(
-                                    &self.profiles,
-                                    ui,
-                                    item,
-                                    ui.make_persistent_id((
-                                        "modal_cat_combo",
-                                        modal_index,
-                                        &item.source_path,
-                                    )),
-                                    Some(120.0),
-                                );
-
-                                if ui
-                                    .button("🎓 Train")
-                                    .on_hover_text("Train category from this photo")
-                                    .clicked()
-                                {
-                                    single_train_requested = true;
-                                }
-
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if ui.button("Close (Esc)").clicked() {
-                                            close_modal = true;
-                                        }
-                                    },
-                                );
-                            });
-
-                            if item.is_custom {
-                                Self::render_custom_category_input(ui, item, 120.0);
-                            }
+                            // Bottom Navigation & Controls. The custom category
+                            // input is inline here, unlike the grid cell.
+                            let actions = Self::render_modal_controls(
+                                &self.profiles,
+                                ui,
+                                item,
+                                modal_index,
+                                item_count,
+                            );
+                            prev_requested = actions.prev;
+                            next_requested = actions.next;
+                            single_train_requested = actions.train;
+                            close_modal |= actions.close;
                         });
                 });
             });
