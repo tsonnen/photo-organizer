@@ -22,6 +22,13 @@ pub struct StagedItem {
     pub is_custom: bool,
 }
 
+pub struct ModalPreview {
+    pub item_index: usize,
+    pub high_res_texture: Option<egui::TextureHandle>,
+    pub high_res_path: Option<PathBuf>,
+    pub is_loading: bool,
+}
+
 pub struct PhotoOrganizerApp {
     input_folder: Option<PathBuf>,
     output_folder: Option<PathBuf>,
@@ -34,6 +41,9 @@ pub struct PhotoOrganizerApp {
     status_message: Option<(String, egui::Color32)>,
     tx: Sender<ScanMessage>,
     rx: Receiver<ScanMessage>,
+    modal_preview: Option<ModalPreview>,
+    high_res_tx: Sender<(PathBuf, egui::ColorImage)>,
+    high_res_rx: Receiver<(PathBuf, egui::ColorImage)>,
 }
 
 impl Default for PhotoOrganizerApp {
@@ -45,6 +55,7 @@ impl Default for PhotoOrganizerApp {
 impl PhotoOrganizerApp {
     pub fn new() -> Self {
         let (tx, rx) = channel();
+        let (high_res_tx, high_res_rx) = channel();
         let profiles = ProfileStore::load_from_file("profiles.json")
             .unwrap_or_else(|_| ProfileStore::default());
         let model_available = is_model_available();
@@ -61,8 +72,12 @@ impl PhotoOrganizerApp {
             status_message: None,
             tx,
             rx,
+            modal_preview: None,
+            high_res_tx,
+            high_res_rx,
         }
     }
+
 
     fn start_scan(&mut self, ctx: egui::Context, folder: PathBuf) {
         self.items.clear();
@@ -233,11 +248,331 @@ impl PhotoOrganizerApp {
         );
         self.items.retain(|i| !i.selected);
     }
+
+    pub fn open_modal(&mut self, index: usize, ctx: &egui::Context) {
+        if index >= self.items.len() {
+            return;
+        }
+        let item = &self.items[index];
+        let path = item.source_path.clone();
+
+        self.modal_preview = Some(ModalPreview {
+            item_index: index,
+            high_res_texture: None,
+            high_res_path: None,
+            is_loading: true,
+        });
+
+        let tx = self.high_res_tx.clone();
+        let ctx_clone = ctx.clone();
+        std::thread::spawn(move || {
+            if let Ok(dyn_img) = crate::media::load_image(&path) {
+                let color_img = crate::media::dynamic_to_preview_color_image(&dyn_img, 1920);
+                let _ = tx.send((path, color_img));
+                ctx_clone.request_repaint();
+            }
+        });
+    }
+
+    pub fn navigate_modal_prev(&mut self, ctx: &egui::Context) {
+        if self.items.is_empty() {
+            return;
+        }
+        if let Some(modal) = &self.modal_preview {
+            let current = modal.item_index;
+            let new_index = if current == 0 {
+                self.items.len() - 1
+            } else {
+                current - 1
+            };
+            self.open_modal(new_index, ctx);
+        }
+    }
+
+    pub fn navigate_modal_next(&mut self, ctx: &egui::Context) {
+        if self.items.is_empty() {
+            return;
+        }
+        if let Some(modal) = &self.modal_preview {
+            let current = modal.item_index;
+            let new_index = (current + 1) % self.items.len();
+            self.open_modal(new_index, ctx);
+        }
+    }
+
+    fn render_modal(&mut self, ctx: &egui::Context) {
+        let modal_index = match &self.modal_preview {
+            Some(m) => m.item_index,
+            None => return,
+        };
+
+        if modal_index >= self.items.len() {
+            self.modal_preview = None;
+            return;
+        }
+
+        let mut close_modal = false;
+        let mut prev_requested = false;
+        let mut next_requested = false;
+        let mut toggle_select = false;
+
+        ctx.input(|i| {
+            if i.key_pressed(egui::Key::Escape) {
+                close_modal = true;
+            }
+            if i.key_pressed(egui::Key::ArrowLeft) {
+                prev_requested = true;
+            }
+            if i.key_pressed(egui::Key::ArrowRight) {
+                next_requested = true;
+            }
+            if i.key_pressed(egui::Key::Space) {
+                toggle_select = true;
+            }
+        });
+
+        if close_modal {
+            self.modal_preview = None;
+            return;
+        }
+        if prev_requested {
+            self.navigate_modal_prev(ctx);
+            return;
+        }
+        if next_requested {
+            self.navigate_modal_next(ctx);
+            return;
+        }
+
+        if toggle_select {
+            if let Some(item) = self.items.get_mut(modal_index) {
+                item.selected = !item.selected;
+            }
+        }
+
+        let screen_rect = ctx.screen_rect();
+        let item_count = self.items.len();
+        let is_loading = self.modal_preview.as_ref().map_or(false, |m| m.is_loading);
+        let high_res_tex = self
+            .modal_preview
+            .as_ref()
+            .and_then(|m| m.high_res_texture.clone());
+
+        let mut single_train_requested = false;
+
+        let item = &mut self.items[modal_index];
+        let filename = item
+            .source_path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+
+        egui::Area::new(egui::Id::new("photo_verification_modal_area"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(screen_rect.min)
+            .show(ctx, |ui| {
+                // 1. Dark translucent masking backdrop
+                let (backdrop_rect, backdrop_resp) =
+                    ui.allocate_exact_size(screen_rect.size(), egui::Sense::click());
+                ui.painter().rect_filled(
+                    backdrop_rect,
+                    0.0,
+                    egui::Color32::from_black_alpha(200),
+                );
+
+                if backdrop_resp.clicked() {
+                    close_modal = true;
+                }
+
+                // 2. Centered Modal Card Container
+                let modal_w = (screen_rect.width() * 0.85).clamp(500.0, 1100.0);
+                let modal_h = (screen_rect.height() * 0.85).clamp(400.0, 800.0);
+                let modal_rect = egui::Rect::from_center_size(screen_rect.center(), egui::vec2(modal_w, modal_h));
+
+                ui.allocate_ui_at_rect(modal_rect, |ui| {
+                    egui::Frame::window(&ctx.style())
+                        .rounding(8.0)
+                        .show(ui, |ui| {
+                            ui.set_min_size(modal_rect.size());
+                            ui.set_max_size(modal_rect.size());
+
+                            // Header / Title & Metadata
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut item.selected, "☑ Selected");
+                                ui.separator();
+                                ui.label(egui::RichText::new(&filename).strong());
+                                ui.separator();
+                                ui.label(format!("Date: {}/{:02}", item.year, item.month));
+                                if is_loading {
+                                    ui.separator();
+                                    ui.spinner();
+                                    ui.colored_label(egui::Color32::LIGHT_GRAY, "Loading full image...");
+                                } else if high_res_tex.is_some() {
+                                    ui.separator();
+                                    ui.colored_label(egui::Color32::from_rgb(0, 200, 100), "✨ High-Res");
+                                }
+
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.button("✖").clicked() {
+                                        close_modal = true;
+                                    }
+                                });
+                            });
+                            ui.separator();
+
+                            // Image View
+                            let active_tex = high_res_tex.as_ref().unwrap_or(&item.texture);
+                            let tex_size = active_tex.size_vec2();
+                            let avail_w = ui.available_width();
+                            let avail_h = (ui.available_height() - 50.0).max(150.0);
+
+                            let img_aspect = tex_size.x / tex_size.y;
+                            let container_aspect = avail_w / avail_h;
+
+                            let (disp_w, disp_h) = if img_aspect > container_aspect {
+                                (avail_w, avail_w / img_aspect)
+                            } else {
+                                (avail_h * img_aspect, avail_h)
+                            };
+
+                            ui.vertical_centered(|ui| {
+                                ui.image(egui::load::SizedTexture::new(
+                                    active_tex.id(),
+                                    [disp_w, disp_h],
+                                ));
+                            });
+
+                            ui.separator();
+
+                            // Bottom Navigation & Controls
+                            ui.horizontal(|ui| {
+                                if ui.button("◀ Previous (Left)").clicked() {
+                                    prev_requested = true;
+                                }
+                                ui.label(format!("{}/{}", modal_index + 1, item_count));
+                                if ui.button("Next (Right) ▶").clicked() {
+                                    next_requested = true;
+                                }
+
+                                ui.separator();
+                                ui.label("Category:");
+
+                                let ranked_profiles = self.profiles.rank_profiles(&item.embedding);
+                                let has_embedding = !item.embedding.is_empty();
+
+                                let selected_label = if item.is_custom {
+                                    "Other".to_string()
+                                } else if let Some(matching) = ranked_profiles
+                                    .iter()
+                                    .find(|p| p.name.eq_ignore_ascii_case(&item.category))
+                                {
+                                    if has_embedding {
+                                        format!("{} ({:.0}%)", matching.name, matching.confidence * 100.0)
+                                    } else {
+                                        matching.name.clone()
+                                    }
+                                } else {
+                                    "Other".to_string()
+                                };
+
+                                egui::ComboBox::from_id_source(ui.make_persistent_id((
+                                    "modal_cat_combo",
+                                    modal_index,
+                                    &item.source_path,
+                                )))
+                                .selected_text(&selected_label)
+                                .show_ui(ui, |ui| {
+                                    for prof in &ranked_profiles {
+                                        let is_selected = !item.is_custom
+                                            && item.category.eq_ignore_ascii_case(&prof.name);
+                                        let label = if has_embedding {
+                                            format!("{} ({:.0}%)", prof.name, prof.confidence * 100.0)
+                                        } else {
+                                            prof.name.clone()
+                                        };
+                                        if ui.selectable_label(is_selected, label).clicked() {
+                                            item.category = prof.name.clone();
+                                            item.confidence = prof.confidence;
+                                            item.source = ClassificationSource::Manual;
+                                            item.is_custom = false;
+                                        }
+                                    }
+                                    if !ranked_profiles.is_empty() {
+                                        ui.separator();
+                                    }
+                                    if ui.selectable_label(item.is_custom, "Other").clicked() {
+                                        item.is_custom = true;
+                                        item.source = ClassificationSource::Manual;
+                                    }
+                                });
+
+                                if item.is_custom {
+                                    let custom_input = ui.add(
+                                        egui::TextEdit::singleline(&mut item.category)
+                                            .hint_text("Custom category...")
+                                            .desired_width(120.0),
+                                    );
+                                    if custom_input.changed() {
+                                        item.source = ClassificationSource::Manual;
+                                    }
+                                }
+
+                                if ui
+                                    .button("🎓 Train")
+                                    .on_hover_text("Train category from this photo")
+                                    .clicked()
+                                {
+                                    single_train_requested = true;
+                                }
+
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.button("Close (Esc)").clicked() {
+                                        close_modal = true;
+                                    }
+                                });
+                            });
+                        });
+                });
+            });
+
+        if close_modal {
+            self.modal_preview = None;
+        } else if prev_requested {
+            self.navigate_modal_prev(ctx);
+        } else if next_requested {
+            self.navigate_modal_next(ctx);
+        } else if single_train_requested {
+            let cat = item.category.clone();
+            self.train_single_item(modal_index, &cat);
+        }
+    }
 }
+
+
 
 impl eframe::App for PhotoOrganizerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        while let Ok((path, color_img)) = self.high_res_rx.try_recv() {
+            if let Some(modal) = &mut self.modal_preview {
+                if let Some(item) = self.items.get(modal.item_index) {
+                    if item.source_path == path {
+                        let filename = path.file_name().unwrap_or_default().to_string_lossy();
+                        let texture = ctx.load_texture(
+                            format!("modal_{}", filename),
+                            color_img,
+                            egui::TextureOptions::LINEAR,
+                        );
+                        modal.high_res_texture = Some(texture);
+                        modal.high_res_path = Some(path);
+                        modal.is_loading = false;
+                    }
+                }
+            }
+        }
+
         while let Ok(msg) = self.rx.try_recv() {
+
             match msg {
                 ScanMessage::Item(payload) => {
                     let filename = payload
@@ -451,6 +786,7 @@ impl eframe::App for PhotoOrganizerApp {
                         const MAX_ITEM_WIDTH: f32 = 350.0;
 
                         let mut single_train_request = None;
+                        let mut open_modal_idx = None;
                         let available_width = ui.available_width();
                         let number_columns = ((available_width) / (MIN_ITEM_WIDTH + SPACING))
                             .floor()
@@ -468,13 +804,72 @@ impl eframe::App for PhotoOrganizerApp {
                                         let tex_size = item.texture.size_vec2();
                                         let aspect = tex_size.y / tex_size.x;
                                         let scaled_height = item_width * aspect;
-                                        ui.image(egui::load::SizedTexture::new(
+
+                                        let (rect, response) = ui.allocate_exact_size(
+                                            egui::vec2(item_width, scaled_height),
+                                            egui::Sense::click(),
+                                        );
+
+                                        ui.painter().image(
                                             item.texture.id(),
-                                            [item_width, scaled_height],
-                                        ));
+                                            rect,
+                                            egui::Rect::from_min_max(
+                                                egui::pos2(0.0, 0.0),
+                                                egui::pos2(1.0, 1.0),
+                                            ),
+                                            egui::Color32::WHITE,
+                                        );
+
+                                        if response.hovered() {
+                                            ui.painter().rect_stroke(
+                                                rect,
+                                                0.0,
+                                                egui::Stroke::new(
+                                                    2.0_f32,
+                                                    egui::Color32::from_rgb(0, 180, 255),
+                                                ),
+                                            );
+                                            ui.ctx()
+                                                .set_cursor_icon(egui::CursorIcon::PointingHand);
+                                        }
+
+                                        let is_clicked = response.clicked();
+                                        let filename = item
+                                            .source_path
+                                            .file_name()
+                                            .unwrap_or_default()
+                                            .to_string_lossy()
+                                            .to_string();
+                                        let category = item.category.clone();
+                                        let confidence = item.confidence;
+                                        let tex_id = item.texture.id();
+                                        response.on_hover_ui(|ui| {
+                                            ui.label(
+                                                egui::RichText::new("🔍 Click to inspect photo in modal")
+                                                    .strong()
+                                                    .color(egui::Color32::from_rgb(0, 180, 255)),
+                                            );
+                                            let hover_w = 380.0;
+                                            let hover_h = hover_w * aspect;
+                                            ui.image(egui::load::SizedTexture::new(
+                                                tex_id,
+                                                [hover_w, hover_h],
+                                            ));
+                                            ui.label(format!("File: {}", filename));
+                                            ui.label(format!(
+                                                "Category: {} ({:.0}%)",
+                                                category,
+                                                confidence * 100.0
+                                            ));
+                                        });
+
+                                        if is_clicked {
+                                            open_modal_idx = Some(idx);
+                                        }
+
                                         ui.checkbox(
                                             &mut item.selected,
-                                            item.source_path.file_name().unwrap().to_str().unwrap(),
+                                            &filename,
                                         );
 
                                         ui.horizontal(|ui| {
@@ -615,10 +1010,17 @@ impl eframe::App for PhotoOrganizerApp {
                                 }
                             });
 
+                        if let Some(idx) = open_modal_idx {
+                            self.open_modal(idx, ctx);
+                        }
+
                         if let Some((idx, category)) = single_train_request {
                             self.train_single_item(idx, &category);
                         }
                     });
             });
+
+        self.render_modal(ctx);
     }
 }
+
