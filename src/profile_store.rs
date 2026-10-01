@@ -29,6 +29,12 @@ pub struct ClassificationResult {
     pub source: ClassificationSource,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RankedProfile {
+    pub name: String,
+    pub confidence: f32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CategoryProfile {
     pub name: String,
@@ -175,6 +181,35 @@ impl ProfileStore {
             confidence: 0.0,
             source: ClassificationSource::UnsortedFallback,
         }
+    }
+
+    /// Computes similarity of the given embedding against all profile centroids,
+    /// returning them sorted descending by confidence (and alphabetically by name for ties).
+    pub fn rank_profiles(&self, embedding: &[f32]) -> Vec<RankedProfile> {
+        let mut list: Vec<RankedProfile> = self
+            .profiles
+            .iter()
+            .map(|p| {
+                let conf = if !embedding.is_empty() && !p.centroid.is_empty() {
+                    cosine_similarity(embedding, &p.centroid).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                RankedProfile {
+                    name: p.name.clone(),
+                    confidence: conf,
+                }
+            })
+            .collect();
+
+        list.sort_by(|a, b| {
+            b.confidence
+                .partial_cmp(&a.confidence)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.name.cmp(&b.name))
+        });
+
+        list
     }
 
     pub fn classify_with_heuristics(
@@ -483,5 +518,57 @@ mod tests {
             store.classify_with_heuristics(&[], Path::new("unknown_file.xyz"), false, 500, 500);
         assert_eq!(res3.category, "Unsorted");
         assert_eq!(res3.source, ClassificationSource::UnsortedFallback);
+    }
+
+    #[test]
+    fn test_rank_profiles_empty_store() {
+        let store = ProfileStore::default();
+        let ranked = store.rank_profiles(&[1.0, 0.0]);
+        assert!(ranked.is_empty());
+    }
+
+    #[test]
+    fn test_rank_profiles_empty_embedding() {
+        let store = ProfileStore {
+            profiles: vec![
+                CategoryProfile::new("Landscape", vec![1.0, 0.0]),
+                CategoryProfile::new("Portrait", vec![0.0, 1.0]),
+            ],
+            confidence_threshold: 0.65,
+        };
+        let ranked = store.rank_profiles(&[]);
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].name, "Landscape");
+        assert_eq!(ranked[0].confidence, 0.0);
+        assert_eq!(ranked[1].name, "Portrait");
+        assert_eq!(ranked[1].confidence, 0.0);
+    }
+
+    #[test]
+    fn test_rank_profiles_sorted_order() {
+        let store = ProfileStore {
+            profiles: vec![
+                CategoryProfile::new("Portrait", vec![0.0, 1.0, 0.0]),
+                CategoryProfile::new("Landscape", vec![1.0, 0.0, 0.0]),
+                CategoryProfile::new("Sunset", vec![0.7071, 0.7071, 0.0]),
+            ],
+            confidence_threshold: 0.65,
+        };
+
+        // Query vector is close to Landscape [1.0, 0.0, 0.0]
+        // Cosine similarities:
+        // Landscape: ~1.0
+        // Sunset: ~0.7071
+        // Portrait: 0.0
+        let query = vec![0.98, 0.02, 0.0];
+        let ranked = store.rank_profiles(&query);
+
+        assert_eq!(ranked.len(), 3);
+        assert_eq!(ranked[0].name, "Landscape");
+        assert!(ranked[0].confidence > 0.95);
+        assert_eq!(ranked[1].name, "Sunset");
+        assert!((ranked[1].confidence - 0.7071).abs() < 0.05);
+        assert_eq!(ranked[2].name, "Portrait");
+        assert!(ranked[2].confidence < 0.05);
     }
 }
