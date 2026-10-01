@@ -21,6 +21,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Photo Organizer",
         options,
-        Box::new(|_cc| Box::new(PhotoOrganizerApp::new())),
+        Box::new(|_cc| Ok(Box::new(PhotoOrganizerApp::new()))),
     )
 }
