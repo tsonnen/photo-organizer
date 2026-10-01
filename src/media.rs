@@ -107,7 +107,6 @@ pub fn dynamic_to_preview_color_image(img: &DynamicImage, max_edge: u32) -> egui
     egui::ColorImage::from_rgba_unmultiplied([width, height], &rgba)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,4 +229,3 @@ mod tests {
         assert_eq!(small_preview.size, [300, 200]);
     }
 }
-

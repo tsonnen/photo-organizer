@@ -78,7 +78,6 @@ impl PhotoOrganizerApp {
         }
     }
 
-
     fn start_scan(&mut self, ctx: egui::Context, folder: PathBuf) {
         self.items.clear();
         self.status_message = None;
@@ -375,11 +374,8 @@ impl PhotoOrganizerApp {
                 // 1. Dark translucent masking backdrop
                 let (backdrop_rect, backdrop_resp) =
                     ui.allocate_exact_size(screen_rect.size(), egui::Sense::click());
-                ui.painter().rect_filled(
-                    backdrop_rect,
-                    0.0,
-                    egui::Color32::from_black_alpha(200),
-                );
+                ui.painter()
+                    .rect_filled(backdrop_rect, 0.0, egui::Color32::from_black_alpha(200));
 
                 if backdrop_resp.clicked() {
                     close_modal = true;
@@ -388,7 +384,10 @@ impl PhotoOrganizerApp {
                 // 2. Centered Modal Card Container
                 let modal_w = (screen_rect.width() * 0.85).clamp(500.0, 1100.0);
                 let modal_h = (screen_rect.height() * 0.85).clamp(400.0, 800.0);
-                let modal_rect = egui::Rect::from_center_size(screen_rect.center(), egui::vec2(modal_w, modal_h));
+                let modal_rect = egui::Rect::from_center_size(
+                    screen_rect.center(),
+                    egui::vec2(modal_w, modal_h),
+                );
 
                 ui.allocate_ui_at_rect(modal_rect, |ui| {
                     egui::Frame::window(&ctx.style())
@@ -407,17 +406,26 @@ impl PhotoOrganizerApp {
                                 if is_loading {
                                     ui.separator();
                                     ui.spinner();
-                                    ui.colored_label(egui::Color32::LIGHT_GRAY, "Loading full image...");
+                                    ui.colored_label(
+                                        egui::Color32::LIGHT_GRAY,
+                                        "Loading full image...",
+                                    );
                                 } else if high_res_tex.is_some() {
                                     ui.separator();
-                                    ui.colored_label(egui::Color32::from_rgb(0, 200, 100), "✨ High-Res");
+                                    ui.colored_label(
+                                        egui::Color32::from_rgb(0, 200, 100),
+                                        "✨ High-Res",
+                                    );
                                 }
 
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.button("✖").clicked() {
-                                        close_modal = true;
-                                    }
-                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.button("✖").clicked() {
+                                            close_modal = true;
+                                        }
+                                    },
+                                );
                             });
                             ui.separator();
 
@@ -468,7 +476,11 @@ impl PhotoOrganizerApp {
                                     .find(|p| p.name.eq_ignore_ascii_case(&item.category))
                                 {
                                     if has_embedding {
-                                        format!("{} ({:.0}%)", matching.name, matching.confidence * 100.0)
+                                        format!(
+                                            "{} ({:.0}%)",
+                                            matching.name,
+                                            matching.confidence * 100.0
+                                        )
                                     } else {
                                         matching.name.clone()
                                     }
@@ -487,7 +499,11 @@ impl PhotoOrganizerApp {
                                         let is_selected = !item.is_custom
                                             && item.category.eq_ignore_ascii_case(&prof.name);
                                         let label = if has_embedding {
-                                            format!("{} ({:.0}%)", prof.name, prof.confidence * 100.0)
+                                            format!(
+                                                "{} ({:.0}%)",
+                                                prof.name,
+                                                prof.confidence * 100.0
+                                            )
                                         } else {
                                             prof.name.clone()
                                         };
@@ -526,11 +542,14 @@ impl PhotoOrganizerApp {
                                     single_train_requested = true;
                                 }
 
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.button("Close (Esc)").clicked() {
-                                        close_modal = true;
-                                    }
-                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui.button("Close (Esc)").clicked() {
+                                            close_modal = true;
+                                        }
+                                    },
+                                );
                             });
                         });
                 });
@@ -548,8 +567,6 @@ impl PhotoOrganizerApp {
         }
     }
 }
-
-
 
 impl eframe::App for PhotoOrganizerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -572,7 +589,6 @@ impl eframe::App for PhotoOrganizerApp {
         }
 
         while let Ok(msg) = self.rx.try_recv() {
-
             match msg {
                 ScanMessage::Item(payload) => {
                     let filename = payload
@@ -845,9 +861,11 @@ impl eframe::App for PhotoOrganizerApp {
                                         let tex_id = item.texture.id();
                                         response.on_hover_ui(|ui| {
                                             ui.label(
-                                                egui::RichText::new("🔍 Click to inspect photo in modal")
-                                                    .strong()
-                                                    .color(egui::Color32::from_rgb(0, 180, 255)),
+                                                egui::RichText::new(
+                                                    "🔍 Click to inspect photo in modal",
+                                                )
+                                                .strong()
+                                                .color(egui::Color32::from_rgb(0, 180, 255)),
                                             );
                                             let hover_w = 380.0;
                                             let hover_h = hover_w * aspect;
@@ -867,10 +885,7 @@ impl eframe::App for PhotoOrganizerApp {
                                             open_modal_idx = Some(idx);
                                         }
 
-                                        ui.checkbox(
-                                            &mut item.selected,
-                                            &filename,
-                                        );
+                                        ui.checkbox(&mut item.selected, &filename);
 
                                         ui.horizontal(|ui| {
                                             ui.label(format!("{}/{:02}", item.year, item.month));
@@ -1023,4 +1038,3 @@ impl eframe::App for PhotoOrganizerApp {
         self.render_modal(ctx);
     }
 }
-
