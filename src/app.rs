@@ -1170,11 +1170,6 @@ mod layout_tests {
 
     /// Lays out the grid cell's category controls into a harness `cell_width`
     /// points wide and returns every widget egui placed, in points.
-    ///
-    /// `stacked` mirrors the production grid cell: the combo and train button
-    /// share a horizontal line, and the custom input follows on its own line.
-    /// `inline` is the shape that caused the original bug, kept so the tests
-    /// can prove their assertions actually detect it.
     fn render_category_cell(cell_width: f32) -> Vec<WidgetRect> {
         let store = ProfileStore::default();
 
@@ -1198,6 +1193,44 @@ mod layout_tests {
         harness.set_size(egui::vec2(cell_width, 400.0));
         harness.run();
 
+        placed_widgets(&harness)
+    }
+
+    /// Lays out the inspection modal's bottom control row into a harness
+    /// `modal_width` points wide and returns every widget egui placed, in
+    /// points.
+    fn render_modal_row(modal_width: f32) -> Vec<WidgetRect> {
+        render_modal_row_with(modal_width, |_| {})
+    }
+
+    /// `render_modal_row`, with `tweak` applied to the item before it is laid
+    /// out, so tests can vary the item's state.
+    fn render_modal_row_with(
+        modal_width: f32,
+        tweak: impl Fn(&mut StagedItem) + Send + 'static,
+    ) -> Vec<WidgetRect> {
+        let store = ProfileStore::default();
+
+        let mut harness = Harness::new_ui_state(
+            move |ui, item: &mut Option<StagedItem>| {
+                let item = item.get_or_insert_with(|| staged_item(ui.ctx()));
+                tweak(item);
+                // The row sits inside the modal's window frame, which eats into
+                // the width available to it, so lay it out inside a frame too.
+                egui::Frame::window(ui.style()).show(ui, |ui| {
+                    PhotoOrganizerApp::render_modal_controls(&store, ui, item, 0, 12);
+                });
+            },
+            None,
+        );
+        harness.set_size(egui::vec2(modal_width, 400.0));
+        harness.run();
+
+        placed_widgets(&harness)
+    }
+
+    /// Every widget egui placed in a harness, in points.
+    fn placed_widgets(harness: &Harness<'_, Option<StagedItem>>) -> Vec<WidgetRect> {
         harness
             .kittest_state()
             .query_all(by().recursive(true))
@@ -1228,6 +1261,13 @@ mod layout_tests {
             .unwrap_or_else(|| {
                 panic!("no widget with role containing {role_contains:?} in {rects:#?}")
             })
+    }
+
+    fn find_labelled<'a>(rects: &'a [WidgetRect], label_contains: &str) -> &'a WidgetRect {
+        rects
+            .iter()
+            .find(|r| r.label.contains(label_contains))
+            .unwrap_or_else(|| panic!("no widget labelled {label_contains:?} in {rects:#?}"))
     }
 
     #[test]
@@ -1335,6 +1375,84 @@ mod layout_tests {
                 "column count dropped from {previous} to {columns} at width {available}"
             );
             previous = columns;
+        }
+    }
+
+    #[test]
+    fn modal_input_shares_the_row_with_the_combo() {
+        // The modal's control row has room to spare, so the custom input sits
+        // inline: same row as the combo, immediately after it. This is the
+        // deliberate opposite of `custom_input_renders_below_the_combo_not_beside_it`,
+        // which guards the grid cell, where a column simply has no room.
+        let rects = render_modal_row(1100.0);
+
+        let combo = find(&rects, "ComboBox");
+        let input = find(&rects, "TextInput");
+        let train = find_labelled(&rects, "Train");
+
+        assert!(
+            combo.same_row(input),
+            "modal custom input must share the combo's row.\ncombo: {combo:?}\ninput: {input:?}"
+        );
+        assert!(
+            input.x0 >= combo.x1 - 0.5 && input.x1 > combo.x1,
+            "modal custom input should start right after the combo.\ncombo: {combo:?}\n\
+             input: {input:?}"
+        );
+        assert!(
+            combo.same_row(train),
+            "the train button stays on the combo's row alongside the input.\n\
+             combo: {combo:?}\ntrain: {train:?}"
+        );
+
+        // Sharing the row must not squeeze the input down to nothing, and it
+        // must not grow into the gap that keeps it clear of the train button.
+        assert!(
+            input.width() >= f64::from(MIN_CONTROL_WIDTH),
+            "inline modal input should stay usable, got {:.1}pt\ninput: {input:?}",
+            input.width()
+        );
+        assert!(
+            input.x1 <= train.x0,
+            "inline modal input must not overlap the train button.\ninput: {input:?}\n\
+             train: {train:?}"
+        );
+    }
+
+    #[test]
+    fn modal_input_hides_for_known_categories() {
+        // The input is a control for the custom path only; showing it for a
+        // profile category would let the name drift away from the profile.
+        let rects = render_modal_row_with(1100.0, |item| item.is_custom = false);
+
+        assert!(
+            !rects.iter().any(|r| r.role.contains("TextInput")),
+            "no custom input expected for a known category, got {rects:#?}"
+        );
+    }
+
+    #[test]
+    fn modal_controls_stay_within_the_modal() {
+        // The modal is sized from the screen, so the row has to fit whatever
+        // width it is given. Navigation plus the category controls need ~530pt
+        // before the inline input, and the input takes only what the row has
+        // left, so every width the app can actually produce - the window alone
+        // insists on 1240pt - lays out without clipping.
+        for modal_width in [800.0, 900.0, 1000.0, 1100.0] {
+            let rects = render_modal_row(modal_width);
+
+            assert!(
+                !rects.is_empty(),
+                "expected widgets to be laid out at modal width {modal_width}"
+            );
+            for r in &rects {
+                assert!(
+                    r.x1 <= modal_width as f64 + 0.5 && r.x0 >= -0.5,
+                    "widget {:?} ({}) escapes the {modal_width}pt modal\nrect: {r:?}",
+                    r.role,
+                    r.label,
+                );
+            }
         }
     }
 
