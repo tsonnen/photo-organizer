@@ -275,17 +275,16 @@ impl PhotoOrganizerApp {
                 item.source = ClassificationSource::Manual;
             }
         });
+    }
 
-        if item.is_custom {
-            let input_width = combo_width.unwrap_or(120.0);
-            let custom_input = ui.add(
-                egui::TextEdit::singleline(&mut item.category)
-                    .hint_text("Custom category...")
-                    .desired_width(input_width),
-            );
-            if custom_input.changed() {
-                item.source = ClassificationSource::Manual;
-            }
+    fn render_custom_category_input(ui: &mut egui::Ui, item: &mut StagedItem, input_width: f32) {
+        let custom_input = ui.add(
+            egui::TextEdit::singleline(&mut item.category)
+                .hint_text("Custom category...")
+                .desired_width(input_width),
+        );
+        if custom_input.changed() {
+            item.source = ClassificationSource::Manual;
         }
     }
 
@@ -557,6 +556,10 @@ impl PhotoOrganizerApp {
                                     },
                                 );
                             });
+
+                            if item.is_custom {
+                                Self::render_custom_category_input(ui, item, 120.0);
+                            }
                         });
                 });
             });
@@ -941,6 +944,16 @@ impl eframe::App for PhotoOrganizerApp {
                                                     Some((idx, item.category.clone()));
                                             }
                                         });
+
+                                        if item.is_custom {
+                                            let category_input_width =
+                                                (item_width - (SPACING * 2.0)).max(60.0);
+                                            Self::render_custom_category_input(
+                                                ui,
+                                                item,
+                                                category_input_width,
+                                            );
+                                        }
                                     });
                                     if (idx + 1) % number_columns == 0 {
                                         ui.end_row();
@@ -962,3 +975,60 @@ impl eframe::App for PhotoOrganizerApp {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_custom_input_not_rendered_inline_with_combobox() {
+        // The custom category text input must live in its own method so callers can
+        // place it on a separate layout line. Embedding it inside
+        // render_category_selector puts it on the same line as the ComboBox, which
+        // overflows the grid cell and pushes the last column out of the window.
+        let source = include_str!("app.rs");
+
+        assert!(
+            source.contains("fn render_custom_category_input"),
+            "render_custom_category_input method must exist to render custom input separately"
+        );
+
+        let render_fn_start = source.find("fn render_category_selector").unwrap();
+        let render_fn_end = source[render_fn_start..].find("\n    }").unwrap() + render_fn_start;
+        let render_fn = &source[render_fn_start..render_fn_end];
+
+        assert!(
+            !render_fn.contains("TextEdit::singleline"),
+            "render_category_selector must NOT render the custom input inline with the ComboBox"
+        );
+    }
+
+    #[test]
+    fn test_custom_input_rendered_by_both_grid_and_modal() {
+        // Both the grid cell and the inspection modal must render the custom input,
+        // otherwise a custom category becomes uneditable in one of the two views.
+        // Count only production call sites, excluding this test's own literal.
+        let source = include_str!("app.rs");
+        let production = &source[..source.find("#[cfg(test)]").unwrap()];
+
+        let call_sites = production
+            .matches("Self::render_custom_category_input(")
+            .count();
+        assert_eq!(
+            call_sites, 2,
+            "expected render_custom_category_input to be called from both the grid cell \
+             and the modal, found {call_sites} call site(s)"
+        );
+    }
+
+    #[test]
+    fn test_is_custom_category_is_case_insensitive() {
+        let mut store = ProfileStore::default();
+        store.add_exemplar("Sunsets", &[1.0, 0.0, 0.0]);
+
+        // Known profile names are not custom, and matching ignores case.
+        assert!(!PhotoOrganizerApp::is_custom_category(&store, "Sunsets"));
+        assert!(!PhotoOrganizerApp::is_custom_category(&store, "sunsets"));
+        // Unknown names are custom.
+        assert!(PhotoOrganizerApp::is_custom_category(&store, "Beach Trip"));
+    }
+}
