@@ -23,7 +23,13 @@ something sensible, and you teach it your own categories as you go.
 It runs entirely on the CPU. There's no server, no API key, and no network calls at
 runtime.
 
-## Running it
+## Installing
+[Latest release](https://github.com/tsonnen/photo-organizer/releases). For new installs, 
+download the appropriate compressed file, this will include required models. For updating 
+a release, just download the executable and replace it where ever the uncompressed file 
+was placed. This will allow for maintaining training. 
+
+## Development
 
 You'll need a recent Rust toolchain.
 

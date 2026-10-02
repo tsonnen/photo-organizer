@@ -83,6 +83,7 @@ jobs:
           name: photo_organizer-${{ matrix.target }}
           path: |
             ${{ matrix.archive_name }}
+            ${{ matrix.binary_name }}
           retention-days: 14
 
       - name: Upload to GitHub Release
@@ -91,5 +92,6 @@ jobs:
         with:
           files: |
             ${{ matrix.archive_name }}
+            ${{ matrix.binary_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
