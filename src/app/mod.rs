@@ -6,10 +6,11 @@
 //! - [`scan`] runs a folder scan and folds results into staged items
 //! - [`grid`] the thumbnail grid
 //! - [`modal`] the inspection modal
+//! - [`profiles_modal`] the scrollable profile list and its two-step delete
 //! - [`categories`] classification, training and the category widgets
 //! - [`toolbar`] the top panel
 //! - [`transfer`] move/copy and undo
-//! - [`layout`] grid and control sizing arithmetic
+//! - [`layout`] grid, control and modal sizing arithmetic
 //! - [`models`] the plain data records the widgets render
 
 mod categories;
@@ -17,6 +18,7 @@ mod grid;
 mod layout;
 mod modal;
 mod models;
+mod profiles_modal;
 mod scan;
 mod toolbar;
 mod transfer;
@@ -29,6 +31,7 @@ use crate::profile_store::ProfileStore;
 use crate::scanner::ScanMessage;
 use eframe::egui;
 use models::{ModalPreview, StagedItem};
+use profiles_modal::DeletePrompt;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 
@@ -40,6 +43,8 @@ pub struct PhotoOrganizerApp {
     profiles: ProfileStore,
     model_available: bool,
     show_categories_panel: bool,
+    show_profiles_modal: bool,
+    delete_prompt: DeletePrompt,
     target_training_category: String,
     status_message: Option<(String, egui::Color32)>,
     tx: Sender<ScanMessage>,
@@ -71,6 +76,8 @@ impl PhotoOrganizerApp {
             profiles,
             model_available,
             show_categories_panel: false,
+            show_profiles_modal: false,
+            delete_prompt: DeletePrompt::default(),
             target_training_category: String::new(),
             status_message: None,
             tx,
@@ -122,5 +129,6 @@ impl eframe::App for PhotoOrganizerApp {
         self.render_toolbar(ctx);
         self.render_grid(ctx);
         self.render_modal(ctx);
+        self.render_profiles_modal(ctx);
     }
 }
