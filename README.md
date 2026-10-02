@@ -29,27 +29,6 @@ download the appropriate compressed file, this will include required models. For
 a release, just download the executable and replace it where ever the uncompressed file 
 was placed. This will allow for maintaining training. 
 
-## Development
-
-You'll need a recent Rust toolchain.
-
-On Linux, the GUI dependencies:
-
-```bash
-sudo apt-get install libgtk-3-dev libxkbcommon-dev
-```
-
-Then:
-
-```bash
-git clone https://github.com/tsonnen/photo-organizer.git
-cd photo-organizer
-cargo run --release
-```
-
-The release build is meaningfully faster than a debug build, and inference is the
-slow part, so it's worth it for anything but a quick look.
-
 ## The CLIP model
 
 Classification runs on `models/clip_vision.safetensors`. It's tracked with Git LFS, so
