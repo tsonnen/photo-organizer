@@ -3203,6 +3203,7 @@ dependencies = [
  "egui_kittest",
  "hf-hub",
  "image 0.24.9",
+ "jpeg-decoder",
  "kamadak-exif",
  "rawloader",
  "rayon",

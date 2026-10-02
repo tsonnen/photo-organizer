@@ -68,6 +68,108 @@ pub fn load_image(path: &Path) -> Result<DynamicImage> {
     }
 }
 
+/// Longest edge the CLIP preprocessing stage needs to receive. Anything smaller
+/// than this and the model input is being upscaled, which is never useful.
+pub const CLIP_INPUT_EDGE: u32 = 224;
+
+/// The pixels a scan actually needs, decoded at (or near) the size it needs them.
+///
+/// The full-resolution frame is only ever an intermediate here: the grid wants a
+/// 200x140 thumbnail and CLIP wants a 224x224 square. Decoding a 12MP JPEG just
+/// to feed those two consumers costs an order of magnitude more than everything
+/// else in a scan put together, so JPEGs are decoded straight to a reduced size
+/// via the inverse DCT's own scaling modes.
+///
+/// `original_width`/`original_height` carry the true frame size because the
+/// classification heuristics key off resolution (a 1920x1080 PNG is a
+/// screenshot, a 240x135 one is not).
+pub struct ScanPreview {
+    pub image: DynamicImage,
+    pub original_width: u32,
+    pub original_height: u32,
+}
+
+/// Loads the pixels a scan needs from `path`.
+///
+/// JPEGs take a scaled decode; every other format (PNG, WebP, TIFF, RAW, ...)
+/// falls back to a full decode followed by a rescale, since those formats have
+/// no cheap partial decode.
+pub fn load_scan_preview(path: &Path) -> Result<ScanPreview> {
+    if let Some(preview) = jpeg_scan_preview(path) {
+        return Ok(preview);
+    }
+
+    let full = load_image(path)?;
+    let (original_width, original_height) = (full.width(), full.height());
+    Ok(ScanPreview {
+        image: shrink_to_scan_preview(&full),
+        original_width,
+        original_height,
+    })
+}
+
+/// Rescales a decoded image down to roughly what the pipeline consumes.
+fn shrink_to_scan_preview(full: &DynamicImage) -> DynamicImage {
+    // The preview edge budget is the CLIP input; anything already at or below it
+    // is passed through untouched so small images are never blown up.
+    if full.width() <= CLIP_INPUT_EDGE && full.height() <= CLIP_INPUT_EDGE {
+        return full.clone();
+    }
+    full.thumbnail(SCAN_PREVIEW_EDGE, SCAN_PREVIEW_EDGE)
+}
+
+/// The edge size a decoded JPEG preview should land near: twice the CLIP input,
+/// which leaves the 200x140 thumbnail with real detail to sample from.
+const SCAN_PREVIEW_EDGE: u32 = CLIP_INPUT_EDGE * 2;
+
+/// Attempts a DCT-scaled JPEG decode, returning `None` for anything that isn't a
+/// JPEG `jpeg-decoder` can handle, so the caller can fall back to `load_image`.
+fn jpeg_scan_preview(path: &Path) -> Option<ScanPreview> {
+    let file = File::open(path).ok()?;
+    let mut decoder = jpeg_decoder::Decoder::new(BufReader::with_capacity(256 * 1024, file));
+    decoder.read_info().ok()?;
+
+    // `info()` reflects the *output* size, so it has to be read before `scale()`
+    // if the original dimensions are wanted.
+    let info = decoder.info()?;
+    if info.pixel_format != jpeg_decoder::PixelFormat::RGB24 {
+        return None;
+    }
+    let (original_width, original_height) = (info.width as u32, info.height as u32);
+    if original_width == 0 || original_height == 0 {
+        return None;
+    }
+    // Already small enough that scaling down would only throw pixels away.
+    if original_width <= CLIP_INPUT_EDGE && original_height <= CLIP_INPUT_EDGE {
+        return None;
+    }
+
+    // `scale` picks the largest supported reduction (1/8, 1/4, 1/2) whose result
+    // is at least the requested size on *at least one* axis. For a landscape or
+    // portrait photo that leaves the short edge below the CLIP input, so the
+    // request is bumped until both edges clear it and nothing gets upscaled.
+    let mut request = CLIP_INPUT_EDGE as u16;
+    let mut scaled = None;
+    for _ in 0..3 {
+        let (width, height) = decoder.scale(request, request).ok()?;
+        if width as u32 >= CLIP_INPUT_EDGE && height as u32 >= CLIP_INPUT_EDGE {
+            scaled = Some((width as u32, height as u32));
+            break;
+        }
+        request = request.saturating_mul(2);
+    }
+    let (width, height) = scaled?;
+
+    let pixels = decoder.decode().ok()?;
+    let rgb = image::RgbImage::from_raw(width, height, pixels)?;
+
+    Some(ScanPreview {
+        image: DynamicImage::ImageRgb8(rgb),
+        original_width,
+        original_height,
+    })
+}
+
 /// Converts a DynamicImage to an egui::ColorImage, scaling down to fit within
 /// `max_edge` while preserving aspect ratio.
 fn dynamic_to_color_image(img: &DynamicImage, max_edge: u32) -> egui::ColorImage {
@@ -204,6 +306,62 @@ mod tests {
         let loaded = load_image(&test_file).expect("load real image");
         assert_eq!(loaded.width(), 50);
         assert_eq!(loaded.height(), 50);
+
+        let _ = fs::remove_file(&test_file);
+    }
+
+    #[test]
+    fn test_scan_preview_jpeg_scales_down_and_keeps_original_size() {
+        let test_file =
+            std::env::temp_dir().join(format!("test_preview_{}.jpg", std::process::id()));
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(4000, 3000))
+            .save(&test_file)
+            .unwrap();
+
+        let preview = load_scan_preview(&test_file).expect("load jpeg preview");
+
+        // Decoded smaller, but never below what CLIP and the thumbnail need.
+        assert!(
+            preview.image.width() < 4000 && preview.image.height() < 3000,
+            "expected a scaled decode, got {:?}",
+            (preview.image.width(), preview.image.height())
+        );
+        assert!(preview.image.width() >= CLIP_INPUT_EDGE);
+        assert!(preview.image.height() >= CLIP_INPUT_EDGE);
+
+        // The heuristics depend on the true resolution, not the preview's.
+        assert_eq!(preview.original_width, 4000);
+        assert_eq!(preview.original_height, 3000);
+
+        let _ = fs::remove_file(&test_file);
+    }
+
+    #[test]
+    fn test_scan_preview_falls_back_for_non_jpeg() {
+        let test_file =
+            std::env::temp_dir().join(format!("test_preview_{}.png", std::process::id()));
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(1000, 800))
+            .save(&test_file)
+            .unwrap();
+
+        let preview = load_scan_preview(&test_file).expect("load png preview");
+        assert_eq!(preview.original_width, 1000);
+        assert_eq!(preview.original_height, 800);
+        assert!(preview.image.width() <= 1000);
+
+        let _ = fs::remove_file(&test_file);
+    }
+
+    #[test]
+    fn test_scan_preview_never_upsamples_small_images() {
+        let test_file = std::env::temp_dir().join(format!("test_small_{}.jpg", std::process::id()));
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(120, 90))
+            .save(&test_file)
+            .unwrap();
+
+        let preview = load_scan_preview(&test_file).expect("load small jpeg");
+        assert_eq!(preview.image.width(), 120);
+        assert_eq!(preview.image.height(), 90);
 
         let _ = fs::remove_file(&test_file);
     }

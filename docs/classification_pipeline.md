@@ -7,7 +7,7 @@ flowchart TD
     A["Input Photo / Image"] --> B["Compute BLAKE3 Hash"]
     B --> C["SQLite Photo Cache"]
     C -->|"Cache Hit (Embedding & Thumbnail)"| G["Classifier"]
-    C -->|"Cache Miss"| D["Decode Image & Generate Thumbnail"]
+    C -->|"Cache Miss"| D["Decode Image at Scan Resolution & Generate Thumbnail"]
     D --> E{"Candle CLIP Vision Model Available?"}
     E -->|"Yes (SafeTensors)"| F1["Extract L2-Normalized Embedding Vector"]
     E -->|"No"| F2["Empty Embedding (Graceful Fallback)"]
@@ -34,6 +34,21 @@ flowchart TD
         S --> T["Trigger Instant Re-classification"]
     end
 ```
+
+## Scan Decode Path
+
+The grid wants a 200x140 thumbnail and CLIP wants a 224x224 square, so the scan
+never decodes a full-resolution frame. JPEGs are decoded through
+`jpeg-decoder`'s DCT scaling (1/8, 1/4 or 1/2, whichever leaves the image above
+the CLIP input size), which shrinks during the inverse DCT rather than after it.
+Every other format has no cheap partial decode and falls back to a full decode
+followed by a rescale. The true frame dimensions are carried separately because
+the rule-based heuristics in `Classifier` key off resolution.
+
+Scans run on a dedicated rayon pool rather than the global one. The CLIP forward
+pass dominates and re-reads its full weight matrix per photo, so throughput is
+memory-bandwidth-bound rather than core-bound; see `scan_thread_count` for the
+tuning and `PHOTO_ORGANIZER_SCAN_THREADS` to override it.
 
 ## Classification Tiers
 
