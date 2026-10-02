@@ -1,6 +1,8 @@
 use crate::db::{CachedPhotoData, Database};
 use crate::inference::{extract_embedding, find_model_path, init_clip_session};
-use crate::media::{cached_thumb_to_egui, dynamic_to_cached_thumb, extract_date, load_image};
+use crate::media::{
+    cached_thumb_to_egui, dynamic_to_cached_thumb, extract_date, load_scan_preview,
+};
 use crate::profile_store::{ClassificationSource, ProfileStore};
 use eframe::egui;
 use rayon::prelude::*;
@@ -77,6 +79,32 @@ pub fn scan_folder(
     scan_folder_with_db(folder, profiles, tx, ctx, PathBuf::from("photo_cache.db"));
 }
 
+/// Number of worker threads the scan runs on.
+///
+/// The scan is not compute-bound in the way the core count suggests: the CLIP
+/// forward pass dominates and it re-reads its entire ~350 MB of f32 weights from
+/// RAM on every photo, so throughput is set by memory bandwidth rather than by
+/// how many cores can multiply. Measured on a 22-core machine, 8-12 concurrent
+/// forwards were ~1.4x *faster* than 22, because the surplus threads spend their
+/// time stalled on cores they cannot keep fed.
+///
+/// Roughly half the machine is therefore the better default, which also leaves
+/// the rest of the box responsive while a scan is running. Override with
+/// `PHOTO_ORGANIZER_SCAN_THREADS`.
+fn scan_thread_count() -> usize {
+    if let Ok(raw) = std::env::var("PHOTO_ORGANIZER_SCAN_THREADS") {
+        if let Ok(requested) = raw.trim().parse::<usize>() {
+            if requested > 0 {
+                return requested;
+            }
+        }
+    }
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    (cores / 2).clamp(2, 12)
+}
+
 pub fn scan_folder_with_db(
     folder: PathBuf,
     profiles: ProfileStore,
@@ -105,159 +133,173 @@ pub fn scan_folder_with_db(
         let model_path = find_model_path();
         let session = Arc::new(model_path.and_then(|p| init_clip_session(p).ok()));
 
-        paths.par_iter().for_each(|path| {
-            let file_hash = Database::compute_file_hash(path).unwrap_or_default();
+        // Deliberately not the global rayon pool: the scan wants a smaller,
+        // bandwidth-bound worker count than "one per core", and running it here
+        // keeps that pool out of the rest of the app's work.
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(scan_thread_count())
+            .thread_name(|i| format!("scan-{i}"))
+            .build()
+            .unwrap_or_else(|_| rayon::ThreadPoolBuilder::new().build().unwrap());
 
-            // 1. Check SQLite Cache
-            let cached = {
-                let db_guard = db.lock().unwrap();
-                if let Some(ref db_conn) = *db_guard {
-                    db_conn.get_cached(&file_hash).ok().flatten()
-                } else {
-                    None
-                }
-            };
+        pool.install(|| {
+            paths.par_iter().for_each(|path| {
+                let file_hash = Database::compute_file_hash(path).unwrap_or_default();
 
-            if let Some(mut c) = cached {
-                // If photo was previously cached without embedding, backfill it now
-                if c.embedding.is_empty() {
-                    if let Some(ref sess) = *session {
-                        if let Ok(dyn_img) = load_image(path) {
-                            if let Ok(emb) = extract_embedding(sess, &dyn_img) {
-                                if !emb.is_empty() {
-                                    c.embedding = emb.clone();
-                                    let db_guard = db.lock().unwrap();
-                                    if let Some(ref db_conn) = *db_guard {
-                                        let _ = db_conn.insert_cache(
-                                            &file_hash,
-                                            &CachedPhotoData {
-                                                year: c.year,
-                                                month: c.month,
-                                                is_exif_date: c.is_exif_date,
-                                                embedding: emb,
-                                                thumbnail: c.thumbnail.clone(),
-                                            },
-                                        );
+                // 1. Check SQLite Cache
+                let cached = {
+                    let db_guard = db.lock().unwrap();
+                    if let Some(ref db_conn) = *db_guard {
+                        db_conn.get_cached(&file_hash).ok().flatten()
+                    } else {
+                        None
+                    }
+                };
+
+                if let Some(mut c) = cached {
+                    // If photo was previously cached without embedding, backfill it now
+                    if c.embedding.is_empty() {
+                        if let Some(ref sess) = *session {
+                            if let Ok(preview) = load_scan_preview(path) {
+                                if let Ok(emb) = extract_embedding(sess, &preview.image) {
+                                    if !emb.is_empty() {
+                                        c.embedding = emb.clone();
+                                        let db_guard = db.lock().unwrap();
+                                        if let Some(ref db_conn) = *db_guard {
+                                            let _ = db_conn.insert_cache(
+                                                &file_hash,
+                                                &CachedPhotoData {
+                                                    year: c.year,
+                                                    month: c.month,
+                                                    is_exif_date: c.is_exif_date,
+                                                    embedding: emb,
+                                                    thumbnail: c.thumbnail.clone(),
+                                                },
+                                            );
+                                        }
                                     }
                                 }
                             }
                         }
                     }
+
+                    let (w, h) = if let Some(ref thumb) = c.thumbnail {
+                        (thumb.width, thumb.height)
+                    } else {
+                        (1920, 1080)
+                    };
+                    let class_res =
+                        profiles.classify_with_heuristics(&c.embedding, path, c.is_exif_date, w, h);
+
+                    let image = if let Some(ref thumb) = c.thumbnail {
+                        cached_thumb_to_egui(thumb)
+                    } else if let Ok(preview) = load_scan_preview(path) {
+                        let (cached_thumb, color_img) = dynamic_to_cached_thumb(&preview.image);
+                        let db_guard = db.lock().unwrap();
+                        if let Some(ref db_conn) = *db_guard {
+                            let _ = db_conn.insert_cache(
+                                &file_hash,
+                                &CachedPhotoData {
+                                    year: c.year,
+                                    month: c.month,
+                                    is_exif_date: c.is_exif_date,
+                                    embedding: c.embedding.clone(),
+                                    thumbnail: Some(cached_thumb),
+                                },
+                            );
+                        }
+                        color_img
+                    } else {
+                        return;
+                    };
+
+                    let _ = tx.send(ScanMessage::Item(ProcessedPayload {
+                        source_path: path.clone(),
+                        year: c.year,
+                        month: c.month,
+                        is_exif: c.is_exif_date,
+                        category: class_res.category,
+                        confidence: class_res.confidence,
+                        source: class_res.source,
+                        embedding: c.embedding,
+                        image,
+                    }));
+                    ctx.request_repaint();
+                    return;
                 }
 
-                let (w, h) = if let Some(ref thumb) = c.thumbnail {
-                    (thumb.width, thumb.height)
-                } else {
-                    (1920, 1080)
+                // 2. Uncached image: decode once, at the size the pipeline consumes
+                let (date_info, preview, cached_thumb, image) = match load_scan_preview(path) {
+                    Ok(preview) => {
+                        let (thumb, egui_img) = dynamic_to_cached_thumb(&preview.image);
+                        let date_info = extract_date(path);
+                        (date_info, preview, thumb, egui_img)
+                    }
+                    Err(_) => return,
                 };
-                let class_res =
-                    profiles.classify_with_heuristics(&c.embedding, path, c.is_exif_date, w, h);
 
-                let image = if let Some(ref thumb) = c.thumbnail {
-                    cached_thumb_to_egui(thumb)
-                } else if let Ok(dyn_img) = load_image(path) {
-                    let (cached_thumb, color_img) = dynamic_to_cached_thumb(&dyn_img);
+                // Immediately send thumbnail to UI so user sees the photo right away!
+                let _ = tx.send(ScanMessage::Item(ProcessedPayload {
+                    source_path: path.clone(),
+                    year: date_info.0,
+                    month: date_info.1,
+                    is_exif: date_info.2,
+                    category: "Classifying...".to_string(),
+                    confidence: 0.0,
+                    source: ClassificationSource::UnsortedFallback,
+                    embedding: Vec::new(),
+                    image,
+                }));
+                ctx.request_repaint();
+
+                // 3. Extract embedding in background
+                let emb = if let Some(ref sess) = *session {
+                    extract_embedding(sess, &preview.image).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+
+                // The heuristics read real resolution (a 1920x1080 PNG is a
+                // screenshot), so they get the source dimensions rather than the
+                // preview's.
+                let class_res = profiles.classify_with_heuristics(
+                    &emb,
+                    path,
+                    date_info.2,
+                    preview.original_width,
+                    preview.original_height,
+                );
+
+                // 4. Save to cache with thumbnail
+                {
                     let db_guard = db.lock().unwrap();
                     if let Some(ref db_conn) = *db_guard {
                         let _ = db_conn.insert_cache(
                             &file_hash,
                             &CachedPhotoData {
-                                year: c.year,
-                                month: c.month,
-                                is_exif_date: c.is_exif_date,
-                                embedding: c.embedding.clone(),
+                                year: date_info.0,
+                                month: date_info.1,
+                                is_exif_date: date_info.2,
+                                embedding: emb.clone(),
                                 thumbnail: Some(cached_thumb),
                             },
                         );
                     }
-                    color_img
-                } else {
-                    return;
-                };
+                }
 
-                let _ = tx.send(ScanMessage::Item(ProcessedPayload {
+                // 5. Update UI with final classification
+                let _ = tx.send(ScanMessage::Update {
                     source_path: path.clone(),
-                    year: c.year,
-                    month: c.month,
-                    is_exif: c.is_exif_date,
+                    year: date_info.0,
+                    month: date_info.1,
+                    is_exif: date_info.2,
                     category: class_res.category,
                     confidence: class_res.confidence,
                     source: class_res.source,
-                    embedding: c.embedding,
-                    image,
-                }));
+                    embedding: emb,
+                });
                 ctx.request_repaint();
-                return;
-            }
-
-            // 2. Uncached image: Fast thumbnail generation
-            let (date_info, dyn_img, cached_thumb, image) = match load_image(path) {
-                Ok(img) => {
-                    let (thumb, egui_img) = dynamic_to_cached_thumb(&img);
-                    let date_info = extract_date(path);
-                    (date_info, img, thumb, egui_img)
-                }
-                Err(_) => return,
-            };
-
-            // Immediately send thumbnail to UI so user sees the photo right away!
-            let _ = tx.send(ScanMessage::Item(ProcessedPayload {
-                source_path: path.clone(),
-                year: date_info.0,
-                month: date_info.1,
-                is_exif: date_info.2,
-                category: "Classifying...".to_string(),
-                confidence: 0.0,
-                source: ClassificationSource::UnsortedFallback,
-                embedding: Vec::new(),
-                image,
-            }));
-            ctx.request_repaint();
-
-            // 3. Extract embedding in background
-            let emb = if let Some(ref sess) = *session {
-                extract_embedding(sess, &dyn_img).unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-
-            let class_res = profiles.classify_with_heuristics(
-                &emb,
-                path,
-                date_info.2,
-                dyn_img.width(),
-                dyn_img.height(),
-            );
-
-            // 4. Save to cache with thumbnail
-            {
-                let db_guard = db.lock().unwrap();
-                if let Some(ref db_conn) = *db_guard {
-                    let _ = db_conn.insert_cache(
-                        &file_hash,
-                        &CachedPhotoData {
-                            year: date_info.0,
-                            month: date_info.1,
-                            is_exif_date: date_info.2,
-                            embedding: emb.clone(),
-                            thumbnail: Some(cached_thumb),
-                        },
-                    );
-                }
-            }
-
-            // 5. Update UI with final classification
-            let _ = tx.send(ScanMessage::Update {
-                source_path: path.clone(),
-                year: date_info.0,
-                month: date_info.1,
-                is_exif: date_info.2,
-                category: class_res.category,
-                confidence: class_res.confidence,
-                source: class_res.source,
-                embedding: emb,
             });
-            ctx.request_repaint();
         });
 
         let _ = tx.send(ScanMessage::Complete);
@@ -268,6 +310,33 @@ pub fn scan_folder_with_db(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // One test, because the env var is process-global and cargo runs tests in
+    // parallel threads.
+    #[test]
+    fn test_scan_thread_count_default_and_env_override() {
+        let previous = std::env::var("PHOTO_ORGANIZER_SCAN_THREADS").ok();
+        std::env::remove_var("PHOTO_ORGANIZER_SCAN_THREADS");
+
+        let cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        assert_eq!(scan_thread_count(), (cores / 2).clamp(2, 12));
+
+        std::env::set_var("PHOTO_ORGANIZER_SCAN_THREADS", " 3 ");
+        assert_eq!(scan_thread_count(), 3);
+
+        // Nonsense values fall back to the default rather than a broken pool.
+        for bad in ["not-a-number", "0", ""] {
+            std::env::set_var("PHOTO_ORGANIZER_SCAN_THREADS", bad);
+            assert!((2..=12).contains(&scan_thread_count()));
+        }
+
+        match previous {
+            Some(value) => std::env::set_var("PHOTO_ORGANIZER_SCAN_THREADS", value),
+            None => std::env::remove_var("PHOTO_ORGANIZER_SCAN_THREADS"),
+        }
+    }
 
     #[test]
     fn test_is_supported_image() {

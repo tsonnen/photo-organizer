@@ -352,39 +352,63 @@ pub fn init_clip_session<P: AsRef<Path>>(model_path: P) -> Result<ClipVisionSess
     })
 }
 
+/// Edge budget for the CLIP input. Resampling a 12MP frame straight down to
+/// 224 costs ~40ms; resizing the ~500px preview the scan already decodes costs
+/// ~1ms for the same result, so anything oversized is shrunk in two cheap steps.
+const PREPROCESS_MAX_EDGE: u32 = 512;
+
+/// Resizes `img` to the model's input size and flattens it into normalized
+/// NCHW `[1, 3, 224, 224]` data.
+fn preprocess_to_chw(img: &DynamicImage) -> Vec<f32> {
+    const IMAGE_SIZE: u32 = 224;
+    const NUM_CHANNELS: usize = 3;
+
+    const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
+    const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
+
+    // Decoding already shrinks the frame for us; this only kicks in for callers
+    // passing a full-resolution image.
+    let shrunk;
+    let source = if img.width() > PREPROCESS_MAX_EDGE || img.height() > PREPROCESS_MAX_EDGE {
+        shrunk = img.thumbnail(PREPROCESS_MAX_EDGE, PREPROCESS_MAX_EDGE);
+        &shrunk
+    } else {
+        img
+    };
+
+    let resized = source
+        .resize_exact(
+            IMAGE_SIZE,
+            IMAGE_SIZE,
+            image::imageops::FilterType::Triangle,
+        )
+        .to_rgb8();
+
+    let mut data = Vec::with_capacity(NUM_CHANNELS * IMAGE_SIZE as usize * IMAGE_SIZE as usize);
+    // Walk the RGB buffer as flat samples instead of per-pixel bounds checks.
+    let samples = resized.as_raw();
+    for channel in 0..NUM_CHANNELS {
+        let (mean, inv_std) = (IMAGENET_MEAN[channel], 1.0 / IMAGENET_STD[channel]);
+        for sample in samples.iter().skip(channel).step_by(NUM_CHANNELS) {
+            data.push((*sample as f32 / 255.0 - mean) * inv_std);
+        }
+    }
+    data
+}
+
 /// Preprocesses the image (resizing to 224x224 and ImageNet normalization),
 /// evaluates the CLIP visual model, and returns an L2-normalized embedding vector.
+///
+/// Callers are expected to hand over a scan-sized preview rather than a full
+/// frame; the guard below keeps the stage cheap even if they don't.
 pub fn extract_embedding(session: &ClipVisionSession, img: &DynamicImage) -> Result<Vec<f32>> {
     const IMAGE_HEIGHT: usize = 224;
     const IMAGE_WIDTH: usize = 224;
     const NUM_CHANNELS: usize = 3;
 
-    let resized = img
-        .resize_exact(
-            IMAGE_WIDTH as u32,
-            IMAGE_HEIGHT as u32,
-            image::imageops::FilterType::Triangle,
-        )
-        .to_rgb8();
-
-    let mut data = Vec::with_capacity(NUM_CHANNELS * IMAGE_WIDTH * IMAGE_HEIGHT);
-    const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
-    const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
-
-    // Dynamic image is RGB row-major; convert to NCHW format [1, 3, 224, 224]
-    for channel in 0..NUM_CHANNELS {
-        for y in 0..IMAGE_HEIGHT {
-            for x in 0..IMAGE_WIDTH {
-                let pixel = resized.get_pixel(x as u32, y as u32);
-                let val = (pixel[channel] as f32 / 255.0 - IMAGENET_MEAN[channel])
-                    / IMAGENET_STD[channel];
-                data.push(val);
-            }
-        }
-    }
-
+    let input = preprocess_to_chw(img);
     let input_tensor = Tensor::from_vec(
-        data,
+        input,
         (1, NUM_CHANNELS, IMAGE_HEIGHT, IMAGE_WIDTH),
         &session.device,
     )?;
