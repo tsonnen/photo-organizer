@@ -40,11 +40,10 @@ impl super::PhotoOrganizerApp {
         if total_count > 0 {
             self.status_message = Some((
                 format!(
-                    "⚡ Re-classified {} photo(s) ({} visual AI match(es), {} active category profile(s), threshold {:.2})",
+                    "⚡ Re-classified {} photo(s) ({} visual AI match(es), {} active category profile(s))",
                     total_count,
                     visual_count,
                     self.profiles.profiles.len(),
-                    self.profiles.confidence_threshold
                 ),
                 egui::Color32::from_rgb(180, 220, 255),
             ));

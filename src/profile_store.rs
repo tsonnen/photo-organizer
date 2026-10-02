@@ -11,6 +11,15 @@ pub enum ClassificationSource {
     UnsortedFallback,
 }
 
+/// Similarity a centroid match must reach before it is believed over the rules.
+///
+/// Fixed in code rather than exposed as a setting: the per-photo category
+/// dropdown already ranks every profile with its confidence, so a user who
+/// disagrees with a low-confidence match can correct that photo directly
+/// instead of re-sorting the whole library. The gate itself has to stay, though
+/// — it is what hands a weak CLIP match to the filename and EXIF rules below.
+pub const CONFIDENCE_THRESHOLD: f32 = 0.65;
+
 impl std::fmt::Display for ClassificationSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -85,19 +94,9 @@ impl CategoryProfile {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProfileStore {
     pub profiles: Vec<CategoryProfile>,
-    pub confidence_threshold: f32,
-}
-
-impl Default for ProfileStore {
-    fn default() -> Self {
-        Self {
-            profiles: Vec::new(),
-            confidence_threshold: 0.65,
-        }
-    }
 }
 
 impl ProfileStore {
@@ -161,19 +160,23 @@ impl ProfileStore {
         }
 
         if let Some((profile, sim)) = best_match {
-            if sim >= self.confidence_threshold {
+            if sim >= CONFIDENCE_THRESHOLD {
                 return ClassificationResult {
                     category: profile.name.clone(),
                     confidence: sim.clamp(0.0, 1.0),
                     source: ClassificationSource::VisualModel,
                 };
-            } else {
-                return ClassificationResult {
-                    category: "Unsorted".to_string(),
-                    confidence: sim.max(0.0),
-                    source: ClassificationSource::UnsortedFallback,
-                };
             }
+
+            // Too weak to believe, but still the closest thing we have: report
+            // the similarity and fall through to the rules, which outrank a
+            // low-confidence centroid match. This is what makes
+            // `classify_with_heuristics` worth calling.
+            return ClassificationResult {
+                category: "Unsorted".to_string(),
+                confidence: sim.max(0.0),
+                source: ClassificationSource::UnsortedFallback,
+            };
         }
 
         ClassificationResult {
@@ -387,17 +390,16 @@ mod tests {
                 CategoryProfile::new("Landscape", vec![1.0, 0.0, 0.0]),
                 CategoryProfile::new("Portrait", vec![0.0, 1.0, 0.0]),
             ],
-            confidence_threshold: 0.65,
         };
 
         let res1 = store.classify(&[0.9, 0.1, 0.0]);
         assert_eq!(res1.category, "Landscape");
-        assert!(res1.confidence > 0.65);
+        assert!(res1.confidence > CONFIDENCE_THRESHOLD);
         assert_eq!(res1.source, ClassificationSource::VisualModel);
 
         let res2 = store.classify(&[0.1, 0.9, 0.0]);
         assert_eq!(res2.category, "Portrait");
-        assert!(res2.confidence > 0.65);
+        assert!(res2.confidence > CONFIDENCE_THRESHOLD);
         assert_eq!(res2.source, ClassificationSource::VisualModel);
     }
 
@@ -405,13 +407,13 @@ mod tests {
     fn test_classify_below_threshold() {
         let store = ProfileStore {
             profiles: vec![CategoryProfile::new("Landscape", vec![1.0, 0.0, 0.0])],
-            confidence_threshold: 0.8,
         };
 
-        // Similarity is 0.5 (below 0.8 threshold)
+        // Similarity is 0.5, under the fixed threshold: the closest centroid
+        // still cannot claim the photo, so it is handed to the rules.
         let res = store.classify(&[0.5, 0.866, 0.0]);
         assert_eq!(res.category, "Unsorted");
-        assert!(res.confidence < 0.8);
+        assert!(res.confidence < CONFIDENCE_THRESHOLD);
         assert_eq!(res.source, ClassificationSource::UnsortedFallback);
     }
 
@@ -439,7 +441,6 @@ mod tests {
             centroid: vec![0.8, 0.6],
             sample_count: 3,
         });
-        store.confidence_threshold = 0.72;
 
         store.save_to_file(&file_path).expect("save profiles");
         let loaded = ProfileStore::load_from_file(&file_path).expect("load profiles");
@@ -447,7 +448,44 @@ mod tests {
         assert_eq!(loaded.profiles.len(), 1);
         assert_eq!(loaded.profiles[0].name, "Sunsets");
         assert_eq!(loaded.profiles[0].sample_count, 3);
-        assert!((loaded.confidence_threshold - 0.72).abs() < 1e-6);
+
+        let _ = fs::remove_file(&file_path);
+    }
+
+    #[test]
+    fn test_load_ignores_a_saved_threshold() {
+        // `confidence_threshold` is no longer a field, but existing profiles.json
+        // files still carry one. Serde ignores unknown fields, so those files
+        // have to keep loading and the stale value has to be dropped on the next
+        // save rather than crashing the app on start.
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join(format!("test_legacy_profiles_{}.json", std::process::id()));
+
+        fs::write(
+            &file_path,
+            r#"{
+  "profiles": [
+    {
+      "name": "Sunsets",
+      "centroid": [0.8, 0.6],
+      "sample_count": 3
+    }
+  ],
+  "confidence_threshold": 0.72
+}"#,
+        )
+        .expect("write legacy profiles");
+
+        let loaded = ProfileStore::load_from_file(&file_path).expect("load legacy profiles");
+        assert_eq!(loaded.profiles.len(), 1);
+        assert_eq!(loaded.profiles[0].name, "Sunsets");
+
+        loaded.save_to_file(&file_path).expect("re-save");
+        let rewritten = fs::read_to_string(&file_path).expect("read re-saved");
+        assert!(
+            !rewritten.contains("confidence_threshold"),
+            "re-saving should drop the retired field, got:\n{rewritten}"
+        );
 
         let _ = fs::remove_file(&file_path);
     }
@@ -494,7 +532,6 @@ mod tests {
     fn test_classify_with_heuristics_fallbacks() {
         let store = ProfileStore {
             profiles: vec![CategoryProfile::new("Landscape", vec![1.0, 0.0, 0.0])],
-            confidence_threshold: 0.8,
         };
 
         // 1. Matches visual
@@ -513,6 +550,18 @@ mod tests {
             store.classify_with_heuristics(&[], Path::new("my_screenshot.png"), false, 1920, 1080);
         assert_eq!(res2.category, "Screenshots");
         assert_eq!(res2.source, ClassificationSource::Heuristic);
+
+        // 2b. A real embedding that merely resembles the profile still loses to
+        // the rules, which is the whole reason the threshold gate exists.
+        let res2b = store.classify_with_heuristics(
+            &[0.5, 0.866, 0.0],
+            Path::new("receipt_from_the_shop.jpg"),
+            false,
+            800,
+            1200,
+        );
+        assert_eq!(res2b.category, "Documents");
+        assert_eq!(res2b.source, ClassificationSource::Heuristic);
 
         // 3. Neither matches -> Unsorted
         let res3 =
@@ -535,7 +584,6 @@ mod tests {
                 CategoryProfile::new("Landscape", vec![1.0, 0.0]),
                 CategoryProfile::new("Portrait", vec![0.0, 1.0]),
             ],
-            confidence_threshold: 0.65,
         };
         let ranked = store.rank_profiles(&[]);
         assert_eq!(ranked.len(), 2);
@@ -553,7 +601,6 @@ mod tests {
                 CategoryProfile::new("Landscape", vec![1.0, 0.0, 0.0]),
                 CategoryProfile::new("Sunset", vec![FRAC_1_SQRT_2, FRAC_1_SQRT_2, 0.0]),
             ],
-            confidence_threshold: 0.65,
         };
 
         // Query vector is close to Landscape [1.0, 0.0, 0.0]

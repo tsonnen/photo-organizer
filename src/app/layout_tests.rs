@@ -169,7 +169,6 @@ fn store_with(names: &[&str], samples: usize) -> ProfileStore {
                 sample_count: samples,
             })
             .collect(),
-        confidence_threshold: 0.65,
     }
 }
 
