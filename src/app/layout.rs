@@ -1,4 +1,5 @@
-//! Layout arithmetic for the photo grid and the category controls inside it.
+//! Layout arithmetic for the photo grid, the category controls inside it, and
+//! the profile management modal.
 //!
 //! Kept apart from the renderers so the geometry can be asserted directly,
 //! without a headless egui context, and so the numbers those renderers depend
@@ -17,6 +18,15 @@ pub(crate) const MIN_CONTROL_WIDTH: f32 = 60.0;
 
 /// Width of the category combo in the inspection modal, in points.
 pub(crate) const MODAL_COMBO_WIDTH: f32 = 120.0;
+
+/// Points the profile modal's header, hint line and separators take, leaving the
+/// rest of the card to the scrollable list.
+const PROFILE_MODAL_CHROME: f32 = 92.0;
+
+/// Floor for the profile list's height, so a degenerate card still shows a
+/// couple of rows instead of collapsing the scroll area to nothing. Never bites
+/// at production sizes: the card is at least 300pt tall, leaving 208pt.
+const MIN_PROFILE_LIST_HEIGHT: f32 = 120.0;
 
 /// Grid column count and item width for a given available width.
 ///
@@ -57,6 +67,27 @@ pub(crate) fn modal_input_width(ui: &egui::Ui) -> f32 {
     const TRAILING_CONTROLS: f32 = 170.0;
 
     (ui.available_width() - TRAILING_CONTROLS).clamp(MIN_CONTROL_WIDTH, 200.0)
+}
+
+/// Size of the profile management modal's card, in points.
+///
+/// Derived from the screen the way the inspection modal's card is, and clamped
+/// so a long list scrolls inside a card rather than stretching one. The height
+/// is set to show roughly a dozen categories: taller than that and a typical
+/// handful of profiles leaves the card mostly blank.
+pub(crate) fn profiles_modal_size(screen: egui::Vec2) -> egui::Vec2 {
+    egui::vec2(
+        (screen.x * 0.40).clamp(360.0, 560.0),
+        (screen.y * 0.45).clamp(300.0, 560.0),
+    )
+}
+
+/// Height the scrollable profile list gets inside a card of `card` size.
+///
+/// The list is the thing that scrolls, so it is bounded here rather than left
+/// to `available_height`, which the card's own chrome has already eaten into.
+pub(crate) fn profiles_list_height(card: egui::Vec2) -> f32 {
+    (card.y - PROFILE_MODAL_CHROME).max(MIN_PROFILE_LIST_HEIGHT)
 }
 
 #[cfg(test)]
@@ -130,5 +161,58 @@ mod tests {
             assert!(combo >= MIN_CONTROL_WIDTH, "combo {combo} below minimum");
             assert!(input >= MIN_CONTROL_WIDTH, "input {input} below minimum");
         }
+    }
+
+    #[test]
+    fn profile_card_fits_the_window_it_is_shown_on() {
+        // Sized off the screen and clamped, so it stays a card rather than
+        // becoming a sheet. The window enforces a 1240x900 minimum, which is
+        // the smallest screen it can actually be drawn on.
+        for screen in [
+            egui::vec2(1240.0, 900.0),
+            egui::vec2(1366.0, 768.0),
+            egui::vec2(1600.0, 1200.0),
+            egui::vec2(2560.0, 1440.0),
+            egui::vec2(3840.0, 2160.0),
+        ] {
+            let card = profiles_modal_size(screen);
+            assert!(
+                card.x <= screen.x && card.y <= screen.y,
+                "{card:?} card overflows a {screen:?} screen"
+            );
+            assert!(
+                (360.0..=560.0).contains(&card.x),
+                "card width {} outside 360..=560 at {screen:?}",
+                card.x
+            );
+            assert!(
+                (300.0..=560.0).contains(&card.y),
+                "card height {} outside 300..=560 at {screen:?}",
+                card.y
+            );
+        }
+    }
+
+    #[test]
+    fn profile_list_keeps_a_usable_height_on_every_card() {
+        // The list is bounded from the card, so the card's chrome can never
+        // squeeze it out of existence, and it never gets more than the card.
+        for screen in [egui::vec2(1240.0, 900.0), egui::vec2(3840.0, 2160.0)] {
+            let card = profiles_modal_size(screen);
+            let list = profiles_list_height(card);
+            assert!(list >= MIN_PROFILE_LIST_HEIGHT, "list {list} too short");
+            assert!(
+                list + PROFILE_MODAL_CHROME <= card.y + 0.5,
+                "list {list} plus chrome overflows a {card:?} card"
+            );
+        }
+    }
+
+    #[test]
+    fn profile_list_floors_rather_than_collapsing() {
+        // Documents the degenerate case rather than pretending it fits: a card
+        // with no room left still gets a couple of rows, which overflows that
+        // card. Production cards are at least 300pt tall, so it never happens.
+        assert_eq!(profiles_list_height(egui::vec2(360.0, 0.0)), 120.0);
     }
 }

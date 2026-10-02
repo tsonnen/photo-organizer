@@ -35,6 +35,16 @@ flowchart TD
     end
 ```
 
+## Managing Profiles
+
+Trained profiles are listed in the profile modal, opened from **Manage Profiles** in
+the AI & Categories panel, as a scrollable list of name and sample count. Deleting one
+drops its `CategoryProfile` from `profiles.json` and re-classifies the staged photos
+through the same pipeline as a threshold change, so items that were using it fall to
+the next best centroid, then to the rules, then to `Unsorted`. Because a deletion is
+permanent and costs the user their training for that category, the row's delete button
+only arms it; the deletion happens on a second, explicit confirmation.
+
 ## Scan Decode Path
 
 The grid wants a 200x140 thumbnail and CLIP wants a 224x224 square, so the scan

@@ -59,8 +59,13 @@ that doesn't fit gets **Other**, which gives you a free-text field for a name of
 own.
 
 Open **AI & Categories** in the toolbar to see the model status, move the confidence
-threshold, delete profiles, or train a whole batch at once from the selected photos.
-Changing the threshold re-sorts everything that hasn't been manually set.
+threshold, or train a whole batch at once from the selected photos. Changing the
+threshold re-sorts everything that hasn't been manually set.
+
+**Manage Profiles** opens a scrollable list of everything you've trained, with each
+category's sample count and a delete button. Deleting is deliberately two clicks —
+confirm and delete — because it throws away that category's training for good and
+re-sorts the photos that were using it.
 
 In the inspection modal (click any thumbnail):
 
@@ -114,7 +119,7 @@ The code is laid out like this:
 | Path | What lives there |
 | --- | --- |
 | `src/main.rs` | Window setup |
-| `src/app/` | The egui app, split by responsibility: grid, modal, toolbar, categories, transfer |
+| `src/app/` | The egui app, split by responsibility: grid, modal, profile modal, toolbar, categories, transfer |
 | `src/scanner.rs` | Folder scan, threaded and parallel |
 | `src/inference.rs` | CLIP model loading and embedding extraction |
 | `src/profile_store.rs` | Category profiles, centroids, rules |

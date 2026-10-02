@@ -84,8 +84,8 @@ impl PhotoOrganizerApp {
         }
     }
 
-    /// Model status, the confidence threshold, the profile list and training
-    /// from the selected photos.
+    /// Model status, the confidence threshold, the trigger for the profile
+    /// modal and training from the selected photos.
     fn render_categories_panel(&mut self, ui: &mut egui::Ui) {
         ui.separator();
         ui.horizontal(|ui| {
@@ -117,21 +117,21 @@ impl PhotoOrganizerApp {
             }
         });
 
-        ui.horizontal_wrapped(|ui| {
-            ui.label(format!("Profiles ({}):", self.profiles.profiles.len()));
-            let mut category_to_delete = None;
-            for p in &self.profiles.profiles {
-                ui.horizontal(|ui| {
-                    ui.label(format!("🏷 {} ({})", p.name, p.sample_count));
-                    if ui.small_button("❌").clicked() {
-                        category_to_delete = Some(p.name.clone());
-                    }
-                });
-            }
-            if let Some(cat) = category_to_delete {
-                self.remove_profile(&cat);
-            }
-        });
+        // The profile list itself lives in its own modal: rendered inline it was
+        // one horizontal run of names, which ran off the panel as soon as a
+        // handful of categories existed.
+        if ui
+            .button(format!(
+                "🏷 Manage Profiles ({})",
+                self.profiles.profiles.len()
+            ))
+            .on_hover_text("Review and delete the trained category profiles")
+            .clicked()
+        {
+            // A plain flag, safe to set mid-frame: `render_profiles_modal` runs
+            // later in this same frame, and nothing re-enters the toolbar.
+            self.show_profiles_modal = true;
+        }
 
         ui.horizontal(|ui| {
             ui.label("Train Category from Selected Photos:");
