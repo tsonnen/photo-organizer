@@ -12,10 +12,10 @@ impl PhotoOrganizerApp {
     /// Does nothing without an output folder: a transfer has nowhere to land.
     pub(super) fn execute_transfer(&mut self, mode: TransferMode) {
         let Some(out_dir) = self.settings.output_folder.clone() else {
-            // Said out loud rather than returning quietly: the picker for this
-            // lives in the settings modal now, so a user who never opens it
-            // would otherwise get no indication at all that pressing Move did
-            // nothing.
+            // A backstop, not the feedback path: the toolbar already greys Move
+            // and Copy without a destination, so reaching here means some
+            // caller has not asked whether it was allowed to. Warn rather than
+            // return quietly — a transfer that does nothing must still say so.
             self.set_warning(
                 "⚠ No output folder is set. Choose one in Settings before transferring.",
             );

@@ -941,9 +941,9 @@ fn the_footer_elides_a_long_destination_but_keeps_its_tail() {
 
 #[test]
 fn the_footer_warns_when_no_output_folder_is_set() {
-    // An unconfigured destination has to be said out loud. `execute_transfer`
-    // returns without doing anything in that case, and a silent no-op is the
-    // worst possible outcome for a button labelled Move.
+    // An unconfigured destination has to be said out loud, and in the place
+    // nobody has to hover to see. The toolbar greying Move and Copy is a hint
+    // aimed at whoever reaches for them; this is the always-on statement.
     let rects = render_footer_with(crate::settings::Settings::default(), 0, 0);
 
     let text: Vec<String> = rects.into_iter().map(|r| r.label).collect();
@@ -1067,5 +1067,121 @@ fn the_footer_and_the_settings_modal_agree_on_the_destination() {
         occurrences >= 2,
         "both the footer and the settings field should name the destination \
          {destination:?}, got {text:#?}"
+    );
+}
+
+/// The toolbar with `destination` configured, already run one frame.
+fn toolbar_with_destination(destination: Option<PathBuf>) -> Harness<'static, ()> {
+    let mut harness = Harness::new(move |ctx| {
+        let mut app = PhotoOrganizerApp::new();
+        app.settings.output_folder = destination.clone();
+        app.render_toolbar(ctx);
+    });
+    harness.set_size(egui::vec2(1240.0, 900.0));
+    harness.run();
+    harness
+}
+
+#[test]
+fn move_and_copy_are_disabled_until_a_destination_is_set() {
+    // The picker moved into the settings modal, so an unconfigured destination
+    // is easy to reach by pressing Move. Greying the button is better than
+    // letting it press and refuse — but the greying is only half the request:
+    // a greyed button that says nothing is a dead end, so this asserts the
+    // tooltip too.
+    //
+    // That tooltip is the non-obvious part. `on_hover_text` is silently
+    // suppressed on a non-interactable widget, so the obvious spelling
+    // produces a disabled button that explains nothing. Only
+    // `on_disabled_hover_text` reaches it.
+    let mut unconfigured = toolbar_with_destination(None);
+
+    for label in ["Move", "Copy"] {
+        let button = unconfigured
+            .query_all_by_label_contains(label)
+            .next()
+            .unwrap_or_else(|| panic!("expected a {label} button"));
+
+        assert!(
+            button.is_disabled(),
+            "{label} should be disabled with no output folder set"
+        );
+
+        button.hover();
+        unconfigured.run();
+
+        let tooltips: Vec<String> = placed_widgets(&unconfigured)
+            .into_iter()
+            .map(|r| r.label)
+            .filter(|t| t.contains("output folder"))
+            .collect();
+        assert!(
+            tooltips.iter().any(|t| t.contains("Settings")),
+            "hovering a disabled {label} should point at the settings modal, \
+             got {tooltips:#?}"
+        );
+    }
+}
+
+#[test]
+fn move_and_copy_come_back_once_a_destination_is_set() {
+    // The other half of the pair: a destination must actually re-enable them,
+    // or the greying is a one-way trap. The hint also changes, since pointing
+    // at Settings once it's configured would be noise.
+    let mut configured = toolbar_with_destination(Some(PathBuf::from("/home/tobye/photos")));
+
+    for label in ["Move", "Copy"] {
+        let button = configured
+            .query_all_by_label_contains(label)
+            .next()
+            .unwrap_or_else(|| panic!("expected a {label} button"));
+
+        assert!(
+            !button.is_disabled(),
+            "{label} should be live once a destination is configured"
+        );
+
+        button.hover();
+        configured.run();
+
+        let tooltips: Vec<String> = placed_widgets(&configured)
+            .into_iter()
+            .map(|r| r.label)
+            .filter(|t| t.contains("output folder"))
+            .collect();
+        assert!(
+            tooltips.is_empty(),
+            "a configured destination needs no pointer at Settings, got {tooltips:#?}"
+        );
+    }
+}
+
+#[test]
+fn the_file_menu_does_not_duplicate_the_source_picker() {
+    // The toolbar button is the route to scanning. A second route in the menu
+    // is a second thing to keep in sync, and two controls that do the same
+    // thing is worse than either one alone.
+    let mut harness = toolbar_with_destination(Some(PathBuf::from("/home/tobye/photos")));
+
+    harness
+        .query_all_by_label_contains("File")
+        .next()
+        .expect("the File menu button should be in the toolbar")
+        .click();
+    harness.run();
+
+    let items: Vec<String> = placed_widgets(&harness)
+        .into_iter()
+        .map(|r| r.label)
+        .filter(|t| t.contains("Source Folder"))
+        .collect();
+
+    assert!(
+        !items.iter().any(|t| t.contains('…')),
+        "the menu should hold only Settings… and Quit, got {items:#?}"
+    );
+    assert!(
+        items.iter().any(|t| t.contains("Source Folder")),
+        "the toolbar button should still be there, got {items:#?}"
     );
 }

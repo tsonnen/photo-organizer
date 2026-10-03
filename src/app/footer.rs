@@ -82,7 +82,10 @@ impl PhotoOrganizerApp {
                             // Said plainly rather than left blank: with the
                             // picker moved into the settings modal, an
                             // unconfigured destination is one click from
-                            // invisible, and Move would silently do nothing.
+                            // invisible. The toolbar greys Move and Copy for
+                            // the same reason, but a greyed button explains
+                            // itself only to whoever hovers it — this is the
+                            // statement of it that's always on screen.
                             ui.colored_label(
                                 egui::Color32::from_rgb(240, 180, 0),
                                 "⚠ No output folder set — choose one in Settings",
