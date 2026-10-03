@@ -1,4 +1,5 @@
 mod app;
+mod category_name;
 mod db;
 mod execution_engine;
 mod inference;

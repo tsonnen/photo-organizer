@@ -1,3 +1,4 @@
+use crate::category_name::CategoryName;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -41,7 +42,11 @@ impl ExecutionEngine {
         let mut reserved_paths: HashSet<PathBuf> = HashSet::new();
 
         for input in inputs {
-            let rel_dir = PathBuf::from(&input.subject)
+            // Safe because `subject` is a `CategoryName`: it is one component by
+            // construction, so this joins exactly three levels. It used to be a
+            // display `String`, which meant a category typed as `A/B` silently
+            // created two directories and `..` walked out of the output folder.
+            let rel_dir = Path::new(input.subject.as_str())
                 .join(format!("{:04}", input.year))
                 .join(format!("{:02}", input.month));
 
@@ -110,7 +115,8 @@ impl ExecutionEngine {
 
 pub struct RawPhotoInput {
     pub source_path: PathBuf,
-    pub subject: String,
+    /// The category, as a name already known to be one directory component.
+    pub subject: CategoryName,
     pub year: u32,
     pub month: u32,
 }
@@ -183,13 +189,13 @@ mod tests {
         let inputs = vec![
             RawPhotoInput {
                 source_path: PathBuf::from("/photos/pic.jpg"),
-                subject: "Nature".to_string(),
+                subject: CategoryName::from_user_input("Nature"),
                 year: 2024,
                 month: 5,
             },
             RawPhotoInput {
                 source_path: PathBuf::from("/other/pic.jpg"),
-                subject: "Nature".to_string(),
+                subject: CategoryName::from_user_input("Nature"),
                 year: 2024,
                 month: 5,
             },
@@ -219,7 +225,7 @@ mod tests {
         let engine_copy = ExecutionEngine::new(out_dir.clone(), TransferMode::Copy);
         let input = vec![RawPhotoInput {
             source_path: photo_file.clone(),
-            subject: "Vacation".to_string(),
+            subject: CategoryName::from_user_input("Vacation"),
             year: 2023,
             month: 7,
         }];
@@ -249,7 +255,7 @@ mod tests {
         let inputs = (0..5)
             .map(|i| RawPhotoInput {
                 source_path: PathBuf::from(format!("/src_{}/sample.png", i)),
-                subject: "Events".to_string(),
+                subject: CategoryName::from_user_input("Events"),
                 year: 2025,
                 month: 1,
             })
@@ -265,13 +271,16 @@ mod tests {
     }
 
     #[test]
-    fn test_plan_batch_special_characters_and_spaces() {
+    fn test_plan_batch_special_characters_in_filename() {
         let base = PathBuf::from("/test/output");
         let engine = ExecutionEngine::new(base.clone(), TransferMode::Copy);
 
+        // Spaces, ampersands and brackets are legal in a filename on every
+        // platform, so a photo's own name is passed through untouched. Only the
+        // *category* is sanitised, because only the category is user-typed.
         let inputs = vec![RawPhotoInput {
             source_path: PathBuf::from("/photos/Summer Party & Fireworks (2024).jpg"),
-            subject: "Vacation / Japan 2024".to_string(),
+            subject: CategoryName::from_user_input("Vacation Japan 2024"),
             year: 2024,
             month: 7,
         }];
@@ -280,7 +289,87 @@ mod tests {
         assert_eq!(ops.len(), 1);
         assert_eq!(
             ops[0].destination,
-            base.join("Vacation / Japan 2024/2024/07/Summer Party & Fireworks (2024).jpg")
+            base.join("Vacation Japan 2024/2024/07/Summer Party & Fireworks (2024).jpg")
+        );
+    }
+
+    #[test]
+    fn test_plan_batch_category_with_separator_stays_one_directory() {
+        let base = PathBuf::from("/test/output");
+        let engine = ExecutionEngine::new(base.clone(), TransferMode::Copy);
+
+        // This used to assert the opposite: `Vacation / Japan 2024` joined
+        // straight into the path and produced three levels of directory where
+        // the README promises one.
+        let inputs = vec![RawPhotoInput {
+            source_path: PathBuf::from("/photos/pic.jpg"),
+            subject: CategoryName::from_user_input("Vacation / Japan 2024"),
+            year: 2024,
+            month: 7,
+        }];
+
+        let ops = engine.plan_batch(&inputs);
+        assert_eq!(
+            ops[0].destination,
+            base.join("Vacation - Japan 2024/2024/07/pic.jpg")
+        );
+
+        // The category contributes exactly one component, so the whole relative
+        // path is category + year + month + filename and nothing more.
+        let rel = ops[0]
+            .destination
+            .strip_prefix(&base)
+            .expect("destination stays under the output dir");
+        assert_eq!(rel.components().count(), 4, "got {rel:?}");
+    }
+
+    #[test]
+    fn test_plan_batch_dot_category_stays_inside_the_output_dir() {
+        let base = PathBuf::from("/test/output");
+        let engine = ExecutionEngine::new(base.clone(), TransferMode::Copy);
+
+        // A category named `..` or `.` would otherwise resolve to the parent or
+        // the output folder itself, writing the photo outside `<Category>`.
+        for hostile in ["..", "."] {
+            let inputs = vec![RawPhotoInput {
+                source_path: PathBuf::from("/photos/pic.jpg"),
+                subject: CategoryName::from_user_input(hostile),
+                year: 2024,
+                month: 7,
+            }];
+
+            let ops = engine.plan_batch(&inputs);
+            assert_eq!(
+                ops[0].destination,
+                base.join("Unsorted/2024/07/pic.jpg"),
+                "{hostile:?} should fall back to Unsorted"
+            );
+        }
+
+        // A traversal with separators in it cannot survive either: the
+        // separators become dashes, so what is left is an odd but entirely
+        // harmless single directory.
+        let inputs = vec![RawPhotoInput {
+            source_path: PathBuf::from("/photos/pic.jpg"),
+            subject: CategoryName::from_user_input("../.."),
+            year: 2024,
+            month: 7,
+        }];
+        let ops = engine.plan_batch(&inputs);
+        assert!(
+            ops[0].destination.starts_with(&base),
+            "escaped the output dir: {:?}",
+            ops[0].destination
+        );
+        assert_eq!(
+            ops[0]
+                .destination
+                .strip_prefix(&base)
+                .unwrap()
+                .components()
+                .count(),
+            4,
+            "category + year + month + filename, and nothing more"
         );
     }
 
@@ -293,7 +382,7 @@ mod tests {
         let engine = ExecutionEngine::new(out_dir, TransferMode::Copy);
         let input = vec![RawPhotoInput {
             source_path: PathBuf::from("/nonexistent/file/does_not_exist_12345.jpg"),
-            subject: "Fail".to_string(),
+            subject: CategoryName::from_user_input("Fail"),
             year: 2024,
             month: 1,
         }];

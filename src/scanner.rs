@@ -251,7 +251,9 @@ pub fn scan_folder_with_db(
                         year: c.year,
                         month: c.month,
                         is_exif: c.is_exif_date,
-                        category: class_res.category,
+                        // The staged item holds the name as the user sees it; it
+                        // is sanitised again at the transfer seam.
+                        category: class_res.category.into_string(),
                         confidence: class_res.confidence,
                         source: class_res.source,
                         embedding: c.embedding,
@@ -327,7 +329,7 @@ pub fn scan_folder_with_db(
                     year: date_info.0,
                     month: date_info.1,
                     is_exif: date_info.2,
-                    category: class_res.category,
+                    category: class_res.category.into_string(),
                     confidence: class_res.confidence,
                     source: class_res.source,
                     embedding: emb,

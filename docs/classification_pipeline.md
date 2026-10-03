@@ -104,3 +104,27 @@ passed through on the way there.
 `ProfileStore` does not own the threshold. Profiles are learned data and the threshold is
 a setting, so keeping them apart is what stops a `profiles.json` written by an older
 build from carrying a stale copy of a knob the UI owns.
+
+## Category Names
+
+Every category is also a directory name, so the pipeline never hands a raw string to
+the transfer engine. `ClassificationResult.category` and `RawPhotoInput.subject` are both
+`CategoryName`, which is one path component by construction, and `CategoryName` is the
+single place that decides which names are allowed.
+
+Sanitisation runs where user input enters rather than where it is used. The routes that
+can reach a category are training (`ProfileStore::add_exemplar`), the per-photo custom
+name input, and a trained profile's stored name — all of which go through
+`from_user_input`: path separators and the characters Windows reserves become `-`,
+control characters and NUL become a space, and trailing dots and spaces are trimmed
+because Windows drops them when creating a file. `.` and `..` fall back to `Unsorted`,
+which is what keeps a category from resolving outside the output folder.
+
+Because sanitising happens on the way *in*, what the dropdown shows and what the folder
+is called cannot drift apart — a category typed as `A/B` is stored, displayed and filed
+as `A-B`. A `profiles.json` written before this type existed is the one input the app
+cannot re-derive the rules for, so `ProfileStore::classify` re-sanitises the stored name
+on the way out.
+
+Raising or lowering the threshold does not change any of this: it decides *whether* a
+centroid wins, never *what the name may contain*.

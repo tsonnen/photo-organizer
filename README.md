@@ -84,6 +84,12 @@ Select what you want and hit **Move** or **Copy**. Files go to
 than overwriting anything. `.xmp` and `.aae` sidecars travel with their photo. **Undo**
 puts the last batch back where it came from.
 
+The category is always exactly one folder. Slashes, backslashes and the characters
+Windows reserves are replaced with `-`, so a category named `Vacation / Japan` files
+under `Vacation - Japan` rather than inventing a subfolder. A name left with nothing
+usable in it, or one that would climb out of the output folder, files under
+**Unsorted**.
+
 ## How sorting works
 
 Every photo becomes a 512-dimension CLIP embedding. A category is a centroid, and a
@@ -146,6 +152,7 @@ The code is laid out like this:
 | `src/scanner.rs` | Folder scan, threaded and parallel |
 | `src/inference.rs` | CLIP model loading and embedding extraction |
 | `src/profile_store.rs` | Category profiles, centroids, rules |
+| `src/category_name.rs` | Category names, kept safe as one folder name |
 | `src/db.rs` | SQLite cache, keyed by file hash |
 | `src/media.rs` | Image decoding, EXIF dates, thumbnails |
 | `src/execution_engine.rs` | Planning and running file transfers |
