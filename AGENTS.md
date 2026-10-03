@@ -77,7 +77,7 @@ CI (`.github/workflows/build-and-test.yaml`) runs these in order, so match it lo
 cargo fmt --check
 cargo clippy -- -D warnings     # warnings are errors; the tree is currently clean
 cargo build
-cargo test                      # 59 tests, ~8s once built
+cargo test                      # 88 tests, ~7s once built
 ```
 
 - One test / one area: `cargo test media::tests::test_scan_preview_jpeg_scales_down_and_keeps_original_size`,
@@ -151,6 +151,19 @@ Carry the original dimensions on `StagedItem` if you touch this.
 - Tests create temp files as `temp_dir()/name_<pid>.<ext>`; no fixtures directory exists.
 - `src/app/` was split out of `app.rs` (commit 161b3e7); `mod.rs` documents the submodule split. Keep the
   module boundary and the top-of-file `//!` orientation comments that go with it.
+
+## Category names
+
+A category is a dropdown label *and* a directory under the output folder. `src/category_name.rs`
+owns the second job: `CategoryName` is one path component by construction, and
+`from_user_input` is the only way to build one from something a person typed. Separators
+and Windows-reserved characters become `-`, trailing dots and spaces are trimmed, and
+`.`/`..` fall back to `Unsorted`.
+
+`StagedItem.category` stays a plain `String` — it is display text the user retypes per
+photo, so it is sanitised at the transfer seam (`app/transfer.rs`) rather than on the way
+in. `ClassificationResult.category` and `RawPhotoInput.subject` are `CategoryName`. Don't
+join a category into a path any other way; `plan_batch` is the one place that does it.
 
 ## Conventions
 
