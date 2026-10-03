@@ -18,7 +18,7 @@ flowchart TD
     subgraph Classifier ["Multi-Tier Classification Engine"]
         G --> H{"Valid Embedding & Profiles Available?"}
         H -->|"Yes"| I["Compute Cosine Similarity against Profile Centroids"]
-        I --> J{"Max Similarity >= 0.65?"}
+        I --> J{"Max Similarity >= Confidence Threshold?"}
         J -->|"Yes"| K["Assign Best Category Profile (Visual AI)"]
         J -->|"No"| L["Evaluate Rule-Based Metadata & Heuristics"]
         H -->|"No"| L
@@ -64,7 +64,8 @@ tuning and `PHOTO_ORGANIZER_SCAN_THREADS` to override it.
 
 1. **Tier 1: Visual CLIP Embedding Match**:
    - Calculates cosine similarity against all active `CategoryProfile` centroids.
-   - If similarity $\ge$ `CONFIDENCE_THRESHOLD` (0.65, a constant in `profile_store.rs`), category is assigned with `ClassificationSource::VisualModel`.
+   - If similarity $\ge$ the confidence threshold, category is assigned with `ClassificationSource::VisualModel`.
+   - The threshold comes from `Settings::confidence_threshold` in `settings.json` (default `DEFAULT_CONFIDENCE_THRESHOLD` = 0.65), is passed into `classify`/`classify_with_heuristics` by the caller, and is adjustable on a slider in the settings modal.
 2. **Tier 2: Rule-Based & Metadata Heuristics**:
    - Reached when the best centroid match falls below the threshold, or when there is no embedding or no profiles at all.
    - **Screenshots**: Detected through filename patterns (`screenshot`, `screen_shot`, `capture`, `snip`) and screen aspect ratios ($16:9, 16:10, 19.5:9$, etc.) on non-EXIF PNGs.
@@ -73,9 +74,20 @@ tuning and `PHOTO_ORGANIZER_SCAN_THREADS` to override it.
 3. **Tier 3: Fallback**:
    - Items with no visual match and no rule triggers are categorized as `"Unsorted"`.
 
-The threshold is fixed in code rather than user-configurable: the per-photo category
-dropdown already ranks every profile with its confidence, so a weak match can be
-corrected on that one photo instead of by re-sorting the whole library. It is not
-redundant, though — it is the only path from Tier 1 into Tier 2, so removing it would
-leave screenshot, document and EXIF detection unreachable for anyone with a trained
-profile.
+The threshold is user-configurable on a slider in the settings modal, persisted in
+`settings.json`, and clamped to `MIN_CONFIDENCE_THRESHOLD..=MAX_CONFIDENCE_THRESHOLD`
+(0.30..=0.95) on both load and save. The clamp is what keeps a hand-edited file safe:
+serde will happily read `99.0`, which would classify every photo as Unsorted.
+
+It is not redundant. The threshold is the only path from Tier 1 into Tier 2, so setting
+it to zero would leave screenshot, document and EXIF detection unreachable for anyone
+with a trained profile. Raising it to 1.0 would do the opposite — everything routed to
+the rules, Tier 1 never reachable.
+
+Moving the slider re-runs `reclassify_all`. That fires on slider *release* rather than
+on every frame the value changes: dragging across the range would otherwise re-classify
+the whole grid dozens of times a second.
+
+`ProfileStore` does not own the threshold. Profiles are learned data and the threshold is
+a setting, so keeping them apart is what stops a `profiles.json` written by an older
+build from carrying a stale copy of a knob the UI owns.

@@ -17,15 +17,13 @@ impl PhotoOrganizerApp {
     }
 
     fn render_toolbar_actions(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let mut pick_source = false;
+
+        self.render_menu_bar(ui, &mut pick_source);
+
         ui.horizontal(|ui| {
             if ui.button("📁 Source Folder").clicked() {
-                if let Some(p) = rfd::FileDialog::new().pick_folder() {
-                    self.input_folder = Some(p.clone());
-                    self.start_scan(ctx.clone(), p);
-                }
-            }
-            if ui.button("📂 Output Folder").clicked() {
-                self.output_folder = rfd::FileDialog::new().pick_folder();
+                pick_source = true;
             }
 
             ui.separator();
@@ -62,6 +60,56 @@ impl PhotoOrganizerApp {
                 ui.spinner();
                 ui.label("Processing...");
             }
+        });
+
+        // Acted on after the frame: `rfd`'s dialog is a blocking native call,
+        // and opening one mid-draw would stall the UI thread inside egui.
+        if pick_source {
+            self.pick_source_folder(ctx);
+        }
+    }
+
+    /// Asks for a folder and starts scanning it, if one was chosen.
+    fn pick_source_folder(&mut self, ctx: &egui::Context) {
+        if let Some(picked) = rfd::FileDialog::new()
+            .set_title("Choose the folder of photos to scan")
+            .pick_folder()
+        {
+            self.input_folder = Some(picked.clone());
+            self.start_scan(ctx.clone(), picked);
+        }
+    }
+
+    /// The menu bar above the action row.
+    ///
+    /// Menus hold the app's *chrome* — the settings and the exit — while the
+    /// actions of the moment stay as buttons below. The reasoning is
+    /// frequency: Move and Copy are what the toolbar is for, and burying them
+    /// one click deep to make the strip look tidier would cost more than the
+    /// tidiness is worth.
+    fn render_menu_bar(&mut self, ui: &mut egui::Ui, pick_source: &mut bool) {
+        egui::menu::bar(ui, |ui| {
+            ui.menu_button("📁 File", |ui| {
+                if ui
+                    .button("Source Folder…")
+                    .on_hover_text("Scan a folder of photos")
+                    .clicked()
+                {
+                    *pick_source = true;
+                    ui.close_menu();
+                }
+                if ui.button("Settings…").clicked() {
+                    // A plain flag, safe to set mid-frame: `render_settings_modal`
+                    // runs later in this same frame.
+                    self.show_settings_modal = true;
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button("Quit").clicked() {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    ui.close_menu();
+                }
+            });
         });
     }
 

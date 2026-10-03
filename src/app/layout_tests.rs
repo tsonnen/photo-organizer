@@ -759,3 +759,313 @@ fn the_profile_modal_lists_every_profile_under_a_count() {
         "every profile should get a row, got {rects:#?}"
     );
 }
+
+/// Opens the settings modal on a real app and returns the widgets egui placed.
+fn open_settings_modal(
+    screen: egui::Vec2,
+    settings: crate::settings::Settings,
+) -> (Vec<WidgetRect>, egui::Vec2) {
+    let mut app = PhotoOrganizerApp::new();
+    app.settings = settings;
+    app.show_settings_modal = true;
+
+    let card = layout::settings_modal_size(screen);
+    let mut harness = Harness::new(move |ctx| app.render_settings_modal(ctx));
+    harness.set_size(screen);
+    harness.run();
+
+    // The footer draws across the whole width and the backdrop covers the
+    // screen, so only the card's own contents are of interest here.
+    let rects: Vec<WidgetRect> = placed_widgets(&harness)
+        .into_iter()
+        .filter(|r| matches!(r.role.as_str(), "Label" | "Button" | "Slider" | "TextInput"))
+        .filter(|r| {
+            let card_rect = egui::Rect::from_center_size(screen.to_pos2() / 2.0, card);
+            f64::from(card_rect.min.x) - 0.5 <= r.x0 && r.x1 <= f64::from(card_rect.max.x) + 0.5
+        })
+        .collect();
+
+    (rects, card)
+}
+
+#[test]
+fn the_settings_modal_offers_all_three_settings() {
+    // The regression guard for the relocation: the output folder picker left the
+    // toolbar for this modal, so if any of the three goes missing the user has
+    // no way to configure it at all.
+    let screen = egui::vec2(1240.0, 900.0);
+    let (rects, _) = open_settings_modal(screen, crate::settings::Settings::default());
+
+    assert!(
+        !rects.is_empty(),
+        "expected the settings modal to render its contents, got nothing"
+    );
+    assert!(
+        rects.iter().any(|r| r.role.contains("Slider")),
+        "the confidence threshold needs a slider, got {rects:#?}"
+    );
+    assert!(
+        rects.iter().any(|r| r.label.contains("Confidence")),
+        "the slider needs a label saying what it is, got {rects:#?}"
+    );
+
+    // The folder picker, and the model picker beside it.
+    let browse: Vec<&WidgetRect> = rects
+        .iter()
+        .filter(|r| r.label.contains("Browse"))
+        .collect();
+    assert_eq!(
+        browse.len(),
+        2,
+        "both the output folder and the model need a browse button, got {browse:#?}"
+    );
+    assert!(
+        find_labelled(&rects, "Transfers").width() > 0.0,
+        "expected the transfer destination row, got {rects:#?}"
+    );
+}
+
+#[test]
+fn the_settings_modal_fits_its_card() {
+    // The same guard `the_profile_modal_fits_its_card` gives, now covering a
+    // card whose contents are wider: a model path is a long string, and the
+    // card has to hold it rather than push past its own edge.
+    for screen in [egui::vec2(1240.0, 900.0), egui::vec2(1920.0, 1080.0)] {
+        let settings = crate::settings::Settings {
+            model_path: Some(std::path::PathBuf::from(
+                "/home/tobye/Pictures/2026/family holiday/raw scans/clip_vision.safetensors",
+            )),
+            ..Default::default()
+        };
+        let (rects, card) = open_settings_modal(screen, settings);
+
+        assert!(
+            !rects.is_empty(),
+            "expected the modal to render its contents at {screen:?}, got nothing"
+        );
+
+        let card_rect = egui::Rect::from_center_size(screen.to_pos2() / 2.0, card);
+        for r in &rects {
+            assert!(
+                r.x0 >= f64::from(card_rect.min.x) - 0.5
+                    && r.x1 <= f64::from(card_rect.max.x) + 0.5,
+                "widget {:?} ({}) escapes the {card:?} card at {screen:?}\nrect: {r:?}",
+                r.role,
+                r.label,
+            );
+            assert!(
+                r.y0 >= f64::from(card_rect.min.y) - 0.5
+                    && r.y1 <= f64::from(card_rect.max.y) + 0.5,
+                "widget {:?} ({}) escapes the {card:?} card vertically at {screen:?}\nrect: {r:?}",
+                r.role,
+                r.label,
+            );
+        }
+    }
+}
+
+/// Renders the footer on an app holding `staged` photos of which `selected`
+/// are ticked, and returns the widgets egui placed.
+///
+/// The app is rebuilt each frame rather than kept across the harness, because
+/// staging an item needs a live `Context` to create its texture handle.
+fn render_footer_with(
+    settings: crate::settings::Settings,
+    staged: usize,
+    selected: usize,
+) -> Vec<WidgetRect> {
+    let mut harness = Harness::new(move |ctx| {
+        let mut app = PhotoOrganizerApp::new();
+        app.settings = settings.clone();
+        app.items = (0..staged)
+            .map(|i| StagedItem {
+                selected: i < selected,
+                ..staged_item(ctx)
+            })
+            .collect();
+        app.render_footer(ctx);
+    });
+    harness.set_size(egui::vec2(1240.0, 900.0));
+    harness.run();
+    placed_widgets(&harness)
+}
+
+#[test]
+fn the_footer_reports_selection_and_destination() {
+    // The destination moved out of the toolbar, so the footer is the only place
+    // the user can see where a transfer will land. If it stops rendering the
+    // path, Move becomes a button that silently does the wrong thing.
+    let settings = crate::settings::Settings {
+        output_folder: Some(PathBuf::from("/home/tobye/photos")),
+        ..Default::default()
+    };
+
+    let rects = render_footer_with(settings, 12, 4);
+    let text: Vec<&str> = rects.iter().map(|r| r.label.as_str()).collect();
+
+    assert!(
+        text.iter().any(|t| t.contains("4 of 12 selected")),
+        "the footer should say how many photos are selected, got {text:#?}"
+    );
+    assert!(
+        text.iter().any(|t| t.contains("/home/tobye/photos")),
+        "the footer should show where transfers will land, got {text:#?}"
+    );
+}
+
+#[test]
+fn the_footer_elides_a_long_destination_but_keeps_its_tail() {
+    // The path is the only record of the destination, and paths in real photo
+    // libraries run long. Eliding from the front keeps the part that identifies
+    // the folder; eliding from the back would hide it and leave every
+    // destination looking alike.
+    let settings = crate::settings::Settings {
+        output_folder: Some(PathBuf::from(
+            "/home/tobye/Pictures/2026/family holiday/raw scans",
+        )),
+        ..Default::default()
+    };
+
+    let rects = render_footer_with(settings, 3, 1);
+    let text: Vec<&str> = rects.iter().map(|r| r.label.as_str()).collect();
+
+    assert!(
+        text.iter().any(|t| t.contains("raw scans")),
+        "the identifying tail must survive, got {text:#?}"
+    );
+    assert!(
+        text.iter().all(|t| !t.contains("/home/tobye/Pictures")),
+        "the elided prefix should be gone, got {text:#?}"
+    );
+}
+
+#[test]
+fn the_footer_warns_when_no_output_folder_is_set() {
+    // An unconfigured destination has to be said out loud. `execute_transfer`
+    // returns without doing anything in that case, and a silent no-op is the
+    // worst possible outcome for a button labelled Move.
+    let rects = render_footer_with(crate::settings::Settings::default(), 0, 0);
+
+    let text: Vec<String> = rects.into_iter().map(|r| r.label).collect();
+
+    assert!(
+        text.iter().any(|t| t.contains("No output folder")),
+        "expected a warning about the missing output folder, got {text:#?}"
+    );
+}
+
+#[test]
+fn the_file_menu_opens_the_settings_modal() {
+    // Driven with real clicks, because this is the single wiring point that
+    // makes the whole feature reachable. Every other settings test opens the
+    // modal by setting the flag directly, so if the menu item were left
+    // unwired — or the button removed and nothing put in its place — all of
+    // them would still pass while the app had no way into its own settings.
+    let screen = egui::vec2(1240.0, 900.0);
+
+    let mut harness = Harness::new_ui_state(
+        move |ui, app: &mut PhotoOrganizerApp| {
+            let ctx = ui.ctx().clone();
+            app.render_toolbar(&ctx);
+            app.render_settings_modal(&ctx);
+        },
+        PhotoOrganizerApp::new(),
+    );
+    harness.set_size(screen);
+
+    // Nothing should be open yet, and the toolbar must not still be offering
+    // the output picker this PR relocated.
+    harness.run();
+    assert!(
+        !harness.state().show_settings_modal,
+        "the settings modal should start closed"
+    );
+    assert!(
+        harness
+            .query_all_by_label_contains("Output Folder")
+            .next()
+            .is_none(),
+        "the output folder picker moved to the settings modal and must not \
+         still be a toolbar button"
+    );
+    assert!(
+        harness
+            .query_all_by_label_contains("Settings")
+            .next()
+            .is_none(),
+        "a closed menu renders no items, so Settings… should not be found yet"
+    );
+
+    // Open the menu, then take the item.
+    harness
+        .query_all_by_label_contains("File")
+        .next()
+        .expect("the File menu button should be in the toolbar")
+        .click();
+    harness.run();
+
+    let item = harness
+        .query_all_by_label_contains("Settings")
+        .next()
+        .expect("File menu should offer Settings…");
+    item.click();
+    harness.run();
+
+    assert!(
+        harness.state().show_settings_modal,
+        "clicking File > Settings… must open the modal"
+    );
+
+    // And it must actually draw its card, not just flip the flag.
+    let card = layout::settings_modal_size(screen);
+    let card_rect = egui::Rect::from_center_size(screen.to_pos2() / 2.0, card);
+    let inside = placed_widgets(&harness).into_iter().any(|r| {
+        matches!(r.role.as_str(), "Label" | "Button" | "Slider" | "TextInput")
+            && r.x0 >= f64::from(card_rect.min.x) - 0.5
+            && r.x1 <= f64::from(card_rect.max.x) + 0.5
+    });
+    assert!(
+        inside,
+        "the opened modal should render its card, got nothing"
+    );
+}
+
+#[test]
+fn the_footer_and_the_settings_modal_agree_on_the_destination() {
+    // The picker moved between the two, so a value set in one has to be the
+    // value the other shows. They read the same `Settings`, but each derives
+    // its display from that field independently — one shortens the path for a
+    // narrow status bar, the other shows it in full — and that is exactly the
+    // kind of duplication where they can drift apart.
+    let destination = PathBuf::from("/home/tobye/photos/sorted");
+    let screen = egui::vec2(1240.0, 900.0);
+    let settings = crate::settings::Settings {
+        output_folder: Some(destination.clone()),
+        ..Default::default()
+    };
+
+    let mut harness = Harness::new(move |ctx| {
+        let mut app = PhotoOrganizerApp::new();
+        app.settings = settings.clone();
+        app.render_footer(ctx);
+        app.show_settings_modal = true;
+        app.render_settings_modal(ctx);
+    });
+    harness.set_size(screen);
+    harness.run();
+
+    let text: Vec<String> = placed_widgets(&harness)
+        .into_iter()
+        .map(|r| r.label)
+        .collect();
+
+    let occurrences = text
+        .iter()
+        .filter(|t| t.contains(&destination.display().to_string()))
+        .count();
+    assert!(
+        occurrences >= 2,
+        "both the footer and the settings field should name the destination \
+         {destination:?}, got {text:#?}"
+    );
+}

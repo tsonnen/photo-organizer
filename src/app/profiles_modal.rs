@@ -1,12 +1,12 @@
 //! The profile management modal: a scrollable list of the trained category
 //! profiles, and the two-step delete that removes one.
 //!
-//! The chrome deliberately mirrors the inspection modal in [`super::modal`] —
-//! full-screen backdrop, centred card, Escape and backdrop-click to close —
-//! because both are "stop and deal with one thing" overlays. The two can never
-//! be open at once: each one's backdrop covers the control that opens the
-//! other, so there is no ordering between them to get wrong.
+//! The chrome comes from [`super::chrome`], shared with the inspection and
+//! settings modals. The two profile modals can never be open at once: each
+//! one's backdrop covers the control that opens the other, so there is no
+//! ordering between them to get wrong.
 
+use super::chrome;
 use super::layout;
 use super::PhotoOrganizerApp;
 use crate::profile_store::{CategoryProfile, ProfileStore};
@@ -62,85 +62,44 @@ impl PhotoOrganizerApp {
             return;
         }
 
-        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            self.close_profiles_modal();
-            return;
-        }
-
         let screen_rect = ctx.screen_rect();
         let card_size = layout::profiles_modal_size(screen_rect.size());
-        let card_rect = egui::Rect::from_center_size(screen_rect.center(), card_size);
 
-        let mut close = false;
-        let mut delete_request = None;
-
-        // Split out so the frame below borrows the two fields separately.
+        // Split out so the closure below borrows the two fields separately.
         let profiles = &self.profiles;
         let prompt = &mut self.delete_prompt;
 
-        egui::Area::new(egui::Id::new("profiles_modal_area"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(screen_rect.min)
-            .show(ctx, |ui| {
-                let (backdrop_rect, backdrop_resp) =
-                    ui.allocate_exact_size(screen_rect.size(), egui::Sense::click());
-                ui.painter()
-                    .rect_filled(backdrop_rect, 0.0, egui::Color32::from_black_alpha(200));
+        let mut close = false;
 
-                if backdrop_resp.clicked() {
-                    if let Some(click) = backdrop_resp.interact_pointer_pos() {
-                        if !card_rect.contains(click) {
+        let (delete_request, frame) =
+            chrome::show_modal_card(ctx, "profiles_modal_area", card_size, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!("🏷 Profiles ({})", profiles.profiles.len()))
+                            .strong(),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("✖").clicked() {
                             close = true;
                         }
-                    }
-                }
-
-                ui.scope_builder(egui::UiBuilder::new().max_rect(card_rect), |ui| {
-                    // The card is sized on the ui *around* the frame, not
-                    // inside it: a window frame already spends part of its
-                    // rect on margins and shadow, so asking for the full card
-                    // size within it overflows by that much.
-                    ui.set_min_size(card_size);
-                    ui.set_max_size(card_size);
-
-                    egui::Frame::window(&ctx.style())
-                        .rounding(8.0)
-                        .show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "🏷 Profiles ({})",
-                                        profiles.profiles.len()
-                                    ))
-                                    .strong(),
-                                );
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if ui.button("✖").clicked() {
-                                            close = true;
-                                        }
-                                    },
-                                );
-                            });
-                            ui.separator();
-                            ui.small(
-                                "Deleting a profile discards its trained centroid and \
-                                 re-classifies the staged photos.",
-                            );
-                            ui.separator();
-
-                            delete_request = Self::render_profile_list(
-                                profiles,
-                                ui,
-                                prompt,
-                                layout::profiles_list_height(card_size),
-                            );
-                        });
+                    });
                 });
+                ui.separator();
+                ui.small(
+                    "Deleting a profile discards its trained centroid and \
+                     re-classifies the staged photos.",
+                );
+                ui.separator();
+
+                Self::render_profile_list(
+                    profiles,
+                    ui,
+                    prompt,
+                    layout::profiles_list_height(card_size),
+                )
             });
 
-        if close {
+        if frame.close || close {
             self.close_profiles_modal();
         } else if let Some(name) = delete_request {
             // The row's Confirm button has already consumed the arm, so all

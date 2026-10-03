@@ -11,7 +11,14 @@ impl PhotoOrganizerApp {
     ///
     /// Does nothing without an output folder: a transfer has nowhere to land.
     pub(super) fn execute_transfer(&mut self, mode: TransferMode) {
-        let Some(out_dir) = self.output_folder.clone() else {
+        let Some(out_dir) = self.settings.output_folder.clone() else {
+            // Said out loud rather than returning quietly: the picker for this
+            // lives in the settings modal now, so a user who never opens it
+            // would otherwise get no indication at all that pressing Move did
+            // nothing.
+            self.set_warning(
+                "⚠ No output folder is set. Choose one in Settings before transferring.",
+            );
             return;
         };
 
