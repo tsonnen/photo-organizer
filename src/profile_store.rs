@@ -1,3 +1,4 @@
+use crate::category_name::CategoryName;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -24,7 +25,7 @@ impl std::fmt::Display for ClassificationSource {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ClassificationResult {
-    pub category: String,
+    pub category: CategoryName,
     pub confidence: f32,
     pub source: ClassificationSource,
 }
@@ -114,19 +115,29 @@ impl ProfileStore {
         self.profiles.len() < initial_len
     }
 
+    /// Folds an embedding into the profile for `category`, creating it if this
+    /// is the first exemplar.
+    ///
+    /// The name is sanitised here rather than at the two training call sites, so
+    /// that what gets trained is exactly what will later be filed: a category
+    /// typed as `A/B` is stored as `A-B` and shows that in the dropdown, instead
+    /// of reading as `A-B` in the grid and creating two folders on transfer.
     pub fn add_exemplar(&mut self, category: &str, embedding: &[f32]) {
         if embedding.is_empty() {
             return;
         }
+        let category = CategoryName::from_user_input(category);
         if let Some(existing) = self
             .profiles
             .iter_mut()
-            .find(|p| p.name.eq_ignore_ascii_case(category))
+            .find(|p| p.name.eq_ignore_ascii_case(category.as_str()))
         {
             existing.add_sample(embedding);
         } else {
-            self.profiles
-                .push(CategoryProfile::new(category, embedding.to_vec()));
+            self.profiles.push(CategoryProfile::new(
+                category.into_string(),
+                embedding.to_vec(),
+            ));
         }
     }
 
@@ -140,7 +151,7 @@ impl ProfileStore {
     pub fn classify(&self, embedding: &[f32], threshold: f32) -> ClassificationResult {
         if embedding.is_empty() || self.profiles.is_empty() {
             return ClassificationResult {
-                category: "Unsorted".to_string(),
+                category: CategoryName::unsorted(),
                 confidence: 0.0,
                 source: ClassificationSource::UnsortedFallback,
             };
@@ -160,7 +171,11 @@ impl ProfileStore {
         if let Some((profile, sim)) = best_match {
             if sim >= threshold {
                 return ClassificationResult {
-                    category: profile.name.clone(),
+                    // Sanitised on the way in rather than trusted: a
+                    // `profiles.json` written before this type existed can hold
+                    // a name that is not a single path component, and this is
+                    // the last point before it reaches the output folder.
+                    category: CategoryName::from_user_input(&profile.name),
                     confidence: sim.clamp(0.0, 1.0),
                     source: ClassificationSource::VisualModel,
                 };
@@ -171,14 +186,14 @@ impl ProfileStore {
             // low-confidence centroid match. This is what makes
             // `classify_with_heuristics` worth calling.
             return ClassificationResult {
-                category: "Unsorted".to_string(),
+                category: CategoryName::unsorted(),
                 confidence: sim.max(0.0),
                 source: ClassificationSource::UnsortedFallback,
             };
         }
 
         ClassificationResult {
-            category: "Unsorted".to_string(),
+            category: CategoryName::unsorted(),
             confidence: 0.0,
             source: ClassificationSource::UnsortedFallback,
         }
@@ -246,7 +261,7 @@ impl ProfileStore {
         is_exif: bool,
         width: u32,
         height: u32,
-    ) -> Option<(String, f32)> {
+    ) -> Option<(CategoryName, f32)> {
         let filename = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -286,11 +301,11 @@ impl ProfileStore {
             || (aspect_ratio - 0.4615).abs() < 0.03;
 
         if has_screenshot_keyword {
-            return Some(("Screenshots".to_string(), 0.95));
+            return Some((CategoryName::screenshots(), 0.95));
         }
 
         if !is_exif && ext == "png" && is_screen_ratio && width >= 800 {
-            return Some(("Screenshots".to_string(), 0.85));
+            return Some((CategoryName::screenshots(), 0.85));
         }
 
         // 2. Document / Receipt detection by filename keywords
@@ -304,12 +319,12 @@ impl ProfileStore {
             "tax",
         ];
         if doc_keywords.iter().any(|&k| filename.contains(k)) {
-            return Some(("Documents".to_string(), 0.90));
+            return Some((CategoryName::documents(), 0.90));
         }
 
         // 3. Camera photos fallback if EXIF tags exist
         if is_exif {
-            return Some(("Camera Photos".to_string(), 0.70));
+            return Some((CategoryName::camera_photos(), 0.70));
         }
 
         None
@@ -373,12 +388,12 @@ mod tests {
     fn test_classify_empty() {
         let store = ProfileStore::default();
         let res = store.classify(&[], DEFAULT_CONFIDENCE_THRESHOLD);
-        assert_eq!(res.category, "Unsorted");
+        assert_eq!(res.category, CategoryName::unsorted());
         assert_eq!(res.confidence, 0.0);
         assert_eq!(res.source, ClassificationSource::UnsortedFallback);
 
         let res2 = store.classify(&[1.0, 0.0], DEFAULT_CONFIDENCE_THRESHOLD);
-        assert_eq!(res2.category, "Unsorted");
+        assert_eq!(res2.category, CategoryName::unsorted());
         assert_eq!(res2.confidence, 0.0);
         assert_eq!(res2.source, ClassificationSource::UnsortedFallback);
     }
@@ -393,12 +408,15 @@ mod tests {
         };
 
         let res1 = store.classify(&[0.9, 0.1, 0.0], DEFAULT_CONFIDENCE_THRESHOLD);
-        assert_eq!(res1.category, "Landscape");
+        assert_eq!(
+            res1.category,
+            CategoryName::from_user_input("Landscape")
+        );
         assert!(res1.confidence > DEFAULT_CONFIDENCE_THRESHOLD);
         assert_eq!(res1.source, ClassificationSource::VisualModel);
 
         let res2 = store.classify(&[0.1, 0.9, 0.0], DEFAULT_CONFIDENCE_THRESHOLD);
-        assert_eq!(res2.category, "Portrait");
+        assert_eq!(res2.category, CategoryName::from_user_input("Portrait"));
         assert!(res2.confidence > DEFAULT_CONFIDENCE_THRESHOLD);
         assert_eq!(res2.source, ClassificationSource::VisualModel);
     }
@@ -412,7 +430,7 @@ mod tests {
         // Similarity is 0.5, under the default threshold: the closest centroid
         // still cannot claim the photo, so it is handed to the rules.
         let res = store.classify(&[0.5, 0.866, 0.0], DEFAULT_CONFIDENCE_THRESHOLD);
-        assert_eq!(res.category, "Unsorted");
+        assert_eq!(res.category, CategoryName::unsorted());
         assert!(res.confidence < DEFAULT_CONFIDENCE_THRESHOLD);
         assert_eq!(res.source, ClassificationSource::UnsortedFallback);
     }
@@ -429,12 +447,12 @@ mod tests {
         let embedding = [0.6_f32, 0.8, 0.0];
 
         let lenient = store.classify(&embedding, 0.30);
-        assert_eq!(lenient.category, "Landscape");
+        assert_eq!(lenient.category, CategoryName::from_user_input("Landscape"));
         assert_eq!(lenient.source, ClassificationSource::VisualModel);
         assert!((lenient.confidence - 0.6).abs() < 1e-5);
 
         let strict = store.classify(&embedding, 0.80);
-        assert_eq!(strict.category, "Unsorted");
+        assert_eq!(strict.category, CategoryName::unsorted());
         assert_eq!(strict.source, ClassificationSource::UnsortedFallback);
 
         // The rejected match still reports the similarity it found, so the UI
@@ -522,17 +540,17 @@ mod tests {
         let res = ProfileStore::classify_heuristics(p1, false, 1920, 1080);
         assert!(res.is_some());
         let (cat, conf) = res.unwrap();
-        assert_eq!(cat, "Screenshots");
+        assert_eq!(cat, CategoryName::screenshots());
         assert!(conf >= 0.85);
 
         let p2 = Path::new("/path/to/Screen Shot 2026.jpg");
         let res2 = ProfileStore::classify_heuristics(p2, false, 2560, 1440);
-        assert_eq!(res2.unwrap().0, "Screenshots");
+        assert_eq!(res2.unwrap().0, CategoryName::screenshots());
 
         // Ratio matching without keyword
         let p3 = Path::new("/path/to/image_12345.png");
         let res3 = ProfileStore::classify_heuristics(p3, false, 1920, 1080);
-        assert_eq!(res3.unwrap().0, "Screenshots");
+        assert_eq!(res3.unwrap().0, CategoryName::screenshots());
     }
 
     #[test]
@@ -541,7 +559,7 @@ mod tests {
         let res = ProfileStore::classify_heuristics(p, false, 800, 1200);
         assert!(res.is_some());
         let (cat, conf) = res.unwrap();
-        assert_eq!(cat, "Documents");
+        assert_eq!(cat, CategoryName::documents());
         assert!(conf >= 0.90);
     }
 
@@ -551,7 +569,7 @@ mod tests {
         let res = ProfileStore::classify_heuristics(p, true, 4000, 3000);
         assert!(res.is_some());
         let (cat, _) = res.unwrap();
-        assert_eq!(cat, "Camera Photos");
+        assert_eq!(cat, CategoryName::camera_photos());
     }
 
     #[test]
@@ -569,7 +587,7 @@ mod tests {
             1080,
             DEFAULT_CONFIDENCE_THRESHOLD,
         );
-        assert_eq!(res1.category, "Landscape");
+        assert_eq!(res1.category, CategoryName::from_user_input("Landscape"));
         assert_eq!(res1.source, ClassificationSource::VisualModel);
 
         // 2. Visual below threshold or missing, falls back to heuristic
@@ -581,7 +599,7 @@ mod tests {
             1080,
             DEFAULT_CONFIDENCE_THRESHOLD,
         );
-        assert_eq!(res2.category, "Screenshots");
+        assert_eq!(res2.category, CategoryName::screenshots());
         assert_eq!(res2.source, ClassificationSource::Heuristic);
 
         // 2b. A real embedding that merely resembles the profile still loses to
@@ -594,7 +612,7 @@ mod tests {
             1200,
             DEFAULT_CONFIDENCE_THRESHOLD,
         );
-        assert_eq!(res2b.category, "Documents");
+        assert_eq!(res2b.category, CategoryName::documents());
         assert_eq!(res2b.source, ClassificationSource::Heuristic);
 
         // 3. Neither matches -> Unsorted
@@ -606,7 +624,7 @@ mod tests {
             500,
             DEFAULT_CONFIDENCE_THRESHOLD,
         );
-        assert_eq!(res3.category, "Unsorted");
+        assert_eq!(res3.category, CategoryName::unsorted());
         assert_eq!(res3.source, ClassificationSource::UnsortedFallback);
     }
 
