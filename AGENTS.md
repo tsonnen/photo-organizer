@@ -57,9 +57,11 @@ local flags and applied *after* the frame, because acting mid-draw would re-ente
 - **Decode** (`src/media.rs`): a scan never full-decodes. JPEG goes through `jpeg-decoder`'s DCT scaling;
   every other format full-decodes then rescales. `ScanPreview::original_*` carries the true frame size
   because the heuristics key off resolution.
-- **Classify** (`src/profile_store.rs`): CLIP centroid match above `confidence_threshold` (default 0.65)
-  → rules (screenshot/document/EXIF) → `Unsorted`. `ClassificationSource::Manual` items are never
-  overwritten by `reclassify_all`, the threshold slider, or a scan `Update`; only their embedding refreshes.
+- **Classify** (`src/profile_store.rs`): CLIP centroid match above `CONFIDENCE_THRESHOLD` (0.65, a
+  constant, not a setting) → rules (screenshot/document/EXIF) → `Unsorted`. That threshold is the only
+  path into the rules tier, so dropping it would make screenshot/document/EXIF detection unreachable
+  for anyone with a trained profile. `ClassificationSource::Manual` items are never overwritten by
+  `reclassify_all`, the **Re-classify All** button, or a scan `Update`; only their embedding refreshes.
 - **Transfer** (`src/execution_engine.rs`, `src/undo_engine.rs`): `plan_batch` → `execute_batch`, `_1`
   collision suffixes instead of overwriting, `.xmp`/`.aae` sidecars travel with the photo. The manifest
   records the whole batch and Undo reverses **only the last batch**.
@@ -68,8 +70,8 @@ local flags and applied *after* the frame, because acting mid-draw would re-ente
 
 `reclassify_all` (`src/app/categories.rs`) feeds `item.texture.size()` — the ≤200x140 thumbnail — into
 `classify_with_heuristics`, while the scanner passes the real dimensions. The ratio-based screenshot rule
-needs width ≥ 800, so a photo can classify one way at scan time and another after "Re-classify All" or a
-threshold change. Carry the original dimensions on `StagedItem` if you touch this.
+needs width ≥ 800, so a photo can classify one way at scan time and another after "Re-classify All".
+Carry the original dimensions on `StagedItem` if you touch this.
 
 ## Testing quirks
 

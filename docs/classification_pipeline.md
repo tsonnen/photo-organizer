@@ -18,7 +18,7 @@ flowchart TD
     subgraph Classifier ["Multi-Tier Classification Engine"]
         G --> H{"Valid Embedding & Profiles Available?"}
         H -->|"Yes"| I["Compute Cosine Similarity against Profile Centroids"]
-        I --> J{"Max Similarity >= Confidence Threshold?"}
+        I --> J{"Max Similarity >= 0.65?"}
         J -->|"Yes"| K["Assign Best Category Profile (Visual AI)"]
         J -->|"No"| L["Evaluate Rule-Based Metadata & Heuristics"]
         H -->|"No"| L
@@ -64,10 +64,18 @@ tuning and `PHOTO_ORGANIZER_SCAN_THREADS` to override it.
 
 1. **Tier 1: Visual CLIP Embedding Match**:
    - Calculates cosine similarity against all active `CategoryProfile` centroids.
-   - If similarity $\ge$ user-configured confidence threshold (default 0.65), category is assigned with `ClassificationSource::VisualModel`.
+   - If similarity $\ge$ `CONFIDENCE_THRESHOLD` (0.65, a constant in `profile_store.rs`), category is assigned with `ClassificationSource::VisualModel`.
 2. **Tier 2: Rule-Based & Metadata Heuristics**:
+   - Reached when the best centroid match falls below the threshold, or when there is no embedding or no profiles at all.
    - **Screenshots**: Detected through filename patterns (`screenshot`, `screen_shot`, `capture`, `snip`) and screen aspect ratios ($16:9, 16:10, 19.5:9$, etc.) on non-EXIF PNGs.
    - **Documents / Receipts**: Detected through filename keywords (`receipt`, `invoice`, `document`, `scan`, `bill`, `statement`).
    - **Camera Photos**: Identified when EXIF camera metadata is present.
 3. **Tier 3: Fallback**:
    - Items with no visual match and no rule triggers are categorized as `"Unsorted"`.
+
+The threshold is fixed in code rather than user-configurable: the per-photo category
+dropdown already ranks every profile with its confidence, so a weak match can be
+corrected on that one photo instead of by re-sorting the whole library. It is not
+redundant, though — it is the only path from Tier 1 into Tier 2, so removing it would
+leave screenshot, document and EXIF detection unreachable for anyone with a trained
+profile.

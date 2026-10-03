@@ -84,8 +84,8 @@ impl PhotoOrganizerApp {
         }
     }
 
-    /// Model status, the confidence threshold, the trigger for the profile
-    /// modal and training from the selected photos.
+    /// Model status, the trigger for the profile modal and training from the
+    /// selected photos.
     fn render_categories_panel(&mut self, ui: &mut egui::Ui) {
         ui.separator();
         ui.horizontal(|ui| {
@@ -99,41 +99,29 @@ impl PhotoOrganizerApp {
             }
 
             ui.separator();
-            let threshold_changed = ui
-                .add(
-                    egui::Slider::new(&mut self.profiles.confidence_threshold, 0.30..=0.95)
-                        .text("Confidence Threshold")
-                        .step_by(0.01),
-                )
-                .changed();
-
-            if threshold_changed {
-                self.save_profiles();
-                self.reclassify_all();
-            }
 
             if ui.button("⚡ Re-classify All").clicked() {
                 self.reclassify_all();
             }
         });
-
-        // The profile list itself lives in its own modal: rendered inline it was
-        // one horizontal run of names, which ran off the panel as soon as a
-        // handful of categories existed.
-        if ui
-            .button(format!(
-                "🏷 Manage Profiles ({})",
-                self.profiles.profiles.len()
-            ))
-            .on_hover_text("Review and delete the trained category profiles")
-            .clicked()
-        {
-            // A plain flag, safe to set mid-frame: `render_profiles_modal` runs
-            // later in this same frame, and nothing re-enters the toolbar.
-            self.show_profiles_modal = true;
-        }
-
         ui.horizontal(|ui| {
+            // The profile list itself lives in its own modal: rendered inline it was
+            // one horizontal run of names, which ran off the panel as soon as a
+            // handful of categories existed.
+            if ui
+                .button(format!(
+                    "🏷 Manage Profiles ({})",
+                    self.profiles.profiles.len()
+                ))
+                .on_hover_text("Review and delete the trained category profiles")
+                .clicked()
+            {
+                // A plain flag, safe to set mid-frame: `render_profiles_modal` runs
+                // later in this same frame, and nothing re-enters the toolbar.
+                self.show_profiles_modal = true;
+            }
+            ui.separator();
+
             ui.label("Train Category from Selected Photos:");
             ui.text_edit_singleline(&mut self.target_training_category);
             if ui.button("🎓 Train Selected").clicked() {

@@ -58,9 +58,8 @@ percentage, plus a small 🎓 button to train that category from the one photo. 
 that doesn't fit gets **Other**, which gives you a free-text field for a name of your
 own.
 
-Open **AI & Categories** in the toolbar to see the model status, move the confidence
-threshold, or train a whole batch at once from the selected photos. Changing the
-threshold re-sorts everything that hasn't been manually set.
+Open **AI & Categories** in the toolbar to see the model status, re-sort everything, or
+train a whole batch at once from the selected photos.
 
 **Manage Profiles** opens a scrollable list of everything you've trained, with each
 category's sample count and a delete button. Deleting is deliberately two clicks —
@@ -87,9 +86,17 @@ puts the last batch back where it came from.
 
 Every photo becomes a 512-dimension CLIP embedding. A category is a centroid, and a
 photo is assigned to the category it sits closest to, as long as the similarity clears
-the threshold (0.65 by default). Below that, the rules get a turn: filename keywords and
-aspect ratios for screenshots, keywords like `receipt` or `invoice` for documents, EXIF
-presence for camera photos. Failing all of that, the photo is marked **Unsorted**.
+a fixed 0.65. Below that, the rules get a turn: filename keywords and aspect ratios for
+screenshots, keywords like `receipt` or `invoice` for documents, EXIF presence for camera
+photos. Failing all of that, the photo is marked **Unsorted**.
+
+That 0.65 is a constant in the code rather than a setting, because you don't need to
+tune it: the dropdown on any photo ranks every category with its own confidence, so you
+can overrule a weak match on that one photo instead of re-sorting the whole library.
+Worth knowing why the bar exists at all, though — it's what hands a photo that doesn't
+really resemble anything you've trained to the filename and EXIF rules below. Take it
+away and every screenshot gets filed under whatever your centroids happen to lean
+towards, instead of **Screenshots**.
 
 Training a category folds the photo's embedding into the category centroid as a weighted
 average, so a handful of representative examples gets you a usable profile. Adding more
