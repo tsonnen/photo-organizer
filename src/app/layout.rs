@@ -69,6 +69,31 @@ pub(crate) fn modal_input_width(ui: &egui::Ui) -> f32 {
     (ui.available_width() - TRAILING_CONTROLS).clamp(MIN_CONTROL_WIDTH, 200.0)
 }
 
+/// Size of the inspection modal's card, in points.
+///
+/// Takes most of the screen, because the thing it shows is a photograph and
+/// the controls underneath it want a single row of their own. Clamped so it
+/// never becomes larger than the screen it is drawn on.
+pub(crate) fn inspection_modal_size(screen: egui::Vec2) -> egui::Vec2 {
+    egui::vec2(
+        (screen.x * 0.85).clamp(500.0, 1100.0),
+        (screen.y * 0.85).clamp(400.0, 800.0),
+    )
+}
+
+/// Size of the settings modal's card, in points.
+///
+/// Wider than it is tall by design: the paths it shows — a model checkpoint in
+/// particular — are long, and the column is left wide enough for one to be
+/// read rather than scrolled sideways. The height covers the three rows plus
+/// the warning line the model row grows when a chosen path cannot be read.
+pub(crate) fn settings_modal_size(screen: egui::Vec2) -> egui::Vec2 {
+    egui::vec2(
+        (screen.x * 0.45).clamp(420.0, 640.0),
+        (screen.y * 0.42).clamp(340.0, 480.0),
+    )
+}
+
 /// Size of the profile management modal's card, in points.
 ///
 /// Derived from the screen the way the inspection modal's card is, and clamped

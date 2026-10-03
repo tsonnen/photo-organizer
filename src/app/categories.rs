@@ -28,6 +28,7 @@ impl super::PhotoOrganizerApp {
                 item.is_exif,
                 width,
                 height,
+                self.settings.confidence_threshold,
             );
             if res.source == ClassificationSource::VisualModel {
                 visual_count += 1;
@@ -40,10 +41,11 @@ impl super::PhotoOrganizerApp {
         if total_count > 0 {
             self.status_message = Some((
                 format!(
-                    "⚡ Re-classified {} photo(s) ({} visual AI match(es), {} active category profile(s))",
+                    "⚡ Re-classified {} photo(s) ({} visual AI match(es), {} active category profile(s), threshold {:.2})",
                     total_count,
                     visual_count,
                     self.profiles.profiles.len(),
+                    self.settings.confidence_threshold,
                 ),
                 egui::Color32::from_rgb(180, 220, 255),
             ));
@@ -76,7 +78,7 @@ impl super::PhotoOrganizerApp {
         if trained_count == 0 {
             self.status_message = Some((
                 format!(
-                    "⚠️ Could not train '{category}': Selected photo(s) have no visual embeddings (CLIP model missing). Place clip_vision.safetensors in models/"
+                    "⚠️ Could not train '{category}': Selected photo(s) have no visual embeddings. Choose a CLIP checkpoint in Settings."
                 ),
                 egui::Color32::from_rgb(240, 70, 70),
             ));
@@ -104,7 +106,7 @@ impl super::PhotoOrganizerApp {
             if item.embedding.is_empty() {
                 self.status_message = Some((
                     format!(
-                        "⚠️ Cannot train '{category}': Photo has no visual embedding (CLIP model missing). Place clip_vision.safetensors in models/"
+                        "⚠️ Cannot train '{category}': Photo has no visual embedding. Choose a CLIP checkpoint in Settings."
                     ),
                     egui::Color32::from_rgb(240, 70, 70),
                 ));

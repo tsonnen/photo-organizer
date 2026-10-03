@@ -5,6 +5,7 @@ mod inference;
 mod media;
 mod profile_store;
 mod scanner;
+mod settings;
 mod undo_engine;
 
 use app::PhotoOrganizerApp;

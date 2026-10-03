@@ -101,10 +101,15 @@ cargo test                      # 59 tests, ~8s once built
 
 ## State written at runtime
 
-`profiles.json`, `photo_cache.db`, `last_execution_manifest.json` are opened by **relative path**, so they
-land in the process CWD (repo root under `cargo run`), not next to the binary as the README implies. All
-three are gitignored and safe to delete. The SQLite cache is keyed by BLAKE3 of file contents; schema
-self-migrates with `CREATE TABLE IF NOT EXISTS` + best-effort `ALTER TABLE`.
+`profiles.json`, `settings.json`, `photo_cache.db`, `last_execution_manifest.json` are opened by **relative
+path**, so they land in the process CWD (repo root under `cargo run`), not next to the binary as the README
+implies. All four are gitignored and safe to delete. The SQLite cache is keyed by BLAKE3 of file contents;
+schema self-migrates with `CREATE TABLE IF NOT EXISTS` + best-effort `ALTER TABLE`.
+
+`settings.json` is deliberately *not* folded into `profiles.json`: profiles are learned data, settings are
+knobs, and keeping them apart is what stops an older `profiles.json` carrying a stale copy of a value the
+UI owns. `Settings::clamp_threshold` runs on both load and save — serde will happily read `99.0`, which would
+classify every photo as Unsorted.
 
 `Cargo.lock` is committed even though `.gitignore` lists it — the rule is inert for tracked files. Don't
 commit a regenerated lock unless dependencies actually changed.
@@ -112,8 +117,18 @@ commit a regenerated lock unless dependencies actually changed.
 ## Execution flow
 
 `src/main.rs` → `PhotoOrganizerApp::update`: drain the high-res channel, drain scan messages, then
-render toolbar → grid → modal. Actions discovered during drawing are collected into a `ModalActions`/
-local flags and applied *after* the frame, because acting mid-draw would re-enter `open_modal`.
+render toolbar → footer → grid → modals. Actions discovered during drawing are collected into a
+`ModalActions`/`SettingsActions` struct or a local flag and applied *after* the frame, because acting
+mid-draw would re-enter `open_modal`. The same applies to `rfd`'s pickers, which block: opening one from
+inside a draw stalls the UI thread inside egui. Panel order is load-bearing — egui hands `CentralPanel`
+whatever the top and bottom panels leave, so `render_footer` has to be shown *before* `render_grid`.
+
+All three modals share `src/app/chrome.rs` (`show_modal_card`): dimming backdrop, centred card,
+backdrop-click-to-close. Two traps live in there — the card is sized on the ui *around* the window
+`Frame`, not inside it (asking for the full card from within the frame overflows by the frame's margin,
+which is what `the_profile_modal_fits_its_card` guards), and `ui.with_layout(Layout::right_to_left)` does
+**not** advance the parent ui's cursor, so a widget added after one lands past it. The settings modal
+puts its Browse buttons on section headers for that reason.
 
 - **Scan** (`src/scanner.rs`): one spawned thread walks the folder (non-recursive, files only) and runs a
   *dedicated* rayon pool, not the global one — sized `scan_thread_count()` = `(cores / 2).clamp(2, 12)`,
@@ -123,11 +138,19 @@ local flags and applied *after* the frame, because acting mid-draw would re-ente
 - **Decode** (`src/media.rs`): a scan never full-decodes. JPEG goes through `jpeg-decoder`'s DCT scaling;
   every other format full-decodes then rescales. `ScanPreview::original_*` carries the true frame size
   because the heuristics key off resolution.
-- **Classify** (`src/profile_store.rs`): CLIP centroid match above `CONFIDENCE_THRESHOLD` (0.65, a
-  constant, not a setting) → rules (screenshot/document/EXIF) → `Unsorted`. That threshold is the only
-  path into the rules tier, so dropping it would make screenshot/document/EXIF detection unreachable
-  for anyone with a trained profile. `ClassificationSource::Manual` items are never overwritten by
-  `reclassify_all`, the **Re-classify All** button, or a scan `Update`; only their embedding refreshes.
+- **Classify** (`src/profile_store.rs`): CLIP centroid match above the user's confidence threshold
+  (default `settings::DEFAULT_CONFIDENCE_THRESHOLD` = 0.65, slider range 0.30..=0.95) → rules
+  (screenshot/document/EXIF) → `Unsorted`. The threshold is a **parameter**, not a store field: it is
+  passed into `classify`/`classify_with_heuristics`, and reaches the scanner via `ScanConfig`. That
+  threshold is the only path into the rules tier, so dropping it would make screenshot/document/EXIF
+  detection unreachable for anyone with a trained profile. `ClassificationSource::Manual` items are never
+  overwritten by `reclassify_all`, the **Re-classify All** button, or a scan `Update`; only their
+  embedding refreshes.
+- **Settings** (`src/settings.rs`, `src/app/settings_modal.rs`): threshold slider, output folder, model
+  path. Edits are written on change rather than on a Save button, and the threshold slider acts on
+  `Response::drag_stopped()` — firing on every `changed()` frame would re-run `reclassify_all` ~60×/sec.
+  Switching model deletes `photo_cache.db` (embeddings from one checkpoint are meaningless in another's
+  space) but keeps `profiles.json`: the centroids are stale too, but they are the user's work.
 - **Transfer** (`src/execution_engine.rs`, `src/undo_engine.rs`): `plan_batch` → `execute_batch`, `_1`
   collision suffixes instead of overwriting, `.xmp`/`.aae` sidecars travel with the photo. The manifest
   records the whole batch and Undo reverses **only the last batch**.
@@ -143,7 +166,8 @@ Carry the original dimensions on `StagedItem` if you touch this.
 
 - `src/app/layout_tests.rs` uses `egui_kittest` to assert **real** geometry from the production
   renderers. The grid cell deliberately stacks the custom-category input *below* the combo while the modal
-  puts it *inline* — both directions are asserted. Don't "unify" those layouts.
+  puts it *inline* — both directions are asserted. Don't "unify" those layouts. Modal tests filter
+  `placed_widgets` down to what lies inside the card rect, because the backdrop covers the whole screen.
 - `categories.rs` has a source-text test (`include_str!`) requiring exactly two call sites of
   `render_custom_category_input` (grid + modal). Adding a third call site fails the build.
 - `scanner.rs` mutates the process-global `PHOTO_ORGANIZER_SCAN_THREADS` in exactly one test on purpose

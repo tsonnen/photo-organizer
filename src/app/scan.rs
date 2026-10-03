@@ -6,8 +6,9 @@
 
 use super::PhotoOrganizerApp;
 use crate::app::models::StagedItem;
+use crate::inference::find_model_path;
 use crate::profile_store::ClassificationSource;
-use crate::scanner::{scan_folder, ProcessedPayload, ScanMessage};
+use crate::scanner::{scan_folder, ProcessedPayload, ScanConfig, ScanMessage};
 use eframe::egui;
 use std::path::PathBuf;
 
@@ -20,7 +21,15 @@ impl PhotoOrganizerApp {
         self.is_processing = true;
         let tx = self.tx.clone();
         let profiles = self.profiles.clone();
-        scan_folder(folder, profiles, tx, ctx);
+
+        // Resolved here, once, rather than inside the scan: every worker would
+        // otherwise run the same model search to reach the same answer.
+        let config = ScanConfig {
+            threshold: self.settings.confidence_threshold,
+            model_path: find_model_path(self.settings.model_path.as_deref()),
+        };
+
+        scan_folder(folder, profiles, config, tx, ctx);
     }
 
     /// Applies every scan message queued since the last frame.

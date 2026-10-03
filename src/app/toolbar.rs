@@ -17,15 +17,13 @@ impl PhotoOrganizerApp {
     }
 
     fn render_toolbar_actions(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let mut pick_source = false;
+
+        self.render_menu_bar(ui);
+
         ui.horizontal(|ui| {
             if ui.button("📁 Source Folder").clicked() {
-                if let Some(p) = rfd::FileDialog::new().pick_folder() {
-                    self.input_folder = Some(p.clone());
-                    self.start_scan(ctx.clone(), p);
-                }
-            }
-            if ui.button("📂 Output Folder").clicked() {
-                self.output_folder = rfd::FileDialog::new().pick_folder();
+                pick_source = true;
             }
 
             ui.separator();
@@ -37,10 +35,36 @@ impl PhotoOrganizerApp {
             }
 
             ui.separator();
-            if ui.button("🚀 Move").clicked() {
+
+            // Move and Copy need somewhere to put things. Rather than letting
+            // them press and then refuse, they sit disabled until a destination
+            // is configured.
+            //
+            // `on_disabled_hover_text`, not `on_hover_text`: egui deliberately
+            // suppresses the latter on a non-interactable widget, so the obvious
+            // spelling gives a greyed button that explains nothing — exactly the
+            // dead end the greying was meant to avoid.
+            let has_destination = self.settings.output_folder.is_some();
+            let destination_hint = if has_destination {
+                "Files the selected photos into the folder in the status bar"
+            } else {
+                "Set an output folder in File ▸ Settings… before transferring"
+            };
+
+            if ui
+                .add_enabled(has_destination, egui::Button::new("🚀 Move"))
+                .on_disabled_hover_text(destination_hint)
+                .on_hover_text(destination_hint)
+                .clicked()
+            {
                 self.execute_transfer(TransferMode::Move);
             }
-            if ui.button("📋 Copy").clicked() {
+            if ui
+                .add_enabled(has_destination, egui::Button::new("📋 Copy"))
+                .on_disabled_hover_text(destination_hint)
+                .on_hover_text(destination_hint)
+                .clicked()
+            {
                 self.execute_transfer(TransferMode::Copy);
             }
             if ui.button("↩ Undo").clicked() {
@@ -62,6 +86,50 @@ impl PhotoOrganizerApp {
                 ui.spinner();
                 ui.label("Processing...");
             }
+        });
+
+        // Acted on after the frame: `rfd`'s dialog is a blocking native call,
+        // and opening one mid-draw would stall the UI thread inside egui.
+        if pick_source {
+            self.pick_source_folder(ctx);
+        }
+    }
+
+    /// Asks for a folder and starts scanning it, if one was chosen.
+    fn pick_source_folder(&mut self, ctx: &egui::Context) {
+        if let Some(picked) = rfd::FileDialog::new()
+            .set_title("Choose the folder of photos to scan")
+            .pick_folder()
+        {
+            self.input_folder = Some(picked.clone());
+            self.start_scan(ctx.clone(), picked);
+        }
+    }
+
+    /// The menu bar above the action row.
+    ///
+    /// Chrome only: where the app is configured and how it is exited. Scanning
+    /// is deliberately *not* here — it has a toolbar button already, and a
+    /// second route to it would be a second thing to keep in sync for no gain.
+    /// The actions of the moment stay as buttons below for the same reason
+    /// they're buttons: Move and Copy are what the toolbar is for, and burying
+    /// them one click deep to tidy the strip up would cost more than the
+    /// tidiness is worth.
+    fn render_menu_bar(&mut self, ui: &mut egui::Ui) {
+        egui::menu::bar(ui, |ui| {
+            ui.menu_button("📁 File", |ui| {
+                if ui.button("Settings…").clicked() {
+                    // A plain flag, safe to set mid-frame: `render_settings_modal`
+                    // runs later in this same frame.
+                    self.show_settings_modal = true;
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button("Quit").clicked() {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    ui.close_menu();
+                }
+            });
         });
     }
 
