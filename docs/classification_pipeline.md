@@ -79,3 +79,24 @@ corrected on that one photo instead of by re-sorting the whole library. It is no
 redundant, though — it is the only path from Tier 1 into Tier 2, so removing it would
 leave screenshot, document and EXIF detection unreachable for anyone with a trained
 profile.
+
+## Category Names
+
+Every category is also a directory name, so the pipeline never hands a raw string to
+the transfer engine. `ClassificationResult.category` and `RawPhotoInput.subject` are both
+`CategoryName`, which is one path component by construction, and `CategoryName` is the
+single place that decides which names are allowed.
+
+Sanitisation runs where user input enters rather than where it is used. The two routes
+that can reach a category are training (`ProfileStore::add_exemplar`) and the per-photo
+custom name input, and both go through `from_user_input`: path separators and the
+characters Windows reserves become `-`, control characters and NUL become a space, and
+trailing dots and spaces are trimmed because Windows drops them when creating a file.
+`.` and `..` fall back to `Unsorted`, which is what keeps a category from resolving
+outside the output folder.
+
+Because sanitising happens on the way *in*, what the dropdown shows and what the folder
+is called cannot drift apart — a category typed as `A/B` is stored, displayed and filed
+as `A-B`. The one deliberate exception is a `profiles.json` written before this type
+existed: `ProfileStore::classify` re-sanitises the stored profile name on the way out,
+since that file is the one input the app cannot re-derive the rules for.
