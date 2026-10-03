@@ -4,6 +4,71 @@ Single-binary Rust desktop app (eframe/egui 0.30 + Candle CLIP on CPU) that scan
 photos, classifies them, and files approved ones into `<output>/<Category>/<YYYY>/<MM>/`.
 No server, no API keys, no network at runtime.
 
+## Workflow
+
+Every change lands through a **git worktree** — never edit in the main checkout, so `main` stays clean and
+buildable while a branch is in flight. Worktrees are siblings of the repo, not children of it, so a stale
+worktree can't turn up in `git status`:
+
+    /home/tobye/code/photo-organizer/                     # main checkout, stays on main
+    /home/tobye/code/photo-organizer_worktrees/feat/foo/   # branch feat/foo
+
+The directory is the branch name verbatim, prefix included, so `git worktree list` output pastes straight into
+`cd`. Branch from an up-to-date `origin/main`, and run every `cargo` command from the worktree root:
+
+```bash
+git fetch origin
+git worktree add ../photo-organizer_worktrees/feat/foo -b feat/foo origin/main
+cd ../photo-organizer_worktrees/feat/foo
+```
+
+A cold debug worktree lands near 4 GB: ~600 MB of LFS weights in `models/`, another ~600 MB for the copy
+`build.rs` publishes into `target/<profile>/models`, and ~3 GB of compiled deps (`deps` alone is 3.1 GB —
+eframe/wgpu/candle). LFS smudges the weights out of the shared `.git/lfs` object, so it's a copy rather than
+a re-download, but it's still a copy per worktree. Hardlink it to one canonical copy:
+
+```bash
+ln -f "$(git rev-parse --git-common-dir)/../models/clip_vision.safetensors" models/clip_vision.safetensors
+```
+
+`ln`, not `ln -s`: a symlink reads as a typechange in `git status`, while a hardlink to identical bytes is
+invisible. `build.rs` then hardlinks the `target/` copy, which brings a worktree to ~3 GB. Never point
+`target/<profile>/models` at that path yourself — `fs::copy` truncates *through* hardlinks, which is what
+`publish_model` in `build.rs` exists to prevent.
+
+A shared `CARGO_TARGET_DIR` would delete the remaining ~3 GB, but two worktrees on different branches
+invalidate each other's artifacts on every switch — exactly the workflow this convention creates. Don't.
+
+Reuse a worktree for follow-up commits on the same branch rather than opening a new one, and drop it once
+the PR merges:
+
+```bash
+git worktree remove ../photo-organizer_worktrees/feat/foo
+git branch -d feat/foo
+```
+
+### PR size and stacking
+
+Aim for **~1500 changed lines per PR**, measured against that PR's own base branch — insertions and
+deletions, tests and docs included, `Cargo.lock` excluded:
+
+```bash
+git diff --shortstat <base-branch>...HEAD
+```
+
+Going over is a prompt to look for a seam, not an automatic split. Stack when the work has a natural fault
+line and each slice is independently reviewable and mergeable on its own — usually a refactor that the rest
+depends on:
+
+- PR1 `refactor/extract-scan-service` → `main`: the scanner's pool and message plumbing behind one interface.
+- PR2 `feat/scan-progress` → `refactor/extract-scan-service`: the feature that needed it.
+
+In a stack, each PR targets the branch below it, the PR bodies list the stack bottom-up, and the PRs land on
+`main` one squash commit at a time. Don't stack to hit the number: one cohesive 2000-line change beats two
+arbitrary halves, while a 1200-line PR that mixes a shared-service refactor with every new caller of it is
+still two PRs. Split when the change spans unrelated concerns, when a reviewer would need two mental models,
+or when the first slice is safe to merge on its own.
+
 ## Commands
 
 CI (`.github/workflows/build-and-test.yaml`) runs these in order, so match it locally:
@@ -20,7 +85,7 @@ cargo test                      # 59 tests, ~8s once built
 - `cargo test -- --nocapture inference::tests::test_init_clip_session_real_file` to watch the real
   CLIP load + forward pass. It **silently returns** if the model file is under 1024 bytes (an LFS pointer).
 - Linux build deps: `libgtk-3-dev libxkbcommon-dev` (the release workflow installs these).
-- `cargo run` needs a display and must be run from the repo root so the relative `models/` lookup hits.
+- `cargo run` needs a display and must be run from the worktree root so the relative `models/` lookup hits.
 
 ## Model + build.rs
 
@@ -30,8 +95,9 @@ cargo test                      # 59 tests, ~8s once built
 - `inference.rs` hardcodes ViT-B/32 geometry (`EMBED_DIM 768`, 12 heads/layers, patch 32, 50 positional
   embeddings, optional 768→512 `proj`). Embeddings are always 512-d. A different checkpoint size means
   editing those constants, not just swapping the file.
-- `build.rs` copies `models/` (and `src/models/`) into `target/<profile>/models` on every build.
-  `find_model_path()` tries CWD-relative paths first, then `<exe dir>/models`.
+- `build.rs` publishes `models/` (and `src/models/`) into `target/<profile>/models`, hardlinking after the
+  first build instead of re-copying ~600 MB. `find_model_path()` tries CWD-relative paths first, then
+  `<exe dir>/models`.
 
 ## State written at runtime
 
@@ -88,8 +154,8 @@ Carry the original dimensions on `StagedItem` if you touch this.
 
 ## Conventions
 
-- Branch with a prefix (`feat/`, `fix/`, `refactor/`, `perf/`) and open a PR; `main` history is one squash
-  commit per PR ending in `(#N)`.
+- Branch with a prefix (`feat/`, `fix/`, `refactor/`, `perf/`, `chore/`) in a worktree (see **Workflow**)
+  and open a PR; `main` history is one squash commit per PR ending in `(#N)`.
 - When scanning, classification or the transfer flow changes, update `README.md` **and**
   `docs/classification_pipeline.md` in the same change.
 - Comments explain *why* and cite measurements (e.g. why half the cores, why WAL). Match that density;
