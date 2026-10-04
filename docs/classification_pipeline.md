@@ -139,3 +139,79 @@ only as a backstop for a `CategoryProfile` built by struct literal.
 
 Raising or lowering the threshold does not change any of this: it decides *whether* a
 centroid wins, never *what the name may contain*.
+
+## Transfer Journal
+
+Once a category has been decided, `src/transfer/` owns everything that touches the
+filesystem: where a photo lands, that it gets there, that it can be recognised
+afterwards, and that the whole batch can be reversed.
+
+**One layout, one module.** `plan_batch` → `execute_batch` → `TransferJournal` →
+`undo` all agree on `<output>/<Category>/<YYYY>/<MM>/<name>`, a `_1`/`_2` suffix for a
+name that is taken, and `.xmp`/`.aae` beside the photo. They used to be two modules,
+with the reverse direction re-deriving that layout by hand, and the two drifted in ways
+that cost files: the journal recorded no `TransferMode`, so undo assumed every batch was
+a move and deleting a batch of twenty *copies* deleted twenty copies; the forward
+direction checked a copy's length before removing the source and the reverse direction
+did not; and a sidecar's direction lived in a trailing comment next to a
+`(PathBuf, PathBuf)`, so a swap compiled. `Sidecar { source, destination }` puts that
+direction in the type.
+
+**One mutation rule.** Both directions go through `place(from, to, mode)`: the forward
+direction as `place(source, destination, mode)`, undo as
+`place(destination, source, mode)`. It refuses to overwrite whatever is at `to` — which
+is also what stops a source folder chosen as its own output folder from truncating a
+photo onto itself — and it never removes `from` until the copy at `to` is verified
+complete, using the byte count `fs::copy` returns. A copy that stops early is deleted
+rather than left behind, which is safe in either direction precisely because `to` did
+not exist when the call started.
+
+**A sidecar travels with one photo.** `discover_sidecars` claims each sidecar file
+against the whole batch, not one photo. `photo.jpg` and `photo.jpeg` beside each other
+both resolve to `photo.xmp` and both want it at the same destination, since the `_1`
+suffix only ever lands on the photo itself; without the batch-wide claim the second
+attempt failed with "does not exist" for a Move or "refusing to overwrite" for a Copy,
+and the status line named a sidecar as broken when it had in fact travelled with the
+first photo.
+
+**What undo does depends on the recorded mode.** A move is undone with another move. A
+copy is undone by deleting the copies, because nothing left the source folder and
+leaving them behind would make the button a lie. Either way undo checks before it
+destroys anything: it will not overwrite a path that is occupied again, and it will not
+move or delete a file whose `Fingerprint` — length plus modification time, the pair
+git's index caches — no longer matches the journal's. A photo edited in the output
+folder is left alone and reported. Emptied category folders are pruned, bounded by the
+`output_dir` the journal records and by emptiness; the output folder itself never is.
+That bound needs the guard it has: every path starts with an empty one, so an
+`output_dir` of `""` — which only something other than this app can write — would
+otherwise leave `prune_empty_dirs` climbing until a folder was not empty.
+
+**Failures are reported, not swallowed.** `execute_batch` keeps every failure in
+`failed_ops` at file granularity — a sidecar that could not travel is its own entry,
+because the photo beside it has already moved and must still be undoable. The app puts
+the failures in the status line and keeps the failed photos in the grid.
+
+The journal records what the transfer did, not just what it attempted, which is what
+distinguishes a failed file from a landed one that is not in the state the user asked
+for. A cross-device Move whose original could not be unlinked — a read-only source
+folder, or a read-only file on Windows — leaves the file in both places: `place`
+returns that as a `Placed.warning` rather than an `Err`, because the copy is there,
+fingerprinted and reversible, and reporting it as a failure would put a file in the
+output folder that no journal mentioned and no Undo could reach. It becomes its own
+`failed_ops` entry, so the status line still turns amber and still says why, while the
+operation itself stays in `completed_ops`. Undo surfaces the same condition as
+`UndoStatus::Failed` for the same reason: it has put the photo back, but there is a
+leftover to find.
+
+A batch that lands nothing is not journalled at all. There is no new batch to record,
+and overwriting the single slot would throw away the only record of the last one that
+did move anything — so the previous journal stays and the status line says so. The
+journal itself is written to a staging file and renamed into place, so it is either
+complete or absent; if it cannot be written, the stale journal from the previous batch
+is removed, because a journal Undo reads as "the last batch" while describing an older
+one is worse than a visible "this batch cannot be undone".
+
+`transfer::tests::test_undo_is_the_inverse_of_execute_for_both_modes` is the property
+that ties the two directions together: for each mode, `undo(execute(inputs, mode))`
+leaves the filesystem exactly as it started, sidecars included.
+

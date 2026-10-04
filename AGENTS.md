@@ -77,11 +77,11 @@ CI (`.github/workflows/build-and-test.yaml`) runs these in order, so match it lo
 cargo fmt --check
 cargo clippy -- -D warnings     # warnings are errors; the tree is currently clean
 cargo build
-cargo test                      # 129 tests, ~5s once built
+cargo test                      # 154 tests, ~5s once built
 ```
 
 - One test / one area: `cargo test media::tests::test_scan_preview_jpeg_scales_down_and_keeps_original_size`,
-  `cargo test app::layout_tests`, `cargo test scanner`.
+  `cargo test app::layout_tests`, `cargo test scanner`, `cargo test transfer`.
 - `cargo test -- --nocapture inference::tests::test_init_clip_session_real_file` to watch the real
   CLIP load + forward pass. It **silently returns** if the model file is under 1024 bytes (an LFS pointer).
 - Linux build deps: `libgtk-3-dev libxkbcommon-dev` (the release workflow installs these).
@@ -165,9 +165,25 @@ puts its Browse buttons on section headers for that reason.
   space) but keeps `profiles.json`: the centroids are stale too, but they are the user's work. The chosen
   path is preferred but not required — the row warns when what resolves isn't what was chosen, because a
   green dot next to a silently substituted checkpoint reads as confirmation.
-- **Transfer** (`src/execution_engine.rs`, `src/undo_engine.rs`): `plan_batch` → `execute_batch`, `_1`
-  collision suffixes instead of overwriting, `.xmp`/`.aae` sidecars travel with the photo. The manifest
-  records the whole batch and Undo reverses **only the last batch**.
+- **Transfer** (`src/transfer/`): `plan_batch` → `execute_batch` → `TransferJournal` →
+  `undo`, `_1` collision suffixes instead of overwriting, `.xmp`/`.aae` sidecars travelling
+  with the photo. One module owns the on-disk layout on purpose: with the reverse
+  direction in `undo_engine.rs` it became a second implementation of the same layout, and
+  the journal recorded no `TransferMode`, so Undo assumed every batch was a move and
+  deleting a batch of twenty *copies* deleted twenty copies. Both directions now go
+  through one `place()` rule, the journal records the mode plus a length/mtime
+  `Fingerprint` per file, and undo refuses to overwrite an occupied path or touch a file
+  that changed since it was filed. The manifest records the whole batch and Undo reverses
+  **only the last batch**.
+  Two things distinguish *failed* from *landed but not as asked*, because the journal
+  records what happened rather than what was attempted: `place` returns a
+  `Placed.warning` for a cross-device Move whose original could not be unlinked (the
+  file is in both places, so the operation stays in `completed_ops` and is still
+  undoable, and the warning becomes its own `failed_ops` entry), and a batch that lands
+  nothing is not journalled at all, so it cannot displace the previous batch's Undo.
+  `discover_sidecars` claims sidecar files batch-wide — `photo.jpg` and `photo.jpeg`
+  both want `photo.xmp` at the same destination, and the second attempt failing used to
+  report a sidecar as broken when it had in fact travelled.
 
 ### Known divergence
 
@@ -194,7 +210,18 @@ Carry the original dimensions on `StagedItem` if you touch this.
   `render_custom_category_input` (grid + modal). Adding a third call site fails the build.
 - `scanner.rs` mutates the process-global `PHOTO_ORGANIZER_SCAN_THREADS` in exactly one test on purpose
   (cargo runs tests on parallel threads). Don't split it or add another env-mutating test.
-- Tests create temp files as `temp_dir()/name_<pid>.<ext>`; no fixtures directory exists.
+- Tests create temp files as `temp_dir()/name_<pid>.<ext>`, and `src/transfer/` builds a whole
+  temp tree per test (`temp_dir()/transfer_<name>_<pid>`). No fixtures directory exists.
+- `transfer::tests::test_undo_is_the_inverse_of_execute_for_both_modes` asserts that
+  `undo(execute(inputs, mode))` puts the filesystem back exactly as it started, for both
+  modes, sidecars included. It is the reason the two directions share a module — keep it
+  passing, and add to it rather than to a hand-built manifest when you touch either side.
+- The cross-device `Move` fallback is unreachable on one filesystem, so
+  `transfer::tests::set_dir_read_only` provokes its second half instead: a read-only
+  directory refuses `rename` and `unlink` out of it while leaving reads alone, which is
+  the same code path a failed rename takes. It asserts that the read-only bit was
+  honoured rather than skipping when it was not, because a test that quietly stopped
+  testing anything is worse than one that fails.
 - `src/app/` was split out of `app.rs` (commit 161b3e7); `mod.rs` documents the submodule split. Keep the
   module boundary and the top-of-file `//!` orientation comments that go with it.
 

@@ -2,7 +2,7 @@
 //! collapsible AI & categories panel.
 
 use super::PhotoOrganizerApp;
-use crate::execution_engine::TransferMode;
+use crate::transfer::TransferMode;
 use eframe::egui;
 
 impl PhotoOrganizerApp {
@@ -67,7 +67,13 @@ impl PhotoOrganizerApp {
             {
                 self.execute_transfer(TransferMode::Copy);
             }
-            if ui.button("↩ Undo").clicked() {
+            // The two buttons above are opposites, so undo is not a single gesture
+            // either: it moves the last moved batch home again, or deletes the
+            // copies the last copied batch made.
+            let undo = ui.button("↩ Undo").on_hover_text(
+                "Reverse the last transfer: move a moved batch home again, or delete the copies a copied batch made. Files you have edited since are left alone.",
+            );
+            if undo.clicked() {
                 self.undo_last_transfer();
             }
 

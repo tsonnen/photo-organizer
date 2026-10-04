@@ -81,8 +81,36 @@ folder of large files stays responsive.
 
 Select what you want and hit **Move** or **Copy**. Files go to
 `<output>/<Category>/<YYYY>/<MM>/`, and name collisions get a `_1`, `_2` suffix rather
-than overwriting anything. `.xmp` and `.aae` sidecars travel with their photo. **Undo**
-puts the last batch back where it came from.
+than overwriting anything. `.xmp` and `.aae` sidecars travel with their photo. Nothing
+is ever overwritten: if something already sits at the destination, that file is
+reported and both are left alone.
+
+**Undo** reverses whichever of those you did last, which makes it two different
+actions rather than one:
+
+| Last action | Undo does |
+| --- | --- |
+| Move | Puts the batch back where it came from, sidecars included. |
+| Copy | Deletes the copies it made. Your originals are never touched. |
+
+Undo checks before it destroys anything. It will not overwrite a path that is occupied
+again — a photo you have put back yourself stays put — and it will not move or delete a
+file in the output folder that has changed since the app wrote it. Those files are left
+where they are and named in the status line: undo is for putting a batch back the way
+it was, not for throwing away work. It also tidies up the category folders the transfer
+emptied, stopping at the output folder itself, which is yours.
+
+Every transfer says how many photos landed and what failed; the ones that failed stay
+in the grid so a retry is one click away. Undo reports the same way, and it can only
+undo the last batch — the journal it reads is rewritten by the next transfer that
+lands anything, and a transfer that landed nothing leaves the previous batch's Undo
+intact rather than replacing it.
+
+One case is worth knowing about because the files are in both places afterwards: if
+the original cannot be deleted — a read-only source folder, or a read-only file on
+Windows — the photo is still filed, and the status line says so rather than calling
+the transfer a failure. Undo can still reverse the filed copy; what it cannot do is
+guess which of the two you want to keep.
 
 The category is always exactly one folder. Slashes, backslashes and the characters
 Windows reserves are replaced with `-`, so a category named `Vacation / Japan` files
@@ -155,8 +183,9 @@ The code is laid out like this:
 | `src/category_name.rs` | Category names, kept safe as one folder name |
 | `src/db.rs` | SQLite cache, keyed by file hash |
 | `src/media.rs` | Image decoding, EXIF dates, thumbnails |
-| `src/execution_engine.rs` | Planning and running file transfers |
-| `src/undo_engine.rs` | Rolling a transfer back from its manifest |
+| `src/transfer/` | The transfer layout: planning, placing files, the journal, and undo |
 
-`photo_cache.db`, `profiles.json` and `last_execution_manifest.json` are written next to
-the binary and are safe to delete. The first one just means the next scan is slower.
+`photo_cache.db`, `profiles.json` and `last_execution_manifest.json` are opened by
+relative path, so they land in the folder you started the app from rather than next to
+the binary, and all three are safe to delete. The cache only means the next scan is
+slower; the journal only matters until the next transfer overwrites it.
