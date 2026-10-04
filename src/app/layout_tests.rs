@@ -1210,6 +1210,79 @@ fn assigning_a_name_labels_the_selection_and_leaves_it_staged() {
 }
 
 #[test]
+fn assigning_a_name_over_a_scan_in_progress_claims_the_photos_it_has_not_reached() {
+    // Bulk Move is reachable the moment the grid has rows in it, which during a
+    // scan means some of those rows are `Classifying...`. Those photos must come
+    // out carrying the typed name like every other one: `mark_manual` alone leaves
+    // `pending` set, so `keep_manual` stays false and the scan's answer lands on
+    // top of the name — silently, after the status line has already counted them.
+    let screen = egui::vec2(1240.0, 900.0);
+    let settings = crate::settings::Settings {
+        output_folder: Some(std::path::PathBuf::from("/photos/sorted")),
+        ..Default::default()
+    };
+    let mut harness = bulk_move_harness_with(
+        screen,
+        settings,
+        "Beach Trip",
+        vec![
+            (PathBuf::from("/photos/decided.jpg"), 2024, 7),
+            (PathBuf::from("/photos/still_going.jpg"), 2024, 7),
+        ],
+    );
+
+    // The one photo the model has not reached: a placeholder, not a decision.
+    let pending = &mut harness.state_mut().items[1];
+    pending.pending = true;
+    pending.category = crate::classification::CLASSIFYING_LABEL.into();
+    pending.source = ClassificationSource::UnsortedFallback;
+    pending.is_custom = false;
+
+    harness
+        .query_all_by_label_contains("Assign Only")
+        .next()
+        .expect("expected an Assign Only button")
+        .click();
+    harness.run();
+
+    let app = harness.state();
+    for (i, item) in app.items.iter().enumerate() {
+        assert_eq!(
+            item.category, "Beach Trip",
+            "photo {i} was selected, so it carries the typed name"
+        );
+        assert_eq!(
+            item.source,
+            ClassificationSource::Manual,
+            "photo {i} keeps the name only if the pick is the user's"
+        );
+        assert!(
+            !item.pending,
+            "photo {i} holds a name now, so it is no longer pending — this is what \
+             stops the scan's answer overwriting it"
+        );
+        assert!(
+            item.is_filable(),
+            "photo {i} is filable, or Move and Copy would hold it back for a retry \
+             against a name the user already gave it"
+        );
+    }
+
+    // And the number reported is the number that really do: both photos were
+    // selected, so both are counted — the pending one included, not quietly
+    // dropped from the tally.
+    let assigned = &app
+        .status_message
+        .as_ref()
+        .expect("expected a status line")
+        .0;
+    assert!(
+        assigned.contains("2"),
+        "both selected photos were assigned, so the count says 2: {assigned:?}"
+    );
+}
+
+#[test]
 fn bulk_move_puts_the_whole_selection_under_the_typed_name() {
     // The end-to-end claim, checked against the filesystem rather than the
     // status line: every selected photo lands under the one name typed, in the

@@ -77,7 +77,7 @@ CI (`.github/workflows/build-and-test.yaml`) runs these in order, so match it lo
 cargo fmt --check
 cargo clippy -- -D warnings     # warnings are errors; the tree is currently clean
 cargo build
-cargo test                      # 193 tests, ~5s once built
+cargo test                      # 195 tests, ~5s once built
 ```
 
 - One test / one area: `cargo test media::tests::test_scan_preview_jpeg_scales_down_and_keeps_original_size`,
@@ -226,6 +226,14 @@ puts its Browse buttons on section headers for that reason.
   gated on the scan finishing, and the transfer seam turns whatever is in `category` into a directory
   name — without the guard a scan's earliest photos land in `<output>/Classifying.../<YYYY>/<MM>/`, out of
   reach of every later re-classification. Held photos stay in the grid, selected, for the retry.
+
+The one write that clears `pending` is `StagedItem::mark_manual_over_pending`, used solely by
+the bulk move. `mark_manual` stays non-claiming because the per-photo "Other" text box is offered
+the placeholder, not a category the user chose; the bulk move arrives with a name they typed over
+a selection they picked, so it claims the photo and its name survives the answer it raced. Keep
+this to that one call site — the authority to clear the flag is the whole reason the other two
+bullets can hold, and `clicking_other_on_a_pending_photo_claims_nothing` is what pins the "Other"
+path shut.
 
 `ProfileStore::classify` / `classify_with_heuristics` / `classify_heuristics` were collapsed into the one
 entry point — which is also where `classify_with_heuristics`'s `threshold` parameter went, so the

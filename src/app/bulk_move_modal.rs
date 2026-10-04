@@ -462,6 +462,16 @@ impl PhotoOrganizerApp {
     /// `apply_classification` will not overwrite, so these photos keep this
     /// name through **Re-classify All**, a threshold move, and any scan still
     /// running — which is what makes a batch decision stick.
+    ///
+    /// "Any scan still running" is the clause that needs
+    /// [`StagedItem::mark_manual_over_pending`] rather than
+    /// [`StagedItem::mark_manual`]. A photo the model has not reached is not yet a
+    /// photo with a category, so `mark_manual` refuses to claim it and the model's
+    /// answer lands on top of the name written here — silently, after the status
+    /// line has already reported every photo as assigned. This is the one route
+    /// that arrives with a name the user actually chose, so it claims the pending
+    /// ones too, and the count below is then the number of photos that really do
+    /// carry the name.
     fn assign_selected_to_category(
         &mut self,
         name: &CategoryName,
@@ -480,7 +490,7 @@ impl PhotoOrganizerApp {
             }
             item.category = name.as_str().to_string();
             item.is_custom = is_custom;
-            item.mark_manual();
+            item.mark_manual_over_pending();
             assigned += 1;
         }
 

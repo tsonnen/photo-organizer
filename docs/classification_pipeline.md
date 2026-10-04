@@ -67,7 +67,10 @@ so they cannot disagree about what a manual pick means:
   always lands. Before this was a variant, the placeholder was stored as a real
   category, which rendered an editable text input bound to it; one keystroke
   marked the photo manual and the scan's real answer was then skipped, leaving
-  the photo filed as "Classifying..." permanently.
+  the photo filed as "Classifying..." permanently. The one write that *does* clear
+  `pending` is `mark_manual_over_pending`, used solely by the bulk move, which
+  arrives with a name the user typed rather than with the placeholder — see
+  **Bulk Move, and why it trains nothing**.
 - A **manual** photo is never re-decided: the name, confidence and source are
   the user's call. Whether the name is editable is still re-derived against the
   live profiles, because a profile can be deleted while the category stands and
@@ -243,9 +246,23 @@ So the bulk move's name is *only* a name. It is written to the staged items thro
 same single write path as any other decision, as `source: Manual`, which is precisely
 what makes it stick: `apply_classification` will not overwrite a manual pick, so a batch
 labelled this way survives **Re-classify All**, a threshold move, and a scan still
-running. A photo the scan has not finished with is the one exception — `mark_manual`
-deliberately does not claim a `pending` photo, because its category is a placeholder
-rather than a decision.
+running.
+
+A scan still running includes photos it has not reached yet, and those need a second
+write. `mark_manual` deliberately refuses to claim a `pending` photo, because at that
+point its category is the `Classifying...` placeholder rather than anything the user
+chose — which is the right refusal for the per-photo "Other" text box, which is offered
+that placeholder. A bulk move is not in that position: it arrives with a name the user
+typed, over a selection they picked. So `assign_selected_to_category` calls
+`mark_manual_over_pending`, which sets Manual *and* clears `pending`. Without it the
+photo's category holds the typed name while `pending` still says there is no decision,
+`keep_manual` stays false, and the scan's answer overwrites the name — silently, after
+the status line has already reported every photo in the selection as assigned.
+
+The scan's *facts* still arrive either way: `apply_classification` refreshes them
+before it decides anything, so a photo claimed mid-scan picks up its embedding and does
+not train the next profile on the empty one it was staged with. Only the decision is
+skipped.
 
 **Names are remembered, not learned.** `Settings::custom_categories` holds the newest
 `MAX_REMEMBERED_CATEGORIES` names the user has used, and nothing else: no centroid, no

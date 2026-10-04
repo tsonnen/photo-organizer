@@ -149,6 +149,32 @@ impl StagedItem {
         self.source = ClassificationSource::Manual;
     }
 
+    /// Claims a photo the model has not reached yet, on the strength of a name the
+    /// user typed over a whole selection.
+    ///
+    /// [`Self::mark_manual`] is right for the per-photo "Other" path and wrong for
+    /// this one, and the difference is what there is to claim. That path puts a
+    /// text box on a photo whose category is still the `CLASSIFYING_LABEL`
+    /// placeholder, so setting Manual there would preserve a placeholder; leaving
+    /// `pending` alone is what keeps the model's answer winning. A bulk move
+    /// arrives with a name — a category the user chose, applied to a selection they
+    /// picked — so this also clears `pending`, which is the one thing that lets
+    /// `apply_decision`'s `keep_manual` hold.
+    ///
+    /// Split into its own method rather than a flag on `mark_manual` so that
+    /// authority stays narrow and greppable: clearing `pending` from anywhere else
+    /// would bypass the rule `reclassify_all` and `is_filable` both step around, and
+    /// the test that pins the "Other" path shut is the proof it has not moved.
+    ///
+    /// The scan's decision for this photo is now skipped, but its *facts* are not:
+    /// `apply_classification` refreshes those before it decides anything, so the
+    /// embedding still arrives. That is what keeps a photo claimed mid-scan from
+    /// training the next profile on the empty embedding it was staged with.
+    pub(super) fn mark_manual_over_pending(&mut self) {
+        self.source = ClassificationSource::Manual;
+        self.pending = false;
+    }
+
     /// The facts the classifier reads for this photo, read back out of the
     /// fields the widgets already render rather than stored twice.
     pub(super) fn facts(&self) -> PhotoFacts {
@@ -352,6 +378,47 @@ mod tests {
             "nothing has been decided yet, so a later decision must land"
         );
         assert!(!item.pending);
+    }
+
+    #[test]
+    fn a_name_typed_over_a_pending_photo_claims_it() {
+        // The one route that clears `pending`, and the reason it is safe where
+        // `mark_manual` is not: there is a real category to preserve, not the
+        // placeholder. Without the claim the scan's answer lands on top of the name
+        // the bulk move already reported as assigned.
+        let profiles = ProfileStore::default();
+        let mut item = item(&profiles);
+        assert_eq!(item.category, CLASSIFYING_LABEL);
+
+        item.category = "Beach Trip".to_string();
+        item.is_custom = true;
+        item.mark_manual_over_pending();
+
+        assert!(!item.pending, "the photo now carries a decision");
+        assert!(
+            item.is_filable(),
+            "and may therefore be filed under that name"
+        );
+
+        let mut later = facts();
+        later.embedding = vec![0.7, 0.2, 0.1];
+        update(
+            &mut item,
+            &profiles,
+            &later,
+            decided("Screenshots", ClassificationSource::Heuristic),
+        );
+
+        assert_eq!(
+            item.category, "Beach Trip",
+            "the user's name outlives the answer it raced"
+        );
+        assert_eq!(
+            item.embedding,
+            vec![0.7, 0.2, 0.1],
+            "claiming the decision must not freeze the facts: the embedding still \
+             has to arrive, or the next profile trains on nothing"
+        );
     }
 
     #[test]

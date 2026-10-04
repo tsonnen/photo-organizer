@@ -74,7 +74,9 @@ want for an event that straddles a year boundary.
 Names you've used are offered again next time, so a second batch is a click rather than
 a retype. They are just names: no profile is trained and no centroid is built, so this
 is the way to file a one-off event without leaving a category in `profiles.json` that
-describes nothing reusable.
+describes nothing reusable. A name you assign is the user's call and survives
+everything the app does afterwards — **Re-classify All**, a threshold move, and a scan
+that is still running, including photos the model has not reached yet.
 
 **Manage Profiles** opens a scrollable list of everything you've trained, with each
 category's sample count and a delete button. Deleting is deliberately two clicks —
