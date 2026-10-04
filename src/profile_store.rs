@@ -408,10 +408,7 @@ mod tests {
         };
 
         let res1 = store.classify(&[0.9, 0.1, 0.0], DEFAULT_CONFIDENCE_THRESHOLD);
-        assert_eq!(
-            res1.category,
-            CategoryName::from_user_input("Landscape")
-        );
+        assert_eq!(res1.category, CategoryName::from_user_input("Landscape"));
         assert!(res1.confidence > DEFAULT_CONFIDENCE_THRESHOLD);
         assert_eq!(res1.source, ClassificationSource::VisualModel);
 
