@@ -86,9 +86,9 @@ puts the last batch back where it came from.
 
 The category is always exactly one folder. Slashes, backslashes and the characters
 Windows reserves are replaced with `-`, so a category named `Vacation / Japan` files
-under `Vacation - Japan` rather than inventing a subfolder. A name left with nothing
-usable in it, or one that would climb out of the output folder, files under
-**Unsorted**.
+under `Vacation - Japan` rather than inventing a subfolder. A name with nothing usable
+left in it, one named `.` or `..`, and one Windows reserves for a device — `NUL`,
+`COM1` and the rest — file under **Unsorted**.
 
 ## How sorting works
 

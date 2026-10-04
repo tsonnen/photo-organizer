@@ -52,7 +52,12 @@ impl CategoryProfile {
     pub fn new(name: impl Into<String>, centroid: Vec<f32>) -> Self {
         let norm_centroid = normalize_vector(&centroid);
         Self {
-            name: name.into(),
+            // Canonical from the moment it exists. Everything downstream looks a
+            // profile up by this name — `add_exemplar`, `is_custom_category`,
+            // `rank_profiles`, the dropdown — and files it under it, so a name
+            // only sanitised at the point of use would stop identifying its own
+            // profile the moment it was shown next to the stored spelling.
+            name: CategoryName::from_user_input(&name.into()).into_string(),
             centroid: norm_centroid,
             sample_count: 1,
         }
@@ -94,7 +99,20 @@ pub struct ProfileStore {
 impl ProfileStore {
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = fs::read_to_string(path)?;
-        let store: Self = serde_json::from_str(&content)?;
+        let mut store: Self = serde_json::from_str(&content)?;
+
+        // A `profiles.json` written before `CategoryName` existed can hold a
+        // name that is not one path component — `A/B`, `Sunsets.`, `NUL` — and
+        // serde will not stop it. Canonicalising on load keeps each profile's
+        // name, the label the dropdown shows and the directory it files into
+        // from disagreeing; the rewrite lands on disk at the next save, the way
+        // the retired threshold field does. Doing it here rather than at the
+        // point of use is what stops a sanitised name from looking like a
+        // different, custom category to the dropdown.
+        for profile in &mut store.profiles {
+            profile.name = CategoryName::from_user_input(&profile.name).into_string();
+        }
+
         Ok(store)
     }
 
@@ -121,7 +139,7 @@ impl ProfileStore {
     /// The name is sanitised here rather than at the two training call sites, so
     /// that what gets trained is exactly what will later be filed: a category
     /// typed as `A/B` is stored as `A-B` and shows that in the dropdown, instead
-    /// of reading as `A-B` in the grid and creating two folders on transfer.
+    /// of reading as `A/B` in the grid and creating two folders on transfer.
     pub fn add_exemplar(&mut self, category: &str, embedding: &[f32]) {
         if embedding.is_empty() {
             return;
@@ -171,10 +189,11 @@ impl ProfileStore {
         if let Some((profile, sim)) = best_match {
             if sim >= threshold {
                 return ClassificationResult {
-                    // Sanitised on the way in rather than trusted: a
-                    // `profiles.json` written before this type existed can hold
-                    // a name that is not a single path component, and this is
-                    // the last point before it reaches the output folder.
+                    // A backstop, not the sanitisation point: `CategoryProfile::new`
+                    // and `load_from_file` both canonicalise the name, so this is
+                    // already a no-op and the result still identifies the profile
+                    // it came from. It stays because the field is public and a
+                    // `CategoryProfile` can be built by struct literal.
                     category: CategoryName::from_user_input(&profile.name),
                     confidence: sim.clamp(0.0, 1.0),
                     source: ClassificationSource::VisualModel,
@@ -527,6 +546,52 @@ mod tests {
             !rewritten.contains("confidence_threshold"),
             "re-saving should drop the retired field, got:\n{rewritten}"
         );
+
+        let _ = fs::remove_file(&file_path);
+    }
+
+    #[test]
+    fn test_load_canonicalises_a_name_that_is_not_one_path_component() {
+        // The train box took any text before `CategoryName` existed, so a saved
+        // profile can hold a name that is not a legal directory. Canonicalising
+        // it here — rather than at the point of use — is what keeps the profile
+        // findable: sanitise only the returned name and `is_custom_category`
+        // compares `A-B` against a stored `A/B`, finds nothing, and reports a
+        // trained category as custom.
+        let temp_dir = std::env::temp_dir();
+        let file_path = temp_dir.join(format!("test_legacy_names_{}.json", std::process::id()));
+
+        fs::write(
+            &file_path,
+            r#"{
+  "profiles": [
+    { "name": "Beach/Trip", "centroid": [0.8, 0.6], "sample_count": 3 },
+    { "name": "Sunsets.", "centroid": [0.0, 1.0], "sample_count": 1 },
+    { "name": "NUL", "centroid": [0.6, 0.8], "sample_count": 1 }
+  ]
+}"#,
+        )
+        .expect("write legacy names");
+
+        let mut loaded = ProfileStore::load_from_file(&file_path).expect("load legacy names");
+        let names: Vec<&str> = loaded.profiles.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Beach-Trip", "Sunsets", "Unsorted"]);
+
+        // The canonical name is what the rest of the app matches on, so training
+        // under it has to fold into the existing profile. Canonicalise only the
+        // name `classify` returns and the dropdown would show `A-B`, retrain it
+        // as `A-B` and fork a second profile alongside the stored `A/B`.
+        loaded.add_exemplar("Beach-Trip", &[0.8, 0.6]);
+        assert_eq!(
+            loaded.profiles.len(),
+            3,
+            "training under the shown name must not fork a duplicate profile"
+        );
+
+        // And the rewrite is persisted, so it only has to happen once.
+        loaded.save_to_file(&file_path).expect("re-save");
+        let reloaded = ProfileStore::load_from_file(&file_path).expect("reload re-saved");
+        assert_eq!(reloaded.profiles[0].name, "Beach-Trip");
 
         let _ = fs::remove_file(&file_path);
     }

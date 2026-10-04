@@ -77,7 +77,7 @@ CI (`.github/workflows/build-and-test.yaml`) runs these in order, so match it lo
 cargo fmt --check
 cargo clippy -- -D warnings     # warnings are errors; the tree is currently clean
 cargo build
-cargo test                      # 127 tests, ~5s once built
+cargo test                      # 129 tests, ~5s once built
 ```
 
 - One test / one area: `cargo test media::tests::test_scan_preview_jpeg_scales_down_and_keeps_original_size`,
@@ -203,8 +203,15 @@ Carry the original dimensions on `StagedItem` if you touch this.
 A category is a dropdown label *and* a directory under the output folder. `src/category_name.rs`
 owns the second job: `CategoryName` is one path component by construction, and
 `from_user_input` is the only way to build one from something a person typed. Separators
-and Windows-reserved characters become `-`, trailing dots and spaces are trimmed, and
-`.`/`..` fall back to `Unsorted`.
+and Windows-reserved characters become `-`, trailing dots and spaces are trimmed, and a
+name that is empty, `.`, `..` or one of the device names Windows reserves (`NUL`,
+`COM1`, `LPT1`, …) falls back to `Unsorted`.
+
+`CategoryProfile::new` and `ProfileStore::load_from_file` are the two points where a
+stored profile name becomes canonical, so a legacy `profiles.json` cannot leave a profile
+whose name is not the one the dropdown shows and the folder is called. Keep it that way:
+profiles are looked up *by* name, so sanitising only where a name is used leaves the
+returned name unable to match the profile it came from.
 
 `StagedItem.category` stays a plain `String` — it is display text the user retypes per
 photo, so it is sanitised at the transfer seam (`app/transfer.rs`) rather than on the way

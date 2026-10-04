@@ -41,7 +41,11 @@ impl CategoryName {
     /// Separators become `-` rather than being dropped, so `Vacation / Japan`
     /// still reads as `Vacation - Japan` and the user can see what happened to
     /// their input. A name with nothing usable left falls back to
-    /// [`CategoryName::unsorted`].
+    /// [`CategoryName::unsorted`], as does one Windows reserves for a device
+    /// (`NUL`, `COM1`) and so cannot become a directory at all. Those two could
+    /// be told apart — `NUL-` would stay legible — but they share one documented
+    /// fallback instead, because both mean the same thing to the user: there is
+    /// no folder of this name and the photos are in **Unsorted**.
     pub fn from_user_input(raw: &str) -> Self {
         let replaced: String = raw
             .chars()
@@ -63,7 +67,51 @@ impl CategoryName {
             return Self::unsorted();
         }
 
+        // A handful of whole names are aliased to a device by Windows, and
+        // `create_dir_all` on one fails outright rather than creating a
+        // directory — which fails every transfer into it.
+        if Self::is_reserved_windows_device_name(trimmed) {
+            return Self::unsorted();
+        }
+
         Self(trimmed.to_string())
+    }
+
+    /// Whether `name` is a device name Windows reserves for a whole path
+    /// component.
+    ///
+    /// Only the component itself is reserved, so `Camera CON` is an ordinary
+    /// directory, but a period does not escape it: Windows reads `NUL.txt` as
+    /// `NUL`.
+    fn is_reserved_windows_device_name(name: &str) -> bool {
+        const BARE: [&str; 4] = ["CON", "PRN", "AUX", "NUL"];
+        // `COM`/`LPT` only name a device once a port number follows, so bare
+        // `COM` is an ordinary directory.
+        const NUMBERED: [&str; 2] = ["COM", "LPT"];
+
+        let base = name.split('.').next().unwrap_or(name);
+        let upper = base.to_ascii_uppercase();
+        if BARE.contains(&upper.as_str()) {
+            return true;
+        }
+
+        // Windows 8 and later read the ISO-8859-1 superscript digits as digits,
+        // so `COM¹` is reserved in every directory just as `COM1` is.
+        let normalised: String = upper
+            .chars()
+            .map(|c| match c {
+                '\u{b9}' => '1',
+                '\u{b2}' => '2',
+                '\u{b3}' => '3',
+                c => c,
+            })
+            .collect();
+
+        NUMBERED.iter().any(|prefix| {
+            normalised
+                .strip_prefix(prefix)
+                .is_some_and(|port| port.len() == 1 && matches!(port.as_bytes()[0], b'1'..=b'9'))
+        })
     }
 
     /// The name as a string slice.
@@ -149,6 +197,45 @@ mod tests {
     }
 
     #[test]
+    fn test_windows_reserved_device_names_fall_back_to_unsorted() {
+        // Windows aliases these to a device and `create_dir_all` on one fails
+        // rather than making a directory, so a category named `NUL` would
+        // otherwise fail every transfer into it.
+        for reserved in [
+            "CON",
+            "PRN",
+            "AUX",
+            "NUL",
+            "COM1",
+            "COM9",
+            "LPT1",
+            "LPT9", // device names
+            "con",
+            "nul",
+            "Com1", // matched case-insensitively
+            "NUL.txt",
+            "COM1.Photos", // a period does not escape the reservation
+            "COM\u{b9}",
+            "LPT\u{b3}", // superscripts are read as digits
+        ] {
+            assert_eq!(
+                CategoryName::from_user_input(reserved).as_str(),
+                "Unsorted",
+                "{reserved:?} is reserved on Windows and cannot be a directory"
+            );
+        }
+
+        // Only the whole component is reserved, and `COM`/`LPT` need a port.
+        for ordinary in ["Camera CON", "CON Photos", "COM", "LPT", "COM10", "NULL"] {
+            assert_eq!(
+                CategoryName::from_user_input(ordinary).as_str(),
+                ordinary,
+                "{ordinary:?} is an ordinary directory name"
+            );
+        }
+    }
+
+    #[test]
     fn test_control_characters_are_dropped() {
         assert_eq!(
             CategoryName::from_user_input("Suns\0ets").as_str(),
@@ -185,6 +272,9 @@ mod tests {
         ] {
             assert_eq!(Path::new(name.as_str()).components().count(), 1);
             assert!(!name.as_str().is_empty());
+            // Every built-in has to survive the sanitiser unchanged, or the
+            // fallback bucket is not the directory it claims to be.
+            assert_eq!(CategoryName::from_user_input(name.as_str()), name);
         }
     }
 }
