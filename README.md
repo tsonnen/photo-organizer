@@ -55,6 +55,37 @@ Pick a **Source Folder** and the scan starts. Photos appear in the grid as thumb
 while classification continues in the background, so you can start reviewing before it's
 finished.
 
+### Sorting and filtering
+
+The row under the toolbar orders the grid, and **🔍 Filters** narrows it.
+
+**Sort** offers three orders, each with a button to flip it: **Date Taken** (a year and
+a month is as fine as the app stores — `extract_date` reduces both EXIF timestamps and
+file times to that pair), **Confidence**, and **Category**. Photos that tie on the sort
+key keep a fixed order, so flipping the direction moves the groups between them and
+leaves the ties where they are.
+
+Two of the orders aren't the plain comparison:
+
+- **Confidence** puts every photo the model actually matched above every photo a *rule*
+  claimed — a screenshot caught by its filename, a camera photo by its EXIF. Those carry
+  a number measuring how sure the *rule* is, not the model, and ranked as-is a
+  confidently mis-filed screenshot would sit above a genuine match. They rank below the
+  threshold you set, which is the only reason they ran at all, and still order among
+  themselves by how sure their rule was.
+- **Category** treats anything with no category — the **Unsorted** fallback, or a custom
+  name you've cleared — as sorting last, rather than filing between **Travel** and
+  **Vacation** as though you'd chosen it.
+
+**Filters** has three narrowing controls that combine: a **date range**, a **confidence
+range**, and a **category**. All three have to hold for a photo to stay, so you can ask
+for "receipts, from 2021, that the model was sure about" in one go.
+
+A filter narrows what you're looking at *and* what the actions act on. Photos outside it
+aren't counted in the footer, aren't ticked by **All**, aren't trained from, and aren't
+moved or copied — so the count above **Move** always describes the same photos the grid
+is showing. Scanning a new folder clears the filters; the sort is kept.
+
 Every cell has a category dropdown showing your trained profiles with a confidence
 percentage, plus a small 🎓 button to train that category from the one photo. Anything
 that doesn't fit gets **Other**, which gives you a free-text field for a name of your
@@ -75,6 +106,9 @@ In the inspection modal (click any thumbnail):
 | `←` / `→` | Previous / next photo |
 | `Space` | Toggle selection |
 | `Esc` | Close |
+
+The arrows step through the photos currently in view, so a filtered grid pages within
+what you're looking at rather than wandering off into photos the filters excluded.
 
 The full-resolution image loads in the background once the modal is open, so browsing a
 folder of large files stays responsive.
