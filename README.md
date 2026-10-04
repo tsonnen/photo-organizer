@@ -97,7 +97,9 @@ bar exists at all, though — it's what hands a photo that doesn't really resemb
 anything you've trained to the filename and EXIF rules below. Turn it all the way down
 and every screenshot gets filed under whatever your centroids happen to lean towards,
 instead of **Screenshots**. Turn it up if confident-looking matches are landing in the
-wrong category; the default sits where a mediocre match loses to the rules.
+wrong category; the default sits where a mediocre match loses to the rules. Moving it
+re-sorts what is already staged, and if a scan is still running that re-sort waits for it
+to finish — so the whole grid always ends up judged by the same bar.
 
 Two settings live alongside it. **Output folder** decides where transfers go, and the
 current destination is shown in the status bar along the bottom of the window, so you

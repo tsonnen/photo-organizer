@@ -33,10 +33,14 @@ fn shorten_path(path: &std::path::Path) -> String {
     let mut tail: Vec<&str> = Vec::new();
     let mut length = 1; // the ellipsis
     for component in components.iter().rev() {
-        if length + component.len() + 1 > MAX_CHARS {
+        // Counted in chars, not bytes, to match the check above: the budget is
+        // about how wide the label is, and a component of multi-byte characters
+        // would overshoot it on every count of its length.
+        let component_chars = component.chars().count();
+        if length + component_chars + 1 > MAX_CHARS {
             break;
         }
-        length += component.len() + 1;
+        length += component_chars + 1;
         tail.push(component.as_str());
     }
     // Collected back-to-front, so put it back the right way round.
@@ -157,6 +161,20 @@ mod tests {
         assert!(
             shortened.contains("model.safetensors"),
             "the filename is the identifying part, got {shortened:?}"
+        );
+    }
+
+    #[test]
+    fn a_multi_byte_path_keeps_every_segment_that_fits() {
+        // The budget is about how wide the label is, so it counts characters.
+        // Counting bytes instead would run out after a third of them and elide
+        // segments that had room to spare: five 9-character segments are 45
+        // characters of label but 95 bytes.
+        let path = Path::new("/æøåæøåæøå/æøåæøåæøå/æøåæøåæøå/æøåæøåæøå/æøåæøåæøå");
+
+        assert_eq!(
+            shorten_path(path),
+            "…æøåæøåæøå/æøåæøåæøå/æøåæøåæøå/æøåæøåæøå"
         );
     }
 }

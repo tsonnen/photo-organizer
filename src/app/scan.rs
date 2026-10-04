@@ -19,6 +19,12 @@ impl PhotoOrganizerApp {
         self.items.clear();
         self.status_message = None;
         self.is_processing = true;
+        // This scan classifies against the threshold in force now, so the grid
+        // starts out agreeing with the slider. That also discharges whatever a
+        // held re-classification was owed: it was owed for the photos just
+        // discarded, and there is nothing left half-sorted for it to put right.
+        self.classified_threshold = self.settings.confidence_threshold;
+        self.pending_reclassify = false;
         let tx = self.tx.clone();
         let profiles = self.profiles.clone();
 
@@ -56,7 +62,18 @@ impl PhotoOrganizerApp {
                     source,
                     embedding,
                 ),
-                ScanMessage::Complete => self.is_processing = false,
+                ScanMessage::Complete => {
+                    self.is_processing = false;
+                    // A threshold moved while this scan was running leaves the
+                    // grid sorted against two different bars: the photos that
+                    // arrived after the change were classified by the scan
+                    // against the threshold it started with, and the ones
+                    // before it by the new one. Settle on the value the user
+                    // can see now.
+                    if std::mem::take(&mut self.pending_reclassify) {
+                        self.reclassify_all();
+                    }
+                }
             }
         }
     }

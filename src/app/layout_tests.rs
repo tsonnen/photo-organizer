@@ -864,6 +864,228 @@ fn the_settings_modal_fits_its_card() {
     }
 }
 
+/// Opens the settings modal on a real app holding `staged` photos, kept as
+/// harness state so a test can read the status line back afterwards.
+///
+/// The settings are pinned to their defaults: `PhotoOrganizerApp::new` reads
+/// whatever `settings.json` happens to be in the crate root, and a threshold
+/// left over from a manual run would move the slider's starting point.
+fn settings_modal_with_items(staged: usize) -> Harness<'static, PhotoOrganizerApp> {
+    let mut app = PhotoOrganizerApp::new();
+    app.settings = crate::settings::Settings::default();
+    app.classified_threshold = app.settings.confidence_threshold;
+    app.show_settings_modal = true;
+
+    let mut harness = Harness::new_ui_state(
+        move |ui, app: &mut PhotoOrganizerApp| {
+            if app.items.is_empty() {
+                app.items = (0..staged).map(|_| staged_item(ui.ctx())).collect();
+            }
+            app.render_settings_modal(ui.ctx());
+        },
+        app,
+    );
+    harness.set_size(egui::vec2(1240.0, 900.0));
+    harness
+}
+
+/// The threshold slider's rail, as egui laid it out.
+fn slider_rail(harness: &Harness<'_, PhotoOrganizerApp>) -> egui::Rect {
+    let b = harness
+        .kittest_state()
+        .query_all(by().recursive(true))
+        .find(|node| format!("{:?}", node.role()).contains("Slider"))
+        .and_then(|node| node.raw_bounds())
+        .expect("the settings modal to draw a threshold slider");
+
+    egui::Rect::from_min_max(
+        egui::pos2(b.x0 as f32, b.y0 as f32),
+        egui::pos2(b.x1 as f32, b.y1 as f32),
+    )
+}
+
+/// A point on the rail, `across` of its width from the left end.
+fn on_the_rail(rail: egui::Rect, across: f32) -> egui::Pos2 {
+    egui::pos2(rail.left() + rail.width() * across, rail.center().y)
+}
+
+/// A left mouse button press, on its own frame.
+///
+/// egui only hands a widget an `interact_pointer_pos` while something is held
+/// or was released this frame, so a press and a release queued into one frame
+/// cancel out and the widget never sees the pointer at all.
+fn press_at(harness: &mut Harness<'_, PhotoOrganizerApp>, at: egui::Pos2) {
+    harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerMoved(at));
+    harness.input_mut().events.push(egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: Default::default(),
+    });
+    harness.step();
+}
+
+/// The pointer travelling to a new position with the button still down.
+fn drag_to(harness: &mut Harness<'_, PhotoOrganizerApp>, at: egui::Pos2) {
+    harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerMoved(at));
+    harness.step();
+}
+
+fn release_at(harness: &mut Harness<'_, PhotoOrganizerApp>, at: egui::Pos2) {
+    harness.input_mut().events.push(egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: Default::default(),
+    });
+    harness.step();
+}
+
+fn status_text(harness: &Harness<'_, PhotoOrganizerApp>) -> Option<String> {
+    harness
+        .state()
+        .status_message
+        .as_ref()
+        .map(|(msg, _)| msg.clone())
+}
+
+#[test]
+fn the_threshold_is_applied_when_the_handle_is_released() {
+    // egui puts the slider where the pointer is on the *press* frame and on
+    // every frame the handle travels, so the value has already settled by the
+    // time the drag stops: on the release frame there is nothing left to
+    // detect. Gating on a per-frame change therefore loses the user's decision
+    // entirely, and the grid keeps the classifications from the old threshold.
+    let mut harness = settings_modal_with_items(3);
+    harness.run();
+
+    let rail = slider_rail(&harness);
+    let start = on_the_rail(rail, 0.95);
+    let lower = on_the_rail(rail, 0.1);
+
+    press_at(&mut harness, start);
+    drag_to(&mut harness, lower);
+    assert_eq!(
+        status_text(&harness),
+        None,
+        "the frames a drag travels over must not re-classify the whole grid"
+    );
+
+    release_at(&mut harness, lower);
+    let status = status_text(&harness).unwrap_or_default();
+    assert!(
+        status.contains("Re-classified"),
+        "releasing the handle should re-classify the grid against the new \
+         threshold, status line was {status:?}"
+    );
+    assert_eq!(
+        harness.state().classified_threshold,
+        harness.state().settings.confidence_threshold,
+        "the grid should now be classified at the threshold on screen"
+    );
+}
+
+#[test]
+fn the_threshold_is_applied_when_nudged_with_the_keyboard() {
+    // The other way to move a focused slider. No drag ever starts, so nothing
+    // about a pointer release can pick this up.
+    let mut harness = settings_modal_with_items(3);
+    harness.run();
+
+    let before = harness.state().settings.confidence_threshold;
+    harness
+        .kittest_state()
+        .query_all(by().recursive(true))
+        .find(|node| format!("{:?}", node.role()).contains("Slider"))
+        .expect("the settings modal to draw a threshold slider")
+        .focus();
+    harness.run();
+
+    harness.press_key(egui::Key::ArrowRight);
+    harness.run();
+
+    assert!(
+        harness.state().settings.confidence_threshold > before,
+        "the arrow key should move the slider, {before} -> {}",
+        harness.state().settings.confidence_threshold
+    );
+    let status = status_text(&harness).unwrap_or_default();
+    assert!(
+        status.contains("Re-classified"),
+        "an arrow key should re-classify the grid just as a drag does, \
+         status line was {status:?}"
+    );
+}
+
+#[test]
+fn a_threshold_change_during_a_scan_waits_for_the_scan() {
+    // A scan classifies against the threshold it started with. Re-classifying
+    // the moment the slider moves would leave the photos already staged on the
+    // old bar and the photos still arriving on the new one, with nothing on
+    // screen to explain the split — so the request waits for the scan to end.
+    let mut harness = settings_modal_with_items(3);
+    harness.run();
+    harness.state_mut().is_processing = true;
+
+    let rail = slider_rail(&harness);
+    press_at(&mut harness, on_the_rail(rail, 0.95));
+    release_at(&mut harness, on_the_rail(rail, 0.1));
+
+    assert_eq!(
+        status_text(&harness),
+        None,
+        "a scan in flight is classifying with its own threshold"
+    );
+    assert!(
+        harness.state().pending_reclassify,
+        "the re-classification should be held for the end of the scan, not dropped"
+    );
+
+    harness
+        .state_mut()
+        .tx
+        .send(crate::scanner::ScanMessage::Complete)
+        .expect("the app's own receiver to still be open");
+    let ctx = egui::Context::default();
+    harness.state_mut().drain_scan_messages(&ctx);
+
+    let status = status_text(&harness).unwrap_or_default();
+    assert!(
+        status.contains("Re-classified"),
+        "the held re-classification should run once the scan finishes, \
+         status line was {status:?}"
+    );
+    assert!(
+        !harness.state().pending_reclassify,
+        "the held request is spent once it has run"
+    );
+}
+
+#[test]
+fn a_chosen_model_the_app_cannot_use_is_called_out() {
+    // The chosen path is preferred but not required: `find_model_path` carries
+    // on to `models/` when it isn't an existing file, so a green dot next to a
+    // substituted checkpoint would read as confirmation that a stale or
+    // mistyped path is fine.
+    let screen = egui::vec2(1240.0, 900.0);
+    let settings = crate::settings::Settings {
+        model_path: Some(PathBuf::from("/nonexistent/clip_vision.safetensors")),
+        ..Default::default()
+    };
+
+    let (rects, _) = open_settings_modal(screen, settings);
+    assert!(
+        rects.iter().any(|r| r.label.contains("can't be used")),
+        "a model path the app fell back from should be called out, got {rects:#?}"
+    );
+}
+
 /// Renders the footer on an app holding `staged` photos of which `selected`
 /// are ticked, and returns the widgets egui placed.
 ///

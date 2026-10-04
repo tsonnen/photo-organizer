@@ -88,8 +88,9 @@ impl PhotoOrganizerApp {
             }
         });
 
-        // Acted on after the frame: `rfd`'s dialog is a blocking native call,
-        // and opening one mid-draw would stall the UI thread inside egui.
+        // Opened once the action row has finished laying out, not from inside
+        // the button handler: `rfd`'s dialog is a blocking native call, and
+        // blocking inside a panel closure would stall the UI thread mid-layout.
         if pick_source {
             self.pick_source_folder(ctx);
         }

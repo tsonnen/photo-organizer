@@ -38,6 +38,11 @@ impl super::PhotoOrganizerApp {
             item.confidence = res.confidence;
             item.source = res.source;
         }
+
+        // The grid now agrees with the threshold, so the slider's next move has
+        // something to compare its settled value against.
+        self.classified_threshold = self.settings.confidence_threshold;
+
         if total_count > 0 {
             self.status_message = Some((
                 format!(

@@ -25,9 +25,9 @@ struct SettingsActions {
     threshold_changed: bool,
     /// The user picked a different checkpoint.
     model_changed: bool,
-    /// A Browse button was pressed. Carried out after the frame: `rfd`'s
-    /// dialog is a blocking native call, and opening one from inside a draw
-    /// would stall egui mid-layout.
+    /// A Browse button was pressed. Carried out once the card has finished
+    /// laying out: `rfd`'s dialog is a blocking native call, and blocking
+    /// inside a draw would stall egui mid-layout.
     pick_output: bool,
     pick_model: bool,
 }
@@ -39,6 +39,23 @@ fn model_status_color(available: bool) -> egui::Color32 {
         egui::Color32::from_rgb(0, 200, 0)
     } else {
         egui::Color32::from_rgb(220, 150, 0)
+    }
+}
+
+/// Whether the checkpoint the app will load is the one the user chose.
+///
+/// `find_model_path` prefers the chosen path but carries on to `models/` when it
+/// isn't an existing file, so "something was found" and "what the user asked
+/// for is what is running" are different questions. A green dot next to a
+/// silently substituted checkpoint is the worse of the two: it reads as
+/// confirmation that a stale or mistyped path is fine.
+fn chosen_model_in_use(
+    chosen: Option<&std::path::Path>,
+    resolved: Option<&std::path::Path>,
+) -> bool {
+    match (chosen, resolved) {
+        (Some(chosen), Some(resolved)) => chosen == resolved,
+        _ => false,
     }
 }
 
@@ -63,6 +80,10 @@ impl PhotoOrganizerApp {
         let mut settings = self.settings.clone();
         let resolved_model = find_model_path(settings.model_path.as_deref());
 
+        // Split out so the row can see what the grid was last classified at
+        // without borrowing `self` while the card is being drawn.
+        let classified_threshold = self.classified_threshold;
+
         let (_, frame) = chrome::show_modal_card(ctx, "settings_modal_area", card_size, |ui| {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new("⚙ Settings").strong());
@@ -74,7 +95,7 @@ impl PhotoOrganizerApp {
             });
             ui.separator();
 
-            Self::render_threshold_row(ui, &mut settings, &mut actions);
+            Self::render_threshold_row(ui, &mut settings, &mut actions, classified_threshold);
             ui.separator();
 
             Self::render_output_folder_row(ui, &mut settings, &mut actions);
@@ -85,10 +106,10 @@ impl PhotoOrganizerApp {
 
         actions.close = frame.close || close_button;
 
-        // The pickers run here, after the card has finished drawing: `rfd`'s
-        // dialog is a blocking native call, and opening one from inside a draw
-        // would stall egui mid-layout. A result wins over whatever the field
-        // held, because the dialog is the more deliberate of the two.
+        // The pickers run here, once the card has finished laying out: `rfd`'s
+        // dialog is a blocking native call, and blocking inside a draw would
+        // stall egui mid-layout. A result wins over whatever the field held,
+        // because the dialog is the more deliberate of the two.
         if actions.pick_output {
             if let Some(chosen) = rfd::FileDialog::new()
                 .set_title("Choose the output folder")
@@ -114,14 +135,24 @@ impl PhotoOrganizerApp {
 
     /// The confidence threshold, and what moving it will do.
     ///
-    /// The re-classification fires on *release*, not on every frame the value
-    /// changes: dragging the slider across its range would otherwise re-run
-    /// classification over the whole grid dozens of times a second and rewrite
-    /// the status line each time.
+    /// The re-classification fires once per *settled* move, not on every frame
+    /// the value changes: dragging the slider across its range would otherwise
+    /// re-run classification over the whole grid dozens of times a second and
+    /// rewrite the status line each time.
+    ///
+    /// "Settled" is what makes this more than a `drag_stopped()` check. egui
+    /// applies the pointer position to a slider on the press frame and on every
+    /// frame the handle travels, so the value has already reached its resting
+    /// place by the time the drag stops — the release frame carries no change at
+    /// all, and would fire for nothing. And `drag_stopped` never fires at all
+    /// for the arrow keys, which is the other way to move a focused slider. So
+    /// the test is: no drag in flight, and the value differs from the one the
+    /// grid was last classified at.
     fn render_threshold_row(
         ui: &mut egui::Ui,
         settings: &mut Settings,
         actions: &mut SettingsActions,
+        classified_threshold: f32,
     ) {
         ui.label(egui::RichText::new("Classification").strong());
         ui.small(
@@ -132,7 +163,6 @@ impl PhotoOrganizerApp {
         );
         ui.add_space(4.0);
 
-        let before = settings.confidence_threshold;
         let response = ui.add(
             egui::Slider::new(
                 &mut settings.confidence_threshold,
@@ -144,7 +174,8 @@ impl PhotoOrganizerApp {
             .fixed_decimals(2),
         );
 
-        if response.drag_stopped() && settings.confidence_threshold != before {
+        let still_dragging = response.dragged() || response.drag_started();
+        if !still_dragging && settings.confidence_threshold != classified_threshold {
             actions.threshold_changed = true;
         }
     }
@@ -229,7 +260,7 @@ impl PhotoOrganizerApp {
         );
         ui.add_space(4.0);
 
-        let current = match settings.model_path.as_deref() {
+        let mut current = match settings.model_path.as_deref() {
             Some(path) => path.display().to_string(),
             None => match resolved {
                 Some(path) => format!("Auto-detected: {}", path.display()),
@@ -238,7 +269,7 @@ impl PhotoOrganizerApp {
         };
 
         ui.add(
-            egui::TextEdit::singleline(&mut current.clone())
+            egui::TextEdit::singleline(&mut current)
                 .desired_width(f32::INFINITY)
                 .hint_text("No model found")
                 // Read-only: a checkpoint is picked from disk, and a
@@ -246,13 +277,16 @@ impl PhotoOrganizerApp {
                 .interactive(false),
         );
 
-        if settings.model_path.is_some() && resolved.is_none() {
-            // Worth saying out loud: a path the user chose that resolves to
-            // nothing looks identical to a missing model otherwise, and the
-            // app silently falls back to rules.
+        if settings.model_path.is_some()
+            && !chosen_model_in_use(settings.model_path.as_deref(), resolved)
+        {
+            // Worth saying out loud, and worth saying whenever *something*
+            // resolved: a path the user chose that the app quietly replaced —
+            // or could not read, and so fell back to rules — looks the same as
+            // a healthy install otherwise.
             ui.colored_label(
                 egui::Color32::from_rgb(240, 180, 0),
-                "⚠ That file isn't readable — falling back to the standard locations.",
+                "⚠ That file can't be used — falling back to the standard locations.",
             );
         }
     }
@@ -284,7 +318,15 @@ impl PhotoOrganizerApp {
         }
 
         if threshold_changed {
-            self.reclassify_all();
+            if self.is_processing {
+                // The scan classifies with the threshold it started with, so
+                // re-running it now would only cover the photos staged so far
+                // and leave the rest sorted against a bar the grid no longer
+                // shows. Hold the request until the scan finishes.
+                self.pending_reclassify = true;
+            } else {
+                self.reclassify_all();
+            }
         }
     }
 
@@ -300,8 +342,7 @@ impl PhotoOrganizerApp {
         let removed = match std::fs::remove_file(cache) {
             Ok(()) => true,
             // Already gone is the state we wanted.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
-            Err(_) => false,
+            Err(e) => e.kind() == std::io::ErrorKind::NotFound,
         };
 
         if removed {
@@ -310,6 +351,56 @@ impl PhotoOrganizerApp {
                  Re-scan the folder, and retrain any categories if the new model sorts \
                  them differently.",
             );
+        } else {
+            // The old embeddings stay on disk and the next scan will read them,
+            // which is the mismatch this deletion exists to prevent — most
+            // likely because a scan holds the database open (a sharing
+            // violation on Windows). Staying silent would leave the swap
+            // looking exactly as clean as the successful one.
+            self.set_warning(
+                "⚠ Model changed, but the photo cache could not be deleted, so the old \
+                 model's embeddings are still in use. Stop any running scan and try \
+                 again, or delete photo_cache.db by hand before re-scanning.",
+            );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chosen_model_in_use;
+    use std::path::Path;
+
+    const CHOSEN: &str = "/models/clip_vision.safetensors";
+    const FALLBACK: &str = "/usr/share/photo-organizer/clip_vision.safetensors";
+
+    #[test]
+    fn a_chosen_path_is_in_use_only_when_it_is_what_resolves() {
+        assert!(
+            chosen_model_in_use(Some(Path::new(CHOSEN)), Some(Path::new(CHOSEN))),
+            "the chosen path resolved, so it is what is loading"
+        );
+    }
+
+    #[test]
+    fn a_silently_substituted_checkpoint_is_not_the_chosen_one() {
+        // The case the warning exists for. Something *was* found, so a green
+        // dot reads as confirmation that the chosen path is fine — while the
+        // app quietly runs a different checkpoint than the one the user picked.
+        assert!(!chosen_model_in_use(
+            Some(Path::new("/nonexistent/clip_vision.safetensors")),
+            Some(Path::new(FALLBACK)),
+        ));
+    }
+
+    #[test]
+    fn a_chosen_path_that_resolves_to_nothing_is_not_in_use() {
+        assert!(!chosen_model_in_use(Some(Path::new(CHOSEN)), None));
+    }
+
+    #[test]
+    fn nothing_is_chosen_when_the_user_left_it_on_auto_detect() {
+        assert!(!chosen_model_in_use(None, Some(Path::new(FALLBACK))));
+        assert!(!chosen_model_in_use(None, None));
     }
 }

@@ -77,7 +77,7 @@ CI (`.github/workflows/build-and-test.yaml`) runs these in order, so match it lo
 cargo fmt --check
 cargo clippy -- -D warnings     # warnings are errors; the tree is currently clean
 cargo build
-cargo test                      # 59 tests, ~8s once built
+cargo test                      # 112 tests, ~5s once built
 ```
 
 - One test / one area: `cargo test media::tests::test_scan_preview_jpeg_scales_down_and_keeps_original_size`,
@@ -119,9 +119,10 @@ commit a regenerated lock unless dependencies actually changed.
 `src/main.rs` → `PhotoOrganizerApp::update`: drain the high-res channel, drain scan messages, then
 render toolbar → footer → grid → modals. Actions discovered during drawing are collected into a
 `ModalActions`/`SettingsActions` struct or a local flag and applied *after* the frame, because acting
-mid-draw would re-enter `open_modal`. The same applies to `rfd`'s pickers, which block: opening one from
-inside a draw stalls the UI thread inside egui. Panel order is load-bearing — egui hands `CentralPanel`
-whatever the top and bottom panels leave, so `render_footer` has to be shown *before* `render_grid`.
+mid-draw would re-enter `open_modal`. `rfd`'s pickers block for the same reason, so they are opened once the
+row (or the modal card) has finished laying out, never from inside the button handler. Panel order is
+load-bearing — egui hands `CentralPanel` whatever the top and bottom panels leave, so `render_footer` has to
+be shown *before* `render_grid`.
 
 All three modals share `src/app/chrome.rs` (`show_modal_card`): dimming backdrop, centred card,
 backdrop-click-to-close. Two traps live in there — the card is sized on the ui *around* the window
@@ -147,10 +148,18 @@ puts its Browse buttons on section headers for that reason.
   overwritten by `reclassify_all`, the **Re-classify All** button, or a scan `Update`; only their
   embedding refreshes.
 - **Settings** (`src/settings.rs`, `src/app/settings_modal.rs`): threshold slider, output folder, model
-  path. Edits are written on change rather than on a Save button, and the threshold slider acts on
-  `Response::drag_stopped()` — firing on every `changed()` frame would re-run `reclassify_all` ~60×/sec.
+  path. Edits are written on change rather than on a Save button. The slider re-classifies when it comes to
+  rest at a value other than `classified_threshold` (kept in step by `reclassify_all`, the only place the
+  grid's classifications are rewritten) — *not* on `changed()` and *not* on `Response::drag_stopped()`.
+  Neither of those works: egui puts a slider where the pointer is on the press frame and on every frame the
+  handle travels, so the release frame carries no change at all and a per-frame test misses the decision;
+  and the arrow keys never start a drag. Per-frame firing would re-run `reclassify_all` ~60×/sec. A
+  threshold moved mid-scan sets `pending_reclassify` instead, which `ScanMessage::Complete` spends: the scan
+  classifies against the threshold it started with, so re-running it there would only fix half the grid.
   Switching model deletes `photo_cache.db` (embeddings from one checkpoint are meaningless in another's
-  space) but keeps `profiles.json`: the centroids are stale too, but they are the user's work.
+  space) but keeps `profiles.json`: the centroids are stale too, but they are the user's work. The chosen
+  path is preferred but not required — the row warns when what resolves isn't what was chosen, because a
+  green dot next to a silently substituted checkpoint reads as confirmation.
 - **Transfer** (`src/execution_engine.rs`, `src/undo_engine.rs`): `plan_batch` → `execute_batch`, `_1`
   collision suffixes instead of overwriting, `.xmp`/`.aae` sidecars travel with the photo. The manifest
   records the whole batch and Undo reverses **only the last batch**.
@@ -168,6 +177,11 @@ Carry the original dimensions on `StagedItem` if you touch this.
   renderers. The grid cell deliberately stacks the custom-category input *below* the combo while the modal
   puts it *inline* — both directions are asserted. Don't "unify" those layouts. Modal tests filter
   `placed_widgets` down to what lies inside the card rect, because the backdrop covers the whole screen.
+- The same file drives the settings modal with **real** pointer and key events, which has two traps: egui
+  only hands a widget an `interact_pointer_pos` while a button is held or was released *that* frame, so a
+  press and a release queued into one frame cancel out (hence `press_at`/`drag_to`/`release_at`, one event
+  per frame); and clicking a widget does *not* focus it in egui 0.30, so keyboard tests need kittest's
+  `Node::focus()`, which sends the accesskit Focus action.
 - `categories.rs` has a source-text test (`include_str!`) requiring exactly two call sites of
   `render_custom_category_input` (grid + modal). Adding a third call site fails the build.
 - `scanner.rs` mutates the process-global `PHOTO_ORGANIZER_SCAN_THREADS` in exactly one test on purpose

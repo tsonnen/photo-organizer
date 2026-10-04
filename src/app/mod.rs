@@ -54,6 +54,19 @@ pub struct PhotoOrganizerApp {
     /// Cached from the settings' model path at startup and recomputed when the
     /// user points the app at a different checkpoint.
     model_available: bool,
+    /// The threshold the staged photos were last classified at.
+    ///
+    /// The threshold slider applies a pointer position on the press frame and
+    /// on every frame the handle travels, so by the time the drag *stops* the
+    /// value has already settled and the release frame looks like no change at
+    /// all. Committing therefore means "settled at a value other than this one",
+    /// not "changed this frame". Kept in step by [`Self::reclassify_all`],
+    /// which is every place the grid's classifications are rewritten.
+    classified_threshold: f32,
+    /// Set when the threshold moved mid-scan, so the photos still arriving —
+    /// classified by the scan against the threshold it started with — are
+    /// re-classified once it finishes instead of being left mixed.
+    pending_reclassify: bool,
     show_categories_panel: bool,
     show_profiles_modal: bool,
     show_settings_modal: bool,
@@ -85,6 +98,7 @@ impl PhotoOrganizerApp {
         // always answer with the auto-detect guess.
         let settings = Settings::load_from_file("settings.json");
         let model_available = is_model_available(settings.model_path.as_deref());
+        let classified_threshold = settings.confidence_threshold;
 
         Self {
             input_folder: None,
@@ -93,6 +107,8 @@ impl PhotoOrganizerApp {
             profiles,
             settings,
             model_available,
+            classified_threshold,
+            pending_reclassify: false,
             show_categories_panel: false,
             show_profiles_modal: false,
             show_settings_modal: false,

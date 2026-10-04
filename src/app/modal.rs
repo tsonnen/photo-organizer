@@ -123,20 +123,18 @@ impl PhotoOrganizerApp {
         let mut next_requested = false;
         let mut single_train_requested = false;
 
-        let item = &mut self.items[modal_index];
-        let filename = item
+        // Split out so the closure below can borrow the item and the profiles
+        // separately: `render_modal_controls` needs both.
+        let filename = self.items[modal_index]
             .source_path
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
-
-        let modal_size = layout::inspection_modal_size(screen_rect.size());
-
-        // Split out so the closure below can borrow the item and the profiles
-        // separately: `render_modal_controls` needs both.
         let profiles = &self.profiles;
         let item = &mut self.items[modal_index];
+
+        let modal_size = layout::inspection_modal_size(screen_rect.size());
 
         let (_, frame) =
             chrome::show_modal_card(ctx, "photo_verification_modal_area", modal_size, |ui| {

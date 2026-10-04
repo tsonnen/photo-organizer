@@ -84,9 +84,18 @@ it to zero would leave screenshot, document and EXIF detection unreachable for a
 with a trained profile. Raising it to 1.0 would do the opposite — everything routed to
 the rules, Tier 1 never reachable.
 
-Moving the slider re-runs `reclassify_all`. That fires on slider *release* rather than
-on every frame the value changes: dragging across the range would otherwise re-classify
-the whole grid dozens of times a second.
+Moving the slider re-runs `reclassify_all`, once the slider comes to rest at a value other
+than the one the grid was last classified at (`PhotoOrganizerApp::classified_threshold`).
+Neither a per-frame `changed()` test nor `Response::drag_stopped()` can stand in for that:
+egui puts a slider where the pointer is on the *press* frame and on every frame the handle
+travels, so the release frame carries no change at all, and the arrow keys never start a
+drag. Firing on every frame the value moves would re-classify the whole grid dozens of
+times a second instead.
+
+A threshold moved while a scan is in flight does not re-classify straight away. The scan
+classifies against the threshold it started with, so the photos already staged and the ones
+still arriving would sit either side of the new value; the request is held in
+`pending_reclassify` and spent when `ScanMessage::Complete` arrives.
 
 `ProfileStore` does not own the threshold. Profiles are learned data and the threshold is
 a setting, so keeping them apart is what stops a `profiles.json` written by an older

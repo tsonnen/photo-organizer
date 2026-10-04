@@ -3,10 +3,10 @@
 //! close rule.
 //!
 //! All three overlays are "stop and deal with one thing" dialogs, so they are
-//! built the same way and differ only in what goes inside the card. Escape and
-//! backdrop-click handling is deliberately *not* here: the inspection modal
-//! also owns the arrow and space keys, so each caller decides what dismissal
-//! means for it.
+//! built the same way and differ only in what goes inside the card. Dismissal
+//! *is* here — backdrop-click outside the card, and Escape — with the exception
+//! noted on [`ModalFrame::close`]: the inspection modal also owns the arrow and
+//! space keys, so it takes Escape before it ever reaches this.
 
 use eframe::egui;
 
@@ -17,7 +17,9 @@ use eframe::egui;
 /// not happen mid-draw.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ModalFrame {
-    /// The backdrop was clicked outside the card, or Escape was pressed.
+    /// The backdrop was clicked outside the card, or Escape was pressed. The
+    /// inspection modal reads its own keys first and returns before either of
+    /// those can apply to it.
     pub close: bool,
 }
 
