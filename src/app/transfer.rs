@@ -13,7 +13,7 @@ use crate::transfer::{
 };
 use eframe::egui;
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 impl PhotoOrganizerApp {
     /// Transfers every selected photo, then drops the ones that landed from the
@@ -34,6 +34,27 @@ impl PhotoOrganizerApp {
             return;
         }
 
+        self.execute_transfer_to(mode, out_dir, None);
+    }
+
+    /// The shared body of every transfer: plan the selection, run it, journal it,
+    /// and report what happened.
+    ///
+    /// `override_subject` is what makes the bulk move a two-line caller rather
+    /// than a second copy of all this: the bulk move has already assigned every
+    /// selected photo the one name the user typed, so passing it here plans the
+    /// batch against that name. `None` — the toolbar's Move and Copy — uses each
+    /// photo's own category, which is what those buttons mean.
+    ///
+    /// Taking the destination as an argument rather than reading the setting is
+    /// what lets the bulk modal point one batch somewhere other than the
+    /// configured output folder without the engine knowing the difference.
+    pub(super) fn execute_transfer_to(
+        &mut self,
+        mode: TransferMode,
+        out_dir: PathBuf,
+        override_subject: Option<CategoryName>,
+    ) {
         let inputs: Vec<RawPhotoInput> = self
             .items
             .iter()
@@ -43,11 +64,18 @@ impl PhotoOrganizerApp {
                 // The item's category is a free-text display string the user can
                 // retype per photo, so it is sanitised here rather than trusted:
                 // this is the last point before it becomes a directory name.
-                subject: CategoryName::from_user_input(&i.category),
+                subject: override_subject
+                    .clone()
+                    .unwrap_or_else(|| CategoryName::from_user_input(&i.category)),
                 year: i.year,
                 month: i.month,
             })
             .collect();
+
+        if inputs.is_empty() {
+            self.set_warning("Select at least one photo to transfer.");
+            return;
+        }
 
         let engine = ExecutionEngine::new(out_dir.clone(), mode);
         let plan = engine.plan_batch(&inputs);
@@ -55,15 +83,23 @@ impl PhotoOrganizerApp {
             println!("Transferring {curr}/{total}");
         });
 
-        // Only photos that landed leave the grid. A failed one stays selected in
-        // place, so the reason is on screen and the retry is one click away.
-        let landed: HashSet<&Path> = journal
-            .completed_ops
-            .iter()
-            .map(|op| op.source.as_path())
-            .collect();
-        self.items
-            .retain(|item| !(item.selected && landed.contains(item.source_path.as_path())));
+        // Only the photos that actually landed leave the grid, and only when a
+        // move is what took them. A copy leaves the original where it was, so
+        // dropping the row would delete the user's only handle on a photo the
+        // app still has staged work to do — and, for the bulk move, would empty
+        // the grid moments after the card said it was filing a copy.
+        //
+        // A photo that *failed* stays selected in place, so the reason is on
+        // screen and the retry is one click away.
+        if mode == TransferMode::Move {
+            let landed: HashSet<&Path> = journal
+                .completed_ops
+                .iter()
+                .map(|op| op.source.as_path())
+                .collect();
+            self.items
+                .retain(|item| !(item.selected && landed.contains(item.source_path.as_path())));
+        }
 
         let verb = match mode {
             TransferMode::Move => "Moved",

@@ -67,6 +67,26 @@ impl PhotoOrganizerApp {
             {
                 self.execute_transfer(TransferMode::Copy);
             }
+
+            // Gated on the selection rather than the destination, which is the
+            // opposite of the two above and deliberate: the bulk move can pick
+            // its own folder, so it does not need an output folder configured,
+            // and it can label a selection without moving anything at all. With
+            // nothing selected there is nothing for it to act on.
+            let has_selection = self.items.iter().any(|i| i.selected);
+            let bulk_hint = if has_selection {
+                "File every selected photo under one name of your own, without training"
+            } else {
+                "Select at least one photo first"
+            };
+            if ui
+                .add_enabled(has_selection, egui::Button::new("🏷 Bulk Move"))
+                .on_disabled_hover_text(bulk_hint)
+                .on_hover_text(bulk_hint)
+                .clicked()
+            {
+                self.show_bulk_move_modal = true;
+            }
             // The two buttons above are opposites, so undo is not a single gesture
             // either: it moves the last moved batch home again, or deletes the
             // copies the last copied batch made.

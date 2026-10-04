@@ -196,6 +196,46 @@ on the way out.
 
 Raising or lowering the threshold does not change any of this: it decides *whether* a
 centroid wins, never *what the name may contain*.
+
+## Bulk Move, and why it trains nothing
+
+**🏷 Bulk Move** is the fourth route to a category, and the only one that adds no
+centroid. The three existing ones — training, the per-photo custom input, and a stored
+profile name — all either learn something or edit one photo at a time. Neither suits
+"these are all from the same weekend": 200 photos is 200 trips through a dropdown, and
+training a category for a single event leaves a profile in `profiles.json` that
+describes nothing reusable.
+
+So the bulk move's name is *only* a name. It is written to the staged items through the
+same single write path as any other decision, as `source: Manual`, which is precisely
+what makes it stick: `apply_classification` will not overwrite a manual pick, so a batch
+labelled this way survives **Re-classify All**, a threshold move, and a scan still
+running. A photo the scan has not finished with is the one exception — `mark_manual`
+deliberately does not claim a `pending` photo, because its category is a placeholder
+rather than a decision.
+
+**Names are remembered, not learned.** `Settings::custom_categories` holds the newest
+`MAX_REMEMBERED_CATEGORIES` names the user has used, and nothing else: no centroid, no
+embedding, nothing ever matched against. This is why they live in `settings.json` and
+not `profiles.json` — the split between learned data and knobs is what stops a bulk-move
+name from becoming a profile, which is the whole distinction the feature rests on. The
+list is trimmed, de-duplicated case-insensitively and capped on load as well as on
+write, for the same reason the threshold is clamped on load: the file is editable by
+hand.
+
+**The path is previewed before it is taken.** The card shows the exact
+`<base>/<Category>/<YYYY>/<MM>/` a batch will use, and "N folders" when the selection
+spans months, because a trip crossing a month boundary genuinely does file into two
+folders and saying so is what makes it a preview rather than a surprise. `base` is the
+output folder unless the card was given a folder of its own, which overrides it for
+that batch alone.
+
+Everything then goes through the one transfer path:
+`assign_selected_to_category` labels the selection, and `execute_transfer_to` runs the
+same plan → execute → journal → report sequence the toolbar's Move and Copy use, with
+the typed name passed as an override so the batch is planned against it. Nothing about
+the bulk move re-implements a transfer.
+
 ## Transfer Journal
 
 Once a category has been decided, `src/transfer/` owns everything that touches the

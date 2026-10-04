@@ -12,10 +12,12 @@
 //! - [`categories`] classification, training and the category widgets
 //! - [`toolbar`] the top panel and its menu bar
 //! - [`footer`] the bottom panel: selection count and transfer destination
+//! - [`bulk_move_modal`] filing a whole selection under one name, untrained
 //! - [`transfer`] move/copy and undo
 //! - [`layout`] grid, control and modal sizing arithmetic
 //! - [`models`] the staged-item record and the single write path onto it
 
+mod bulk_move_modal;
 mod categories;
 mod chrome;
 mod footer;
@@ -70,6 +72,23 @@ pub struct PhotoOrganizerApp {
     show_categories_panel: bool,
     show_profiles_modal: bool,
     show_settings_modal: bool,
+    /// Whether the bulk move card is up. It cannot be open at the same time as
+    /// the other modals: each one's backdrop covers the control that opens the
+    /// next.
+    show_bulk_move_modal: bool,
+    /// The name last typed into the bulk move card.
+    ///
+    /// Kept across openings, unlike the folder beside it. Reopening after a
+    /// mistyped move should not mean retyping the one thing the user already
+    /// got right, and the alternative — clearing it — would silently throw away
+    /// a name that took a moment to come up with.
+    bulk_move_name: String,
+    /// A folder chosen for one bulk batch, overriding the output folder.
+    ///
+    /// Deliberately per-batch: an event filed somewhere unusual should not
+    /// become where every later transfer goes, which is what would happen if
+    /// this lived in the settings next to `output_folder`.
+    bulk_move_folder: Option<PathBuf>,
     delete_prompt: DeletePrompt,
     target_training_category: String,
     status_message: Option<(String, egui::Color32)>,
@@ -116,6 +135,9 @@ impl PhotoOrganizerApp {
             show_categories_panel: false,
             show_profiles_modal: false,
             show_settings_modal: false,
+            show_bulk_move_modal: false,
+            bulk_move_name: String::new(),
+            bulk_move_folder: None,
             delete_prompt: DeletePrompt::default(),
             target_training_category: String::new(),
             status_message: None,
@@ -182,5 +204,6 @@ impl eframe::App for PhotoOrganizerApp {
         self.render_modal(ctx);
         self.render_profiles_modal(ctx);
         self.render_settings_modal(ctx);
+        self.render_bulk_move_modal(ctx);
     }
 }
