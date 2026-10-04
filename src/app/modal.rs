@@ -34,17 +34,31 @@ impl PhotoOrganizerApp {
         });
     }
 
-    /// Moves the modal `delta` items, wrapping around both ends.
+    /// Moves the modal `delta` photos, wrapping around both ends.
+    ///
+    /// Steps through the photos in view, not through `self.items`: the modal is
+    /// inspecting the grid the user is looking at, so arrowing past the edge of a
+    /// filtered grid has to land on nothing rather than on a photo the filter
+    /// excluded. Paging around the whole folder would also make the position
+    /// counter jump, since "3 / 40" would no longer mean three of forty.
     pub fn navigate_modal(&mut self, ctx: &egui::Context, delta: isize) {
-        if self.items.is_empty() {
+        let visible = self.visible_indices();
+        if visible.is_empty() {
             return;
         }
-        if let Some(modal) = &self.modal_preview {
-            let current = modal.item_index as isize;
-            let len = self.items.len() as isize;
-            let new_index = ((current + delta).rem_euclid(len)) as usize;
-            self.open_modal(new_index, ctx);
-        }
+        let Some(current) = self.modal_preview.as_ref().map(|m| m.item_index) else {
+            return;
+        };
+        // The photo on show is no longer in view: a filter moved underneath an
+        // open modal. Left alone rather than jumped somewhere unrelated, since
+        // any guess would put the user on a photo they did not ask for.
+        let Some(position) = visible.iter().position(|&i| i == current) else {
+            return;
+        };
+
+        let len = visible.len() as isize;
+        let next = ((position as isize + delta).rem_euclid(len)) as usize;
+        self.open_modal(visible[next], ctx);
     }
 
     /// Uploads any full-resolution image a background thread has finished
@@ -111,7 +125,18 @@ impl PhotoOrganizerApp {
         }
 
         let screen_rect = ctx.screen_rect();
-        let item_count = self.items.len();
+
+        // The modal pages through the grid as filtered, so its "3 / 40" counts
+        // the visible photos and its position is a place in that list. A photo
+        // that has left the view closes the modal rather than reporting a
+        // position in a list it is no longer part of.
+        let visible = self.visible_indices();
+        let Some(position) = visible.iter().position(|&i| i == modal_index) else {
+            self.modal_preview = None;
+            return;
+        };
+        let item_count = visible.len();
+
         let is_loading = self.modal_preview.as_ref().is_some_and(|m| m.is_loading);
         let high_res_tex = self
             .modal_preview
@@ -188,8 +213,7 @@ impl PhotoOrganizerApp {
 
                 // Bottom Navigation & Controls. The custom category input is
                 // inline here, unlike the grid cell.
-                let actions =
-                    Self::render_modal_controls(profiles, ui, item, modal_index, item_count);
+                let actions = Self::render_modal_controls(profiles, ui, item, position, item_count);
                 prev_requested = actions.prev;
                 next_requested = actions.next;
                 single_train_requested = actions.train;

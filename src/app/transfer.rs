@@ -16,8 +16,20 @@ use std::collections::HashSet;
 use std::path::Path;
 
 impl PhotoOrganizerApp {
-    /// Transfers every selected photo, then drops the ones that landed from the
-    /// grid.
+    /// Transfers every selected photo **in view**, then drops the ones that landed
+    /// from the grid.
+    ///
+    /// Scoped to the visible set, and that scoping is the load-bearing part of
+    /// this function. A photo the filters exclude is not in this batch even if a
+    /// tick on it from before the filter outlived it: moving a file the user
+    /// cannot see, on the strength of a selection they can no longer check, is the
+    /// one outcome a filter exists to prevent.
+    ///
+    /// The removal further down needs no matching filter of its own, because it
+    /// keys off what the journal says *landed* — and a photo outside the filters
+    /// was never offered to the engine, so it cannot appear there.
+    ///
+    /// Does nothing without an output folder: a transfer has nowhere to land.
     pub(super) fn execute_transfer(&mut self, mode: TransferMode) {
         let Some(out_dir) = self.settings.output_folder.clone() else {
             // A backstop, not the feedback path: the toolbar already greys Move
@@ -29,41 +41,55 @@ impl PhotoOrganizerApp {
             );
             return;
         };
-        if !self.items.iter().any(|i| i.selected) {
-            self.set_warning("Select at least one photo to transfer.");
-            return;
-        }
+
+        let visible = self.visible_indices();
 
         // A photo the model has not reached yet holds `CLASSIFYING_LABEL` where
         // its category goes, and `is_filable` is false for exactly that reason: see
         // `StagedItem::is_filable`. Move and Copy are not gated on the scan
         // finishing, so this is reachable by pressing either one mid-scan. What is
         // held stays in the grid, still selected, for the retry.
-        let held = self
-            .items
+        let held = visible
             .iter()
-            .filter(|i| i.selected && !i.is_filable())
+            .filter(|&&i| self.items[i].selected && !self.items[i].is_filable())
             .count();
-        let inputs: Vec<RawPhotoInput> = self
-            .items
+
+        let inputs: Vec<RawPhotoInput> = visible
             .iter()
-            .filter(|i| i.selected && i.is_filable())
-            .map(|i| RawPhotoInput {
-                source_path: i.source_path.clone(),
+            .filter(|&&i| self.items[i].selected && self.items[i].is_filable())
+            .map(|&i| RawPhotoInput {
+                source_path: self.items[i].source_path.clone(),
                 // The item's category is a free-text display string the user can
                 // retype per photo, so it is sanitised here rather than trusted:
                 // this is the last point before it becomes a directory name.
-                subject: CategoryName::from_user_input(&i.category),
-                year: i.year,
-                month: i.month,
+                subject: CategoryName::from_user_input(&self.items[i].category),
+                year: self.items[i].year,
+                month: self.items[i].month,
             })
             .collect();
 
+        // An empty batch has three possible causes and only one of them is fixed
+        // by ticking something, so they are told apart rather than merged: a user
+        // whose filters excluded everything should widen them, not go looking for
+        // a checkbox.
         if inputs.is_empty() {
-            self.set_warning(
-                "⚠ Every selected photo is still being classified. Wait for the scan to finish, \
-                 then press again.",
-            );
+            let (shown, staged) = self.view_counts();
+            self.set_warning(match (shown, staged, held) {
+                (_, 0, _) => "⚠ Nothing to transfer — no photos are staged.".to_string(),
+                (0, _, _) => {
+                    "⚠ Nothing to transfer — no staged photos match the filters.".to_string()
+                }
+                (_, _, 1..) => {
+                    "⚠ Every selected photo is still being classified. Wait for the scan to \
+                     finish, then press again."
+                        .to_string()
+                }
+                (shown, _, _) => {
+                    format!(
+                        "⚠ Nothing to transfer — none of the {shown} shown photos are selected."
+                    )
+                }
+            });
             return;
         }
 

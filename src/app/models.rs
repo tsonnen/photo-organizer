@@ -180,6 +180,84 @@ pub struct ModalActions {
     pub close: bool,
 }
 
+/// What the grid orders its rows by.
+///
+/// The default is [`SortBy::DateTaken`] ascending — oldest first — because the
+/// complaint this answers was a grid that arrived in whatever order the folder
+/// happened to be walked, and a date order is the one every photo library uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortBy {
+    /// Oldest first by default. A year and a month is as fine as this can
+    /// honestly be: `extract_date` reduces both EXIF timestamps and file times
+    /// to that pair, so there is no day left to break a tie within a month on.
+    #[default]
+    DateTaken,
+    Confidence,
+    Category,
+}
+
+/// Which way round the sort runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortDirection {
+    /// What "up" means depends on the sort: the oldest photo, the *lowest*
+    /// confidence, the first category name.
+    #[default]
+    Ascending,
+    Descending,
+}
+
+/// The filters narrowing the grid.
+///
+/// The three axes are independent and combine with AND — see
+/// [`crate::app::view::view`] — so the default state, every axis at its widest,
+/// admits the whole folder.
+///
+/// The confidence bounds are plain numbers rather than options because the full
+/// range *is* the neutral state for a pair of sliders: 0.0 is not "no floor", it
+/// is the floor that admits everything, and a control whose resting position
+/// already says what it does needs no second switch saying it again.
+///
+/// A date bound is a whole `(year, month)` rather than a loose year on its own:
+/// a month with no year to put it in has no meaning, and a half-set bound is the
+/// kind of state that quietly filters everything out.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Filters {
+    /// Inclusive lower bound on the photo's date.
+    pub date_from: Option<(u32, u32)>,
+    /// Inclusive upper bound on the photo's date.
+    pub date_to: Option<(u32, u32)>,
+    /// Inclusive lower bound on confidence, in `0.0..=1.0`. Zero admits all.
+    ///
+    /// Read against [`crate::app::view::rank_confidence`], not against the number
+    /// the cell displays.
+    pub confidence_from: f32,
+    /// Inclusive upper bound on confidence. One admits all.
+    pub confidence_to: f32,
+    /// One exact category name, matched without regard to case or surrounding
+    /// space. `None` admits every category.
+    pub category: Option<String>,
+}
+
+impl Default for Filters {
+    fn default() -> Self {
+        Self {
+            date_from: None,
+            date_to: None,
+            confidence_from: 0.0,
+            confidence_to: 1.0,
+            category: None,
+        }
+    }
+}
+
+impl Filters {
+    /// Whether every filter sits at its widest, so the grid is showing the whole
+    /// folder and there is no narrower set to speak of.
+    pub fn is_open(&self) -> bool {
+        *self == Filters::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

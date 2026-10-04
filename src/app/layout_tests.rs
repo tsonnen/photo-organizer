@@ -8,7 +8,7 @@
 //! pushed the row wider than the grid column.
 
 use super::layout::{self, MIN_CONTROL_WIDTH};
-use super::models::StagedItem;
+use super::models::{SortBy, SortDirection, StagedItem};
 use super::profiles_modal::DeletePrompt;
 use super::PhotoOrganizerApp;
 use crate::classification::{ClassificationSource, FrameSize};
@@ -16,6 +16,7 @@ use crate::profile_store::{CategoryProfile, ProfileStore};
 use eframe::egui;
 use egui_kittest::kittest::{by, Queryable};
 use egui_kittest::Harness;
+use std::fs;
 use std::path::PathBuf;
 
 /// One widget as laid out by egui, in points.
@@ -1470,4 +1471,405 @@ fn the_file_menu_does_not_duplicate_the_source_picker() {
         items.iter().any(|t| t.contains("Source Folder")),
         "the toolbar button should still be there, got {items:#?}"
     );
+}
+
+/// A photo to stage, described without a `Context` so a test can list its
+/// photos outside the harness closure — which is the only place one exists, and
+/// a `StagedItem` cannot be built without one for its thumbnail.
+struct Photo {
+    name: &'static str,
+    year: u32,
+    month: u32,
+    category: &'static str,
+}
+
+fn photo(name: &'static str, year: u32, month: u32, category: &'static str) -> Photo {
+    Photo {
+        name,
+        year,
+        month,
+        category,
+    }
+}
+
+/// An app holding `photos`, drawn through the same panel sequence `update` uses.
+///
+/// The three panels are called one after another in the order `update` calls
+/// them, rather than `update` itself: `eframe::Frame` is opaque and cannot be
+/// built outside eframe, so a test cannot invoke the real entry point. The order
+/// is the part that matters — egui hands the central panel whatever the top and
+/// bottom panels leave it — and reproducing it here is what keeps a footer's
+/// height and a toolbar's width honest against the grid between them.
+///
+/// `tune` runs every frame rather than once, so a filter set by a test survives
+/// a later frame rewriting the classifications underneath it.
+fn app_with(
+    photos: Vec<Photo>,
+    tune: fn(&mut PhotoOrganizerApp),
+) -> Harness<'static, PhotoOrganizerApp> {
+    let mut harness = Harness::new_ui_state(
+        move |ui, app: &mut PhotoOrganizerApp| {
+            if app.items.is_empty() {
+                app.items = photos
+                    .iter()
+                    .map(|p| StagedItem {
+                        source_path: PathBuf::from(format!("/photos/{}.jpg", p.name)),
+                        year: p.year,
+                        month: p.month,
+                        category: p.category.to_string(),
+                        selected: true,
+                        ..staged_item(ui.ctx())
+                    })
+                    .collect();
+            }
+            tune(app);
+
+            let ctx = ui.ctx().clone();
+            app.render_toolbar(&ctx);
+            app.render_footer(&ctx);
+            app.render_grid(&ctx);
+        },
+        PhotoOrganizerApp::new(),
+    );
+    harness.set_size(egui::vec2(1240.0, 900.0));
+    harness
+}
+
+/// The filenames of the photos the grid drew, top to bottom then left to right.
+///
+/// Checkbox labels are the filenames, so this is the grid's own account of the
+/// order it drew things in — geometry, not the sort function's return value.
+fn drawn_photo_order(harness: &Harness<'_, PhotoOrganizerApp>) -> Vec<String> {
+    let mut cells: Vec<(f64, f64, String)> = placed_widgets(harness)
+        .into_iter()
+        .filter(|r| r.role.contains("Check"))
+        .map(|r| (r.y0, r.x0, r.label))
+        .collect();
+    cells.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    cells.into_iter().map(|(_, _, label)| label).collect()
+}
+
+/// Every label the frame laid out, for asserting on what the app said.
+fn all_labels(harness: &Harness<'_, PhotoOrganizerApp>) -> Vec<String> {
+    placed_widgets(harness)
+        .into_iter()
+        .map(|r| r.label)
+        .collect()
+}
+
+#[test]
+fn the_grid_draws_the_photos_in_the_sorted_order() {
+    let mut harness = app_with(
+        vec![
+            photo("third", 2022, 3, "Travel"),
+            photo("first", 2019, 7, "Travel"),
+            photo("second", 2020, 11, "Travel"),
+        ],
+        |app| {
+            app.sort_by = SortBy::DateTaken;
+            app.sort_direction = SortDirection::Ascending;
+        },
+    );
+    harness.run();
+
+    assert_eq!(
+        drawn_photo_order(&harness),
+        vec!["first.jpg", "second.jpg", "third.jpg"],
+        "oldest first"
+    );
+}
+
+#[test]
+fn reversing_the_sort_reverses_the_grid() {
+    let mut harness = app_with(
+        vec![
+            photo("third", 2022, 3, "Travel"),
+            photo("first", 2019, 7, "Travel"),
+            photo("second", 2020, 11, "Travel"),
+        ],
+        |app| {
+            app.sort_by = SortBy::DateTaken;
+            app.sort_direction = SortDirection::Descending;
+        },
+    );
+    harness.run();
+
+    assert_eq!(
+        drawn_photo_order(&harness),
+        vec!["third.jpg", "second.jpg", "first.jpg"],
+        "newest first"
+    );
+}
+
+#[test]
+fn the_grid_leaves_out_the_photos_a_filter_excludes() {
+    let mut harness = app_with(
+        vec![
+            photo("receipt", 2021, 5, "Documents"),
+            photo("beach", 2021, 5, "Beach Trip"),
+            photo("old_receipt", 2018, 2, "Documents"),
+        ],
+        |app| {
+            app.filters.category = Some("documents".to_string());
+        },
+    );
+    harness.run();
+
+    assert_eq!(
+        drawn_photo_order(&harness),
+        vec!["old_receipt.jpg", "receipt.jpg"],
+        "only the filtered category, oldest first as the default sort has it"
+    );
+}
+
+#[test]
+fn the_footer_counts_the_photos_in_view_and_says_how_many_are_hidden() {
+    // The number above the Move button has to describe the same set of photos the
+    // grid is showing, or the user reads the count as covering the whole folder.
+    let mut harness = app_with(
+        vec![
+            photo("receipt", 2021, 5, "Documents"),
+            photo("beach", 2021, 5, "Beach Trip"),
+            photo("beach2", 2021, 6, "Beach Trip"),
+            photo("beach3", 2021, 7, "Beach Trip"),
+        ],
+        |app| {
+            app.filters.category = Some("Beach Trip".to_string());
+        },
+    );
+    harness.run();
+
+    let text = all_labels(&harness);
+
+    assert!(
+        text.iter()
+            .any(|t| t.contains("3 of 3 selected") && t.contains("4 staged")),
+        "the footer should count the 3 visible and admit 4 are staged, got {text:#?}"
+    );
+}
+
+#[test]
+fn the_footer_says_so_when_a_filter_leaves_nothing_to_show() {
+    // An empty grid with a selection count of zero reads as "nothing is selected"
+    // rather than "your filter excluded everything", which sends the user hunting
+    // for a tick they never unticked.
+    let mut harness = app_with(
+        vec![
+            photo("receipt", 2021, 5, "Documents"),
+            photo("beach", 2021, 5, "Beach Trip"),
+        ],
+        |app| {
+            app.filters.category = Some("Documents".to_string());
+            app.filters.date_from = Some((2030, 1));
+        },
+    );
+    harness.run();
+
+    let text = all_labels(&harness);
+
+    assert!(
+        text.iter()
+            .any(|t| t.contains("No photos match the filters")),
+        "the footer should explain the empty grid, got {text:#?}"
+    );
+    assert!(
+        text.iter()
+            .any(|t| t.contains("None of the 2 staged photos")),
+        "the grid should say what it excluded, got {text:#?}"
+    );
+}
+
+#[test]
+fn select_all_only_ticks_the_photos_in_view() {
+    // The whole point of a filter: "All" means all of what is on screen. Ticking
+    // the hidden ones too would leave the app one click from transferring photos
+    // the user cannot see.
+    let mut harness = app_with(
+        vec![
+            photo("receipt", 2021, 5, "Documents"),
+            photo("beach", 2021, 5, "Beach Trip"),
+            photo("beach2", 2021, 6, "Beach Trip"),
+        ],
+        |app| {
+            for item in &mut app.items {
+                item.selected = false;
+            }
+            app.filters.category = Some("Beach Trip".to_string());
+        },
+    );
+    harness.run();
+
+    harness.state_mut().set_all_selected(true);
+
+    let ticked: Vec<String> = harness
+        .state()
+        .items
+        .iter()
+        .filter(|i| i.selected)
+        .map(|i| i.source_path.display().to_string())
+        .collect();
+
+    assert_eq!(
+        ticked,
+        vec!["/photos/beach.jpg", "/photos/beach2.jpg"],
+        "the filtered-out photo must stay unticked"
+    );
+}
+
+#[test]
+fn the_filters_button_says_when_something_is_narrowing_the_grid() {
+    // A closed panel whose filter is active is the case that has to read as
+    // active: the user cleared a filter from inside it, the panel closed, and the
+    // grid is still not showing everything.
+    let mut harness = app_with(
+        vec![
+            photo("receipt", 2021, 5, "Documents"),
+            photo("beach", 2021, 5, "Beach Trip"),
+        ],
+        |app| {
+            app.filters.category = Some("Documents".to_string());
+        },
+    );
+    harness.run();
+
+    let text = all_labels(&harness);
+
+    assert!(
+        text.iter()
+            .any(|t| t.contains("Filters") && t.contains('●')),
+        "the filters button should report an active filter, got {text:#?}"
+    );
+    assert!(
+        text.iter().any(|t| t.contains("1 of 2 shown")),
+        "the sort row should report how much is showing, got {text:#?}"
+    );
+}
+
+#[test]
+fn a_transfer_moves_only_what_is_in_view() {
+    // Checked against the filesystem rather than against the batch list: a
+    // filtered-out photo must still be on disk *and* still on the grid. The grid
+    // used to drop every ticked photo regardless of the filters, so a photo the
+    // user could not see vanished from the view having never been transferred at
+    // all — it was simply gone.
+    let temp = std::env::temp_dir().join(format!("test_filtered_transfer_{}", std::process::id()));
+    let _ = fs::remove_dir_all(&temp);
+    let source = temp.join("source");
+    let output = temp.join("output");
+    fs::create_dir_all(&source).unwrap();
+    fs::create_dir_all(&output).unwrap();
+
+    for name in ["receipt", "beach"] {
+        image::RgbImage::new(8, 8)
+            .save(source.join(format!("{name}.jpg")))
+            .unwrap();
+    }
+
+    // Cloned for the closure so the originals survive it for the assertions.
+    let staged_from = source.clone();
+    let staged_into = output.clone();
+
+    let mut harness = Harness::new_ui_state(
+        move |ctx, app: &mut PhotoOrganizerApp| {
+            if app.items.is_empty() {
+                app.settings.output_folder = Some(staged_into.clone());
+                app.items = ["receipt", "beach"]
+                    .into_iter()
+                    .map(|name| StagedItem {
+                        // The real file, so a transfer has something to act on.
+                        source_path: staged_from.join(format!("{name}.jpg")),
+                        year: 2021,
+                        month: 5,
+                        category: if name == "receipt" {
+                            "Documents".into()
+                        } else {
+                            "Beach Trip".into()
+                        },
+                        selected: true,
+                        ..staged_item(ctx.ctx())
+                    })
+                    .collect();
+            }
+            app.filters.category = Some("Documents".to_string());
+
+            app.execute_transfer(crate::transfer::TransferMode::Copy);
+        },
+        PhotoOrganizerApp::new(),
+    );
+    harness.set_size(egui::vec2(1240.0, 900.0));
+    harness.run();
+
+    // The photo in view was copied into the output folder...
+    let copied = output.join("Documents").join("2021").join("05");
+    assert!(
+        copied.join("receipt.jpg").exists(),
+        "the photo in view should have been transferred"
+    );
+    assert!(
+        !copied.join("beach.jpg").exists(),
+        "the filtered-out photo must not be transferred"
+    );
+
+    // ...and the filtered-out one is untouched in every respect: still on disk,
+    // and still staged so the user can widen the filter and see it.
+    assert!(
+        source.join("beach.jpg").exists(),
+        "a copy leaves the original alone either way"
+    );
+    let remaining: Vec<String> = harness
+        .state()
+        .items
+        .iter()
+        .map(|i| {
+            i.source_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(
+        remaining,
+        vec!["beach.jpg"],
+        "only the transferred photo should leave the grid"
+    );
+
+    // Second phase, in this same test and not another: `last_execution_manifest`
+    // is one process-global file at a fixed relative path, so a second test
+    // calling `execute_transfer` would race this one over it and cargo runs tests
+    // in parallel. What it costs is one extra `execute_transfer` call rather than
+    // a whole duplicated fixture.
+    //
+    // The photo left on the grid is still ticked, but the filter excludes it —
+    // so this press is exactly the "nothing to move" case a filter makes easy to
+    // reach, and the manifest written a moment ago has to survive it. An empty
+    // batch used to overwrite the last real manifest, leaving the transfer the
+    // user actually cares about un-undoable; losing an undo is worse than a button
+    // that did nothing.
+    let manifest_after_first = fs::read_to_string("last_execution_manifest.json").unwrap();
+    assert!(
+        manifest_after_first.contains("receipt.jpg"),
+        "the first transfer should have recorded itself, got {manifest_after_first}"
+    );
+
+    harness
+        .state_mut()
+        .execute_transfer(crate::transfer::TransferMode::Copy);
+
+    assert!(
+        harness
+            .state()
+            .status_message
+            .as_ref()
+            .is_some_and(|(msg, _)| msg.contains("Nothing to transfer")),
+        "an empty transfer should say so, got {:?}",
+        harness.state().status_message
+    );
+    assert_eq!(
+        fs::read_to_string("last_execution_manifest.json").unwrap_or_default(),
+        manifest_after_first,
+        "the previous manifest must survive so its transfer stays undoable"
+    );
+
+    let _ = fs::remove_dir_all(&temp);
 }

@@ -10,6 +10,7 @@
 //! - [`settings_modal`] the confidence threshold, output folder and model path
 //! - [`chrome`] the backdrop and card every modal shares
 //! - [`categories`] classification, training and the category widgets
+//! - [`view`] which staged photos are in view: the filters, and their order
 //! - [`toolbar`] the top panel and its menu bar
 //! - [`footer`] the bottom panel: selection count and transfer destination
 //! - [`transfer`] move/copy and undo
@@ -28,6 +29,7 @@ mod scan;
 mod settings_modal;
 mod toolbar;
 mod transfer;
+mod view;
 
 #[cfg(test)]
 mod layout_tests;
@@ -37,7 +39,7 @@ use crate::profile_store::ProfileStore;
 use crate::scanner::ScanEvent;
 use crate::settings::Settings;
 use eframe::egui;
-use models::{ModalPreview, StagedItem};
+use models::{Filters, ModalPreview, SortBy, SortDirection, StagedItem};
 use profiles_modal::DeletePrompt;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -68,6 +70,25 @@ pub struct PhotoOrganizerApp {
     /// re-classified once it finishes instead of being left mixed.
     pending_reclassify: bool,
     show_categories_panel: bool,
+    /// What the grid orders its rows by.
+    ///
+    /// Held apart from `items` rather than baked into it: the staged order is the
+    /// scan's arrival order, which is also the order a scan's `Update`s patch in
+    /// place, and reordering the vector would mean re-deriving every index
+    /// something else is holding — the open modal's, a pending training
+    /// request's — after each classification landing.
+    sort_by: SortBy,
+    sort_direction: SortDirection,
+    /// What the user has narrowed the grid to.
+    ///
+    /// A filter narrows not just what the grid draws but what the selection
+    /// actions act on: a filtered-out photo is not counted in the footer, not
+    /// ticked by Select All, not trained from, and not transferred. The
+    /// alternative is a filtered grid sitting over an unfiltered selection, where
+    /// the footer counts photos the user cannot see and Move files photos they
+    /// never looked at.
+    filters: Filters,
+    show_filter_panel: bool,
     show_profiles_modal: bool,
     show_settings_modal: bool,
     delete_prompt: DeletePrompt,
@@ -114,6 +135,10 @@ impl PhotoOrganizerApp {
             classified_threshold,
             pending_reclassify: false,
             show_categories_panel: false,
+            sort_by: SortBy::default(),
+            sort_direction: SortDirection::default(),
+            filters: Filters::default(),
+            show_filter_panel: false,
             show_profiles_modal: false,
             show_settings_modal: false,
             delete_prompt: DeletePrompt::default(),
@@ -128,10 +153,16 @@ impl PhotoOrganizerApp {
         }
     }
 
-    /// Selects or clears every staged photo.
-    fn set_all_selected(&mut self, selected: bool) {
-        for item in &mut self.items {
-            item.selected = selected;
+    /// Selects or clears every photo currently in view.
+    ///
+    /// Scoped to the visible set on purpose. "All" sits next to a grid the user
+    /// has just narrowed, and read as "all of these" it has to mean all of
+    /// *these* — the photos on screen. Ticking the ones filtered out would put
+    /// the app one click from transferring a folder the user cannot see and did
+    /// not ask about.
+    pub(super) fn set_all_selected(&mut self, selected: bool) {
+        for index in self.visible_indices() {
+            self.items[index].selected = selected;
         }
     }
 

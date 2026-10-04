@@ -68,6 +68,12 @@ impl super::PhotoOrganizerApp {
 
     /// Adds every selected photo with an embedding as an exemplar for
     /// `category`, then re-classifies so the new profile takes effect.
+    ///
+    /// Trained from the photos in view, for the same reason the transfer is: a
+    /// user who has narrowed the grid to one category, ticked some of it and hit
+    /// Train means those photos. Training on ticks they cannot see would put
+    /// exemplars in the centroid the user never chose, and the reported count
+    /// would not match the grid they were looking at when they clicked.
     pub fn train_selected_as_category(&mut self, category: &str) {
         let category = category.trim();
         if category.is_empty() {
@@ -75,15 +81,25 @@ impl super::PhotoOrganizerApp {
             return;
         }
 
-        let selected_count = self.items.iter().filter(|i| i.selected).count();
-        if selected_count == 0 {
-            self.set_warning("No photos selected to train. Check at least one photo.");
+        let selected: Vec<usize> = self
+            .visible_indices()
+            .into_iter()
+            .filter(|&i| self.items[i].selected)
+            .collect();
+        if selected.is_empty() {
+            self.set_warning(match self.items.is_empty() {
+                true => "No photos staged to train. Scan a folder first.".to_string(),
+                false => {
+                    "No photos selected to train. Check at least one photo in view.".to_string()
+                }
+            });
             return;
         }
 
         let mut trained_count = 0;
-        for item in &self.items {
-            if item.selected && !item.embedding.is_empty() {
+        for index in selected {
+            let item = &self.items[index];
+            if !item.embedding.is_empty() {
                 self.profiles.add_exemplar(category, &item.embedding);
                 trained_count += 1;
             }
@@ -271,6 +287,11 @@ impl super::PhotoOrganizerApp {
     /// Renders the inspection modal's bottom control row and reports which
     /// control was pressed.
     ///
+    /// `position` is where the photo sits in the *visible* list, not its index in
+    /// `items`, so the counter reads as a place in the grid above rather than as
+    /// a place in the underlying vector — the two diverge as soon as a filter is
+    /// on, and the arrows page through the visible set.
+    ///
     /// The custom category input shares this line with the combo, immediately
     /// after it, because the modal has a whole window's worth of width to spend
     /// on one row. A grid cell cannot: its line is only a column wide, so
@@ -279,7 +300,7 @@ impl super::PhotoOrganizerApp {
         profiles: &ProfileStore,
         ui: &mut egui::Ui,
         item: &mut StagedItem,
-        modal_index: usize,
+        position: usize,
         item_count: usize,
     ) -> ModalActions {
         let mut actions = ModalActions::default();
@@ -288,7 +309,7 @@ impl super::PhotoOrganizerApp {
             if ui.button("◀ Previous (Left)").clicked() {
                 actions.prev = true;
             }
-            ui.label(format!("{}/{}", modal_index + 1, item_count));
+            ui.label(format!("{}/{}", position + 1, item_count));
             if ui.button("Next (Right) ▶").clicked() {
                 actions.next = true;
             }
@@ -300,7 +321,10 @@ impl super::PhotoOrganizerApp {
                 profiles,
                 ui,
                 item,
-                ui.make_persistent_id(("modal_cat_combo", modal_index, &item.source_path)),
+                // Keyed on the path rather than on the position: the position
+                // shifts whenever the filters or the sort do, and a combo whose
+                // identity moved would drop whatever the user had it open on.
+                ui.make_persistent_id(("modal_cat_combo", &item.source_path)),
                 Some(MODAL_COMBO_WIDTH),
             );
 
