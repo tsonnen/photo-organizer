@@ -85,6 +85,11 @@ than overwriting anything. `.xmp` and `.aae` sidecars travel with their photo. N
 is ever overwritten: if something already sits at the destination, that file is
 reported and both are left alone.
 
+Neither button waits for a scan to finish, so a photo still being worked on is held
+back rather than filed under its **Classifying...** placeholder. It stays in the grid,
+still selected, and the status line says how many were held — press again once the
+scan has decided them.
+
 **Undo** reverses whichever of those you did last, which makes it two different
 actions rather than one:
 
@@ -157,7 +162,8 @@ the same numbers, rather than the thumbnail's.)
 Whatever you set by hand stays set: re-sorting and re-scanning leave a manual category
 alone. A photo the model is still working on shows **Classifying...** in the meantime,
 which is a placeholder rather than a name — nothing can be typed into it, so it can't
-end up as a category of its own.
+end up as a category of its own, and neither **Re-classify All** nor a transfer will
+touch it until the scan has actually decided.
 
 Training a category folds the photo's embedding into the category centroid as a weighted
 average, so a handful of representative examples gets you a usable profile. Adding more

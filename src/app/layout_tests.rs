@@ -959,6 +959,61 @@ fn status_text(harness: &Harness<'_, PhotoOrganizerApp>) -> Option<String> {
 }
 
 #[test]
+fn a_reclassification_leaves_a_still_pending_photo_pending() {
+    // **Re-classify All** and both training routes are reachable while a scan is
+    // running — which also reaches `reclassify_all`, since training ends in it.
+    // Deciding a photo the model has not reached yet would clear its `pending`
+    // flag, and that flag is the only thing stopping the fresh write from
+    // outranking the decision still on its way: an `Unsorted` with an editable
+    // input in front of the user, one keystroke from beating the model for good.
+    let ctx = egui::Context::default();
+    let mut app = PhotoOrganizerApp::new();
+    app.settings = crate::settings::Settings::default();
+
+    let mut decided = staged_item(&ctx);
+    decided.selected = true;
+    decided.pending = false;
+    decided.category = "Sunsets".into();
+    decided.source = ClassificationSource::Heuristic;
+    decided.is_custom = false;
+
+    // What `StagedItem::new` builds from `Classification::Pending`.
+    let mut pending = staged_item(&ctx);
+    pending.selected = true;
+    pending.pending = true;
+    pending.category = crate::classification::CLASSIFYING_LABEL.into();
+    pending.confidence = 0.0;
+    pending.source = ClassificationSource::UnsortedFallback;
+    pending.is_custom = false;
+
+    app.items = vec![decided, pending];
+    app.reclassify_all();
+
+    assert!(
+        app.items[1].pending,
+        "nothing has been decided about this photo, so nothing may decide it"
+    );
+    assert_eq!(
+        app.items[1].category,
+        crate::classification::CLASSIFYING_LABEL
+    );
+    assert!(
+        !app.items[1].is_custom,
+        "so no editable input is put in front of the placeholder either"
+    );
+
+    let status = app
+        .status_message
+        .clone()
+        .map(|(msg, _)| msg)
+        .unwrap_or_default();
+    assert!(
+        status.contains("Re-classified 1 photo(s)"),
+        "only the decided photo was re-classified, status line was {status:?}"
+    );
+}
+
+#[test]
 fn the_threshold_is_applied_when_the_handle_is_released() {
     // egui puts the slider where the pointer is on the *press* frame and on
     // every frame the handle travels, so the value has already settled by the

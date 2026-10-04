@@ -115,16 +115,17 @@ pub enum Classification {
 
 /// A decided classification.
 ///
-/// `is_custom` — whether the name matches no trained profile, and so belongs on
-/// the free-text path — is settled once, by [`ProfileStore::classify`], against
-/// the profiles that were in force at the time. It is a property of the
-/// decision, not something each reader re-asks.
+/// Deliberately carries no "is this name custom" flag. That question is not about
+/// the photo, it is about whether a *trained profile* exists whose name matches,
+/// and the store a scan decides against is a clone taken when the scan started —
+/// minutes before a profile may have been trained. So it is asked at the one place
+/// that writes the name onto a staged photo, against the store in hand. See
+/// [`crate::app::models::StagedItem::apply_classification`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct Decision {
     pub category: CategoryName,
     pub confidence: f32,
     pub source: ClassificationSource,
-    pub is_custom: bool,
 }
 
 impl Classification {
@@ -150,7 +151,6 @@ mod tests {
             category: CategoryName::from_user_input("Sunsets"),
             confidence: 0.9,
             source: ClassificationSource::VisualModel,
-            is_custom: false,
         });
         assert_eq!(
             decided.decided().map(|d| d.source),

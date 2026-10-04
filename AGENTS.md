@@ -77,7 +77,7 @@ CI (`.github/workflows/build-and-test.yaml`) runs these in order, so match it lo
 cargo fmt --check
 cargo clippy -- -D warnings     # warnings are errors; the tree is currently clean
 cargo build
-cargo test                      # 171 tests, ~5s once built
+cargo test                      # 174 tests, ~5s once built
 ```
 
 - One test / one area: `cargo test media::tests::test_scan_preview_jpeg_scales_down_and_keeps_original_size`,
@@ -177,7 +177,8 @@ puts its Browse buttons on section headers for that reason.
   through one `place()` rule, the journal records the mode plus a length/mtime
   `Fingerprint` per file, and undo refuses to overwrite an occupied path or touch a file
   that changed since it was filed. The manifest records the whole batch and Undo reverses
-  **only the last batch**.
+  **only the last batch**. `execute_transfer` holds back photos that are still
+  `Pending` rather than filing them under the placeholder (see **Classification types**).
   Two things distinguish *failed* from *landed but not as asked*, because the journal
   records what happened rather than what was attempted: `place` returns a
   `Placed.warning` for a cross-device Move whose original could not be unlinked (the
@@ -197,11 +198,24 @@ puts its Browse buttons on section headers for that reason.
   from the ≤200x140 thumbnail). `frame` is `Option` because a `photo_cache` row written before the
   `original_width`/`original_height` columns existed has none; the scanner backfills one from the file
   header on the next rescan, and the resolution rule declines to fire meanwhile.
-- **`Classification`** — `Pending`, or a `Decision { category: CategoryName, confidence, source,
-  is_custom }`. `is_custom` is derived once in `ProfileStore::decide`, never re-asked. `Pending` replaced
-  the `"Classifying..."` string that was stored as a real category: it read as a custom name, so the grid
-  rendered a `TextEdit` bound to it and one keystroke set `source = Manual`, after which the real
-  `Update` was skipped and the photo stayed filed as "Classifying..." forever.
+- **`Classification`** — `Pending`, or a `Decision { category: CategoryName, confidence, source }`.
+  `Pending` replaced the `"Classifying..."` string that was stored as a real category: it read as a custom
+  name, so the grid rendered a `TextEdit` bound to it and one keystroke set `source = Manual`, after which
+  the real `Update` was skipped and the photo stayed filed as "Classifying..." forever.
+  `Decision` deliberately carries **no** `is_custom`. That question — does a trained profile own this name,
+  and so does the free-text input apply — is about the store the caller writes against, not the one that
+  decided, and a scan clones the store when it starts. So it is asked once, in
+  `StagedItem::apply_classification`, against the store in hand.
+
+`Pending` is load-bearing in three places, all of them about nothing *else* getting there first:
+
+- `apply_classification` never preserves one, so the decision always lands.
+- The **Re-classify All** button and both training routes are reachable while a scan runs, so
+  `reclassify_all` steps over pending photos. Deciding one would clear the flag the rule above depends on.
+- `StagedItem::is_filable` is false for one, and `execute_transfer` filters on it. Move and Copy are not
+  gated on the scan finishing, and the transfer seam turns whatever is in `category` into a directory
+  name — without the guard a scan's earliest photos land in `<output>/Classifying.../<YYYY>/<MM>/`, out of
+  reach of every later re-classification. Held photos stay in the grid, selected, for the retry.
 
 `ProfileStore::classify` / `classify_with_heuristics` / `classify_heuristics` were collapsed into the one
 entry point — which is also where `classify_with_heuristics`'s `threshold` parameter went, so the
@@ -258,7 +272,7 @@ returned name unable to match the profile it came from.
 
 `StagedItem.category` stays a plain `String` — it is display text the user retypes per
 photo, so it is sanitised at the transfer seam (`app/transfer.rs`) rather than on the way
-in. `ClassificationResult.category` and `RawPhotoInput.subject` are `CategoryName`. Don't
+in. `Decision.category` and `RawPhotoInput.subject` are `CategoryName`. Don't
 join a category into a path any other way; `plan_batch` is the one place that does it.
 
 ## Conventions

@@ -34,10 +34,20 @@ impl PhotoOrganizerApp {
             return;
         }
 
+        // A photo the model has not reached yet holds `CLASSIFYING_LABEL` where
+        // its category goes, and `is_filable` is false for exactly that reason: see
+        // `StagedItem::is_filable`. Move and Copy are not gated on the scan
+        // finishing, so this is reachable by pressing either one mid-scan. What is
+        // held stays in the grid, still selected, for the retry.
+        let held = self
+            .items
+            .iter()
+            .filter(|i| i.selected && !i.is_filable())
+            .count();
         let inputs: Vec<RawPhotoInput> = self
             .items
             .iter()
-            .filter(|i| i.selected)
+            .filter(|i| i.selected && i.is_filable())
             .map(|i| RawPhotoInput {
                 source_path: i.source_path.clone(),
                 // The item's category is a free-text display string the user can
@@ -48,6 +58,14 @@ impl PhotoOrganizerApp {
                 month: i.month,
             })
             .collect();
+
+        if inputs.is_empty() {
+            self.set_warning(
+                "⚠ Every selected photo is still being classified. Wait for the scan to finish, \
+                 then press again.",
+            );
+            return;
+        }
 
         let engine = ExecutionEngine::new(out_dir.clone(), mode);
         let plan = engine.plan_batch(&inputs);
@@ -81,6 +99,11 @@ impl PhotoOrganizerApp {
         };
         if let Some(note) = Self::persist_journal(&journal) {
             message = format!("{message} {note}");
+        }
+        if held > 0 {
+            message = format!(
+                "{message} {held} photo(s) are still being classified and were left in the grid."
+            );
         }
 
         if journal.failed_ops.is_empty() {

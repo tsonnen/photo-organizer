@@ -178,8 +178,10 @@ impl ProfileStore {
         )
     }
 
-    /// Builds the one kind of decided classification there is, settling
-    /// `is_custom` here rather than leaving each caller to re-ask.
+    /// Builds the one kind of decided classification there is.
+    ///
+    /// Takes no view on whether the name is a trained profile's: that depends on
+    /// the store the caller writes against, not on the one that decided.
     fn decide(
         &self,
         category: CategoryName,
@@ -187,7 +189,6 @@ impl ProfileStore {
         source: ClassificationSource,
     ) -> Classification {
         Classification::Decided(Decision {
-            is_custom: self.is_custom_category(category.as_str()),
             category,
             confidence,
             source,
@@ -197,11 +198,9 @@ impl ProfileStore {
     /// A category is "custom" when it matches no profile name, so the custom
     /// name input applies to it. Matching ignores case.
     ///
-    /// Asked in exactly two places: `decide`, for every classification the
-    /// pipeline makes, and
+    /// Asked in exactly one place,
     /// [`StagedItem::apply_classification`](crate::app::models::StagedItem::apply_classification),
-    /// which has to re-ask for a manual category because the profile it matched
-    /// can be deleted while the category stands.
+    /// which is also the only place the answer is used.
     pub fn is_custom_category(&self, category: &str) -> bool {
         !self
             .profiles
@@ -227,7 +226,7 @@ impl ProfileStore {
             }
         }
 
-let (profile, similarity) = best?;
+        let (profile, similarity) = best?;
         Some((
             // A backstop, not the sanitisation point: `CategoryProfile::new`
             // and `load_from_file` both canonicalise the name, so this is
@@ -473,8 +472,6 @@ mod tests {
             ClassificationSource::VisualModel,
         );
         assert!(res1.decided().unwrap().confidence > DEFAULT_CONFIDENCE_THRESHOLD);
-        // A trained profile's own name is not on the custom path.
-        assert!(!res1.decided().unwrap().is_custom);
 
         let res2 = store.classify(
             &plain_facts(vec![0.1, 0.9, 0.0]),
@@ -509,45 +506,41 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_category_is_decided_as_custom() {
-        // `is_custom` is settled here, in the one place a decision is built, so
-        // no caller has to re-ask which profiles existed at the time.
+    fn a_decision_names_the_category_its_tier_chose() {
+        // What a decision carries is what the tiers decided, and nothing about the
+        // profiles that happened to be loaded. Whether the name belongs on the
+        // free-text path depends on which profiles exist *now* — a scan clones the
+        // store when it starts — so it is asked at the write site instead. See
+        // `StagedItem::apply_classification`.
         let store = ProfileStore {
             profiles: vec![CategoryProfile::new("Sunsets", vec![1.0, 0.0, 0.0])],
         };
 
-        // Nothing matches this photo, so it lands on Unsorted — which matches no
-        // profile, hence the custom path.
-        assert!(
-            store
-                .classify(&plain_facts(Vec::new()), DEFAULT_CONFIDENCE_THRESHOLD)
-                .decided()
-                .unwrap()
-                .is_custom
+        // Nothing matches this photo, so it lands on Unsorted.
+        assert_decided(
+            &store.classify(&plain_facts(Vec::new()), DEFAULT_CONFIDENCE_THRESHOLD),
+            &CategoryName::unsorted(),
+            ClassificationSource::UnsortedFallback,
         );
 
-        // A rule category is not a trained profile either.
-        assert!(
-            store
-                .classify(
-                    &facts_with("/photos/my_screenshot.png", false, None),
-                    DEFAULT_CONFIDENCE_THRESHOLD
-                )
-                .decided()
-                .unwrap()
-                .is_custom
+        // A rule category is not a trained profile's name, and comes back anyway.
+        assert_decided(
+            &store.classify(
+                &facts_with("/photos/my_screenshot.png", false, None),
+                DEFAULT_CONFIDENCE_THRESHOLD,
+            ),
+            &CategoryName::screenshots(),
+            ClassificationSource::Heuristic,
         );
 
-        // A trained profile's name is not custom.
-        assert!(
-            !store
-                .classify(
-                    &plain_facts(vec![1.0, 0.0, 0.0]),
-                    DEFAULT_CONFIDENCE_THRESHOLD
-                )
-                .decided()
-                .unwrap()
-                .is_custom
+        // Nor is a trained profile's own name turned into anything else.
+        assert_decided(
+            &store.classify(
+                &plain_facts(vec![1.0, 0.0, 0.0]),
+                DEFAULT_CONFIDENCE_THRESHOLD,
+            ),
+            &CategoryName::from_user_input("Sunsets"),
+            ClassificationSource::VisualModel,
         );
     }
 
@@ -657,7 +650,7 @@ mod tests {
     }
 
     #[test]
-fn test_load_canonicalises_a_name_that_is_not_one_path_component() {
+    fn test_load_canonicalises_a_name_that_is_not_one_path_component() {
         // The train box took any text before `CategoryName` existed, so a saved
         // profile can hold a name that is not a legal directory. Canonicalising
         // it here — rather than at the point of use — is what keeps the profile

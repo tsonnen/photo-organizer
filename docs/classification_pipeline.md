@@ -6,7 +6,7 @@ This document describes the multi-tiered classification pipeline implemented in 
 flowchart TD
     A["Input Photo / Image"] --> B["Compute BLAKE3 Hash"]
     B --> C["SQLite Photo Cache"]
-    C -->|"Cache Hit (Embedding, Thumbnail & Frame Size)"| G["ProfileStore::classify"]
+    C -->|"Cache Hit (Embedding, Thumbnail & Frame Size)"| G
     C -->|"Cache Miss"| D["Decode Image at Scan Resolution & Generate Thumbnail"]
     D --> E{"Candle CLIP Vision Model Available?"}
     E -->|"Yes (SafeTensors)"| F1["Extract L2-Normalized Embedding Vector"]
@@ -45,10 +45,12 @@ and returns:
   size), `is_exif`, `embedding`. One argument, so a caller cannot assemble a
   photo's facts out of the wrong pieces.
 - **`Classification`** — what was *decided*: `Pending`, or a `Decision` carrying
-  `category` (`CategoryName`), `confidence`, `source` and `is_custom`.
-  `is_custom` — whether the name matches no trained profile, and so belongs on
-  the free-text path — is settled once, in `ProfileStore::classify`, from the
-  profiles in force at the time. No caller re-asks.
+  `category` (`CategoryName`), `confidence` and `source`.
+  A decision carries no "is this name custom" flag. That question — does a trained
+  profile own this name, and so does the free-text path apply to it — is about the
+  store the caller writes against, not the one that decided, and a scan clones the
+  store when it starts. So it is asked once, in `StagedItem::apply_classification`,
+  against the store in hand.
 
 ### One entry point, one write path
 
@@ -67,11 +69,31 @@ so they cannot disagree about what a manual pick means:
   marked the photo manual and the scan's real answer was then skipped, leaving
   the photo filed as "Classifying..." permanently.
 - A **manual** photo is never re-decided: the name, confidence and source are
-  the user's call. `is_custom` *is* still re-derived against the live profiles,
-  because a profile can be deleted while the category stands and the name then
-  has to become editable again.
+  the user's call. Whether the name is editable is still re-derived against the
+  live profiles, because a profile can be deleted while the category stands and
+  the name then has to become editable again.
 - The **facts** always refresh, manual or not, so the embedding a photo was
   staged without catches up with the decision that follows.
+
+### Pending is a state three other things have to respect
+
+`Classification::Pending` only means anything if nothing else decides a photo
+before the scan does, so the placeholder is kept off both paths that could:
+
+- **Re-classify All** and both training routes are reachable while a scan is
+  running, and all three end in `reclassify_all`. It steps over pending photos,
+  because deciding one clears the `pending` flag — and that flag is the only
+  thing stopping the fresh write from outranking the decision still on its way.
+  Deciding a still-pending photo would replace its label with `Unsorted` *and*
+  put an editable input in front of that name, one keystroke from permanently
+  beating the model.
+- `StagedItem::is_filable` is false for a pending photo, and
+  `execute_transfer` filters on it. Move and Copy are not gated on the scan
+  finishing, and the transfer seam turns whatever sits in `category` into a
+  directory name, so without the guard a scan's earliest photos would land in
+  `<output>/Classifying.../<YYYY>/<MM>/` and stay there through every later
+  re-classification. Held photos stay in the grid, still selected, for the
+  retry, and the status line says how many were held.
 
 `ScanMessage::Update` carries `(PhotoFacts, Classification)` rather than the
 eight individual values this used to declare and the app then destructured into
@@ -128,7 +150,7 @@ tuning and `PHOTO_ORGANIZER_SCAN_THREADS` to override it.
 1. **Tier 1: Visual CLIP Embedding Match**:
    - Calculates cosine similarity against all active `CategoryProfile` centroids.
    - If similarity $\ge$ the confidence threshold, category is assigned with `ClassificationSource::VisualModel`.
-   - The threshold comes from `Settings::confidence_threshold` in `settings.json` (default `DEFAULT_CONFIDENCE_THRESHOLD` = 0.65), is passed into `classify`/`classify_with_heuristics` by the caller, and is adjustable on a slider in the settings modal.
+   - The threshold comes from `Settings::confidence_threshold` in `settings.json` (default `DEFAULT_CONFIDENCE_THRESHOLD` = 0.65), is passed into `ProfileStore::classify` by the caller — by the scanner as `ScanConfig.threshold`, and by the grid via `reclassify_all` — and is adjustable on a slider in the settings modal.
 2. **Tier 2: Rule-Based & Metadata Heuristics**:
    - Reached when the best centroid match falls below the threshold, or when there is no embedding or no profiles at all.
    - **Screenshots**: Detected through filename patterns (`screenshot`, `screen_shot`, `capture`, `snip`) and screen aspect ratios ($16:9, 16:10, 19.5:9$, etc.) on non-EXIF PNGs of at least `SCREENSHOT_MIN_WIDTH` (800px).

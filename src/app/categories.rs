@@ -15,34 +15,48 @@ impl super::PhotoOrganizerApp {
     /// alone, and reports what changed in the status line.
     pub fn reclassify_all(&mut self) {
         let mut visual_count = 0;
-        let total_count = self.items.len();
+        let mut reclassified = 0;
         for item in &mut self.items {
+            // A photo the model has not reached yet has no decision to revise,
+            // and deciding it here would clear its `pending` flag — which is the
+            // only thing stopping the write below from outranking the decision
+            // still on its way. **Re-classify All** and both training routes are
+            // reachable while a scan runs, so this is the ordinary case, not a
+            // corner: an `Unsorted` with an editable input in front of the user,
+            // one keystroke from permanently beating the model's answer.
+            if item.pending {
+                continue;
+            }
+
             let facts = item.facts();
             let classification = self
                 .profiles
                 .classify(&facts, self.settings.confidence_threshold);
-            if classification
-                .decided()
-                .is_some_and(|d| d.source == ClassificationSource::VisualModel)
-            {
-                visual_count += 1;
-            }
             // The same write a scan's `Update` makes, so a manual pick is
             // preserved here exactly as it is there. The facts come off the staged
             // item, which carries the frame size the scan read rather than the
             // thumbnail's.
             item.apply_classification(&self.profiles, &facts, classification);
+            reclassified += 1;
+
+            // Read off the item rather than off the decision that was applied: a
+            // manual pick the write preserved is not a visual match, whatever the
+            // model would have made of it, and the number in the status line is
+            // meant to describe what the grid now shows.
+            if item.source == ClassificationSource::VisualModel {
+                visual_count += 1;
+            }
         }
 
         // The grid now agrees with the threshold, so the slider's next move has
         // something to compare its settled value against.
         self.classified_threshold = self.settings.confidence_threshold;
 
-        if total_count > 0 {
+        if reclassified > 0 {
             self.status_message = Some((
                 format!(
                     "⚡ Re-classified {} photo(s) ({} visual AI match(es), {} active category profile(s), threshold {:.2})",
-                    total_count,
+                    reclassified,
                     visual_count,
                     self.profiles.profiles.len(),
                     self.settings.confidence_threshold,

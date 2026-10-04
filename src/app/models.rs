@@ -68,10 +68,12 @@ impl StagedItem {
     ///
     /// - A **pending** photo is never preserved: its category is a placeholder, so
     ///   the decision that follows always lands — even if the user has already
-    ///   clicked over to the custom path.
+    ///   clicked over to the custom path. Nothing else may write to one either;
+    ///   `reclassify_all` steps over them, since clearing `pending` is what lets
+    ///   this rule be bypassed.
     /// - A **manual** photo is never re-decided: category, confidence and source
-    ///   are the user's call. `is_custom` is still re-derived against the live
-    ///   profiles, since a profile can be deleted while the category stands.
+    ///   are the user's call. `is_custom` is still re-derived against the store in
+    ///   hand, since a profile can be deleted while the category stands.
     /// - The **facts** always refresh, manual or not. A photo is staged before the
     ///   model has touched it, so the embedding it was staged with is empty and
     ///   arrives with the decision; without this, a photo the user categorised
@@ -94,7 +96,7 @@ impl StagedItem {
     /// Writes just the decision, leaving the facts as they are. Staging a photo
     /// needs only this: it has just arrived carrying its own facts.
     fn apply_decision(&mut self, profiles: &ProfileStore, classification: Classification) {
-        let Classification::Decided(decision) = classification else {
+        let Some(decision) = classification.decided() else {
             // `is_custom` false means the custom name input does not render, so
             // there is nothing on screen for a keystroke to claim.
             self.category = CLASSIFYING_LABEL.to_string();
@@ -107,14 +109,32 @@ impl StagedItem {
 
         let keep_manual = self.source == ClassificationSource::Manual && !self.pending;
         if !keep_manual {
-            self.category = decision.category.into_string();
+            self.category = decision.category.as_str().to_string();
             self.confidence = decision.confidence;
             self.source = decision.source;
-            self.is_custom = decision.is_custom;
-        } else if profiles.is_custom_category(&self.category) != self.is_custom {
-            self.is_custom = !self.is_custom;
         }
+        // Asked of the store this write is happening in rather than read off the
+        // decision, so it cannot be stale. A scan clones the profile store when it
+        // starts, so a decision made minutes into a scan was made against a store
+        // that has never heard of a profile trained since — and `is_custom` is what
+        // decides whether the name is editable, so being wrong here puts a free-text
+        // input in front of a trained profile's name, or hides the input on one that
+        // has since been deleted.
+        self.is_custom = profiles.is_custom_category(&self.category);
         self.pending = false;
+    }
+
+    /// Whether this photo may be filed right now.
+    ///
+    /// False while pending. Its `category` is `CLASSIFYING_LABEL`, a placeholder
+    /// rather than a name, and the transfer seam turns whatever sits in that field
+    /// into a directory component — so Move and Copy, which are not gated on the
+    /// scan finishing, would otherwise file a scan's earliest photos under
+    /// `<output>/Classifying.../<YYYY>/<MM>/`, out of reach of every later
+    /// re-classification. They wait in the grid instead, still selected, for the
+    /// retry once the scan has decided them.
+    pub(super) fn is_filable(&self) -> bool {
+        !self.pending
     }
 
     /// Marks this photo's category as the user's own call.
@@ -166,12 +186,14 @@ mod tests {
     use crate::classification::{Decision, PhotoFacts};
 
     /// A decided classification, built the way the store builds one.
-    fn decided(category: &str, source: ClassificationSource, is_custom: bool) -> Classification {
+    ///
+    /// Takes no `is_custom`: where a name sits on the custom path is decided by
+    /// the store a write happens against, not by the decision.
+    fn decided(category: &str, source: ClassificationSource) -> Classification {
         Classification::Decided(Decision {
             category: crate::category_name::CategoryName::from_user_input(category),
             confidence: 0.9,
             source,
-            is_custom,
         })
     }
 
@@ -239,14 +261,13 @@ mod tests {
             &mut item,
             &profiles,
             &facts(),
-            decided("Screenshots", ClassificationSource::Heuristic, false),
+            decided("Screenshots", ClassificationSource::Heuristic),
         );
 
         assert!(!item.pending);
         assert_eq!(item.category, "Screenshots");
         assert_eq!(item.source, ClassificationSource::Heuristic);
         assert!((item.confidence - 0.9).abs() < 1e-6);
-        assert!(!item.is_custom);
     }
 
     #[test]
@@ -262,7 +283,7 @@ mod tests {
             &mut item,
             &profiles,
             &facts(),
-            decided("Sunsets", ClassificationSource::Manual, false),
+            decided("Sunsets", ClassificationSource::Manual),
         );
         assert_eq!(item.embedding, vec![0.1, 0.2, 0.3]);
 
@@ -272,7 +293,7 @@ mod tests {
             &mut item,
             &profiles,
             &later,
-            decided("Documents", ClassificationSource::Heuristic, true),
+            decided("Documents", ClassificationSource::Heuristic),
         );
 
         assert_eq!(item.category, "Sunsets", "the user's pick is preserved");
@@ -300,7 +321,7 @@ mod tests {
             &mut item,
             &profiles,
             &facts(),
-            decided("Screenshots", ClassificationSource::Heuristic, false),
+            decided("Screenshots", ClassificationSource::Heuristic),
         );
 
         assert_eq!(item.category, "Screenshots");
@@ -323,7 +344,7 @@ mod tests {
             &mut item,
             &profiles,
             &facts(),
-            decided("Screenshots", ClassificationSource::Heuristic, false),
+            decided("Screenshots", ClassificationSource::Heuristic),
         );
 
         assert_eq!(
@@ -331,7 +352,67 @@ mod tests {
             "nothing has been decided yet, so a later decision must land"
         );
         assert!(!item.pending);
-        assert!(!item.is_custom);
+    }
+
+    #[test]
+    fn a_pending_photo_is_not_filable() {
+        // Nothing stops Move or Copy being pressed mid-scan, and the transfer
+        // seam sanitises whatever sits in `category` into a directory name — so
+        // the placeholder has to be kept off the wire, not merely off the screen.
+        let profiles = ProfileStore::default();
+        let mut item = item(&profiles);
+
+        assert!(!item.is_filable());
+        assert_eq!(
+            item.category, CLASSIFYING_LABEL,
+            "this is the string that must not reach a folder path"
+        );
+
+        update(
+            &mut item,
+            &profiles,
+            &facts(),
+            decided("Screenshots", ClassificationSource::Heuristic),
+        );
+        assert!(
+            item.is_filable(),
+            "a decided photo has a real category to file under"
+        );
+    }
+
+    #[test]
+    fn a_decided_name_is_editable_only_when_no_profile_claims_it() {
+        // `is_custom` is asked of the store the write happens against, so with
+        // nothing trained every rule category sits on the free-text path. Reading
+        // it off the decision instead would give the same answer here and the
+        // wrong one after a profile is trained: a scan clones the store when it
+        // starts, so a decision made minutes into one was made against a store
+        // that has never heard of the profile.
+        let empty = ProfileStore::default();
+        let mut item = item(&empty);
+        update(
+            &mut item,
+            &empty,
+            &facts(),
+            decided("Screenshots", ClassificationSource::Heuristic),
+        );
+        assert!(
+            item.is_custom,
+            "nothing is trained, so the name belongs on the free-text path"
+        );
+
+        let mut trained = ProfileStore::default();
+        trained.add_exemplar("Screenshots", &[0.3, 0.0, 0.0]);
+        update(
+            &mut item,
+            &trained,
+            &facts(),
+            decided("Screenshots", ClassificationSource::Heuristic),
+        );
+        assert!(
+            !item.is_custom,
+            "a trained profile's own name is not on the free-text path"
+        );
     }
 
     #[test]
@@ -344,7 +425,7 @@ mod tests {
             &mut item,
             &profiles,
             &facts(),
-            decided("Sunsets", ClassificationSource::Manual, false),
+            decided("Sunsets", ClassificationSource::Manual),
         );
         assert_eq!(item.category, "Sunsets");
 
@@ -352,7 +433,7 @@ mod tests {
             &mut item,
             &profiles,
             &facts(),
-            decided("Documents", ClassificationSource::Heuristic, true),
+            decided("Documents", ClassificationSource::Heuristic),
         );
 
         assert_eq!(item.category, "Sunsets", "the user's pick is the call");
@@ -372,7 +453,7 @@ mod tests {
             &mut item,
             &profiles,
             &facts(),
-            decided("Sunsets", ClassificationSource::Manual, false),
+            decided("Sunsets", ClassificationSource::Manual),
         );
         assert!(!item.is_custom);
 
@@ -381,7 +462,7 @@ mod tests {
             &mut item,
             &profiles,
             &facts(),
-            decided("Unsorted", ClassificationSource::UnsortedFallback, true),
+            decided("Unsorted", ClassificationSource::UnsortedFallback),
         );
 
         assert_eq!(item.category, "Sunsets");
