@@ -33,8 +33,8 @@ impl super::PhotoOrganizerApp {
             if res.source == ClassificationSource::VisualModel {
                 visual_count += 1;
             }
-            item.is_custom = Self::is_custom_category(&self.profiles, &res.category);
-            item.category = res.category;
+            item.is_custom = Self::is_custom_category(&self.profiles, res.category.as_str());
+            item.category = res.category.into_string();
             item.confidence = res.confidence;
             item.source = res.source;
         }

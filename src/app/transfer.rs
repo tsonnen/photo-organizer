@@ -2,6 +2,7 @@
 //! that reverses a transfer from its manifest.
 
 use super::PhotoOrganizerApp;
+use crate::category_name::CategoryName;
 use crate::execution_engine::{ExecutionEngine, RawPhotoInput, TransferMode};
 use crate::undo_engine::UndoEngine;
 use std::fs;
@@ -28,7 +29,10 @@ impl PhotoOrganizerApp {
             .filter(|i| i.selected)
             .map(|i| RawPhotoInput {
                 source_path: i.source_path.clone(),
-                subject: i.category.clone(),
+                // The item's category is a free-text display string the user can
+                // retype per photo, so it is sanitised here rather than trusted:
+                // this is the last point before it becomes a directory name.
+                subject: CategoryName::from_user_input(&i.category),
                 year: i.year,
                 month: i.month,
             })
