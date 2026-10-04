@@ -14,7 +14,7 @@
 //! - [`footer`] the bottom panel: selection count and transfer destination
 //! - [`transfer`] move/copy and undo
 //! - [`layout`] grid, control and modal sizing arithmetic
-//! - [`models`] the plain data records the widgets render
+//! - [`models`] the staged-item record and the single write path onto it
 
 mod categories;
 mod chrome;
@@ -34,7 +34,7 @@ mod layout_tests;
 
 use crate::inference::is_model_available;
 use crate::profile_store::ProfileStore;
-use crate::scanner::ScanMessage;
+use crate::scanner::ScanEvent;
 use crate::settings::Settings;
 use eframe::egui;
 use models::{ModalPreview, StagedItem};
@@ -73,8 +73,12 @@ pub struct PhotoOrganizerApp {
     delete_prompt: DeletePrompt,
     target_training_category: String,
     status_message: Option<(String, egui::Color32)>,
-    tx: Sender<ScanMessage>,
-    rx: Receiver<ScanMessage>,
+    tx: Sender<ScanEvent>,
+    rx: Receiver<ScanEvent>,
+    /// Which scan is current. Messages from any other are dropped on arrival:
+    /// a scan that has been superseded cannot be unsent, and its answer was
+    /// decided against the profile store as it was at the time.
+    scan_id: u64,
     modal_preview: Option<ModalPreview>,
     high_res_tx: Sender<(PathBuf, egui::ColorImage)>,
     high_res_rx: Receiver<(PathBuf, egui::ColorImage)>,
@@ -117,6 +121,7 @@ impl PhotoOrganizerApp {
             status_message: None,
             tx,
             rx,
+            scan_id: 0,
             modal_preview: None,
             high_res_tx,
             high_res_rx,

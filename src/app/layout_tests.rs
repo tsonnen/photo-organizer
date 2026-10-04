@@ -11,7 +11,8 @@ use super::layout::{self, MIN_CONTROL_WIDTH};
 use super::models::StagedItem;
 use super::profiles_modal::DeletePrompt;
 use super::PhotoOrganizerApp;
-use crate::profile_store::{CategoryProfile, ClassificationSource, ProfileStore};
+use crate::classification::{ClassificationSource, FrameSize};
+use crate::profile_store::{CategoryProfile, ProfileStore};
 use eframe::egui;
 use egui_kittest::kittest::{by, Queryable};
 use egui_kittest::Harness;
@@ -55,9 +56,11 @@ fn staged_item(ctx: &egui::Context) -> StagedItem {
         year: 2024,
         month: 5,
         is_exif: true,
+        frame: Some(FrameSize::new(3000, 2000)),
         category: "Beach Trip".into(),
         confidence: 0.5,
         source: ClassificationSource::Manual,
+        pending: false,
         embedding: vec![0.1, 0.2, 0.3],
         selected: false,
         is_custom: true,
@@ -956,6 +959,61 @@ fn status_text(harness: &Harness<'_, PhotoOrganizerApp>) -> Option<String> {
 }
 
 #[test]
+fn a_reclassification_leaves_a_still_pending_photo_pending() {
+    // **Re-classify All** and both training routes are reachable while a scan is
+    // running — which also reaches `reclassify_all`, since training ends in it.
+    // Deciding a photo the model has not reached yet would clear its `pending`
+    // flag, and that flag is the only thing stopping the fresh write from
+    // outranking the decision still on its way: an `Unsorted` with an editable
+    // input in front of the user, one keystroke from beating the model for good.
+    let ctx = egui::Context::default();
+    let mut app = PhotoOrganizerApp::new();
+    app.settings = crate::settings::Settings::default();
+
+    let mut decided = staged_item(&ctx);
+    decided.selected = true;
+    decided.pending = false;
+    decided.category = "Sunsets".into();
+    decided.source = ClassificationSource::Heuristic;
+    decided.is_custom = false;
+
+    // What `StagedItem::new` builds from `Classification::Pending`.
+    let mut pending = staged_item(&ctx);
+    pending.selected = true;
+    pending.pending = true;
+    pending.category = crate::classification::CLASSIFYING_LABEL.into();
+    pending.confidence = 0.0;
+    pending.source = ClassificationSource::UnsortedFallback;
+    pending.is_custom = false;
+
+    app.items = vec![decided, pending];
+    app.reclassify_all();
+
+    assert!(
+        app.items[1].pending,
+        "nothing has been decided about this photo, so nothing may decide it"
+    );
+    assert_eq!(
+        app.items[1].category,
+        crate::classification::CLASSIFYING_LABEL
+    );
+    assert!(
+        !app.items[1].is_custom,
+        "so no editable input is put in front of the placeholder either"
+    );
+
+    let status = app
+        .status_message
+        .clone()
+        .map(|(msg, _)| msg)
+        .unwrap_or_default();
+    assert!(
+        status.contains("Re-classified 1 photo(s)"),
+        "only the decided photo was re-classified, status line was {status:?}"
+    );
+}
+
+#[test]
 fn the_threshold_is_applied_when_the_handle_is_released() {
     // egui puts the slider where the pointer is on the *press* frame and on
     // every frame the handle travels, so the value has already settled by the
@@ -1047,10 +1105,16 @@ fn a_threshold_change_during_a_scan_waits_for_the_scan() {
         "the re-classification should be held for the end of the scan, not dropped"
     );
 
+    // The current generation, or the app would drop it as a superseded scan's
+    // message and never spend the held re-classification.
+    let scan_id = harness.state().scan_id;
     harness
         .state_mut()
         .tx
-        .send(crate::scanner::ScanMessage::Complete)
+        .send(crate::scanner::ScanEvent {
+            scan_id,
+            message: crate::scanner::ScanMessage::Complete,
+        })
         .expect("the app's own receiver to still be open");
     let ctx = egui::Context::default();
     harness.state_mut().drain_scan_messages(&ctx);

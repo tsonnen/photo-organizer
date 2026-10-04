@@ -3,7 +3,7 @@
 use super::PhotoOrganizerApp;
 use crate::app::layout;
 use crate::app::models::StagedItem;
-use crate::profile_store::ClassificationSource;
+use crate::classification::ClassificationSource;
 use eframe::egui;
 
 impl PhotoOrganizerApp {
