@@ -1,38 +1,13 @@
 //! The on-disk layout of a photo transfer, and the one rule both directions go
 //! through.
 //!
-//! A transfer is four steps: plan where each photo lands
-//! ([`ExecutionEngine::plan_batch`]), put it there
-//! ([`ExecutionEngine::execute_batch`]), record what happened
-//! ([`TransferJournal`]), and — when the user changes their mind — put it back
-//! ([`TransferJournal::undo`]). All four agree on a single layout:
-//! `<output>/<Category>/<YYYY>/<MM>/<name>`, a `_1`/`_2` suffix for collisions,
-//! `.xmp`/`.aae` beside the photo. That is why they live in one module.
-//!
-//! They used to be two, `execution_engine.rs` and `undo_engine.rs`, with the
-//! undo side re-deriving the layout by hand. Two implementations of one layout
-//! drift, and these drifted in four ways that all cost data:
-//!
-//! - The journal recorded paths but not whether the batch was a
-//!   [`TransferMode::Move`] or a [`TransferMode::Copy`], so undo had to guess,
-//!   and it guessed Move: undoing a batch of twenty copies deleted twenty copies
-//!   out of the output folder.
-//! - The forward direction checked a copy's length before deleting the source;
-//!   the reverse direction deleted after any back-copy that returned `Ok`, so a
-//!   truncated restore took the original with it.
-//! - A sidecar was a `(PathBuf, PathBuf)` whose direction lived in a trailing
-//!   comment, so swapping the two halves compiled and moved every sidecar the
-//!   wrong way.
-//! - A sidecar that failed to travel was dropped without a word.
-//!
-//! The fix is structural rather than a patch on each: one mutation rule
-//! ([`place`]) that both directions call, one record of what a transfer actually
-//! did — mode included — and direction carried in field names
-//! ([`Sidecar::source`]) instead of in comments.
-//!
-//! The test that says all of this is
-//! `tests::test_undo_is_the_inverse_of_execute_for_both_modes`, which cannot be
-//! written unless the forward and reverse directions share a module.
+//! Four steps, all agreeing on `<output>/<Category>/<YYYY>/<MM>/<name>` with a
+//! `_1`/`_2` suffix for a name that is taken: [`ExecutionEngine::plan_batch`],
+//! [`ExecutionEngine::execute_batch`], [`TransferJournal`] to record it, and
+//! [`TransferJournal::undo`] to put it back. They live in one module because the
+//! reverse direction used to re-derive this layout by hand, and two
+//! implementations of one layout drift — see
+//! `tests::test_undo_is_the_inverse_of_execute_for_both_modes`.
 
 use crate::category_name::CategoryName;
 use anyhow::{anyhow, Context, Result};
@@ -50,11 +25,10 @@ use std::time::UNIX_EPOCH;
 pub const LAST_JOURNAL: &str = "last_execution_manifest.json";
 
 /// What a transfer does to the source folder, and therefore what undo has to
-/// do in reverse.
+/// do in reverse: a move goes back, a copy is removed again.
 ///
-/// This is recorded in the journal, not inferred at undo time. The two modes
-/// need opposite actions — a move has to be put back, a copy has to be taken
-/// away again — so guessing wrong is not a cosmetic mistake.
+/// Recorded in the journal rather than inferred at undo time, because the two
+/// need opposite actions and guessing wrong is not a cosmetic mistake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TransferMode {
@@ -65,8 +39,8 @@ pub enum TransferMode {
 /// A file that travels with its photo: the `.xmp` Lightroom writes beside an
 /// image, or the `.aae` roll iOS writes.
 ///
-/// Named fields, not a tuple. The old `(PathBuf, PathBuf)` said which half was
-/// which only in a comment, so swapping them was a change that compiled.
+/// Named fields rather than a tuple, so the direction is in the type and
+/// swapping the halves does not compile.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sidecar {
     /// Where the sidecar was before the transfer.
@@ -80,17 +54,14 @@ pub struct Sidecar {
     pub filed: Option<Fingerprint>,
 }
 
-/// Size and modification time of a file as they were when the journal was
-/// written: enough to tell, later, whether the file at that path is still the
-/// one this app put there.
+/// Size and modification time of a file as it was when the journal was written.
 ///
-/// Deliberately not a content hash. Hashing the batch again costs a full read
-/// of every photo on a Move — where the transfer itself is a rename and costs
-/// almost nothing — and a second pass over a batch that just left the page
-/// cache on a Copy. Rewriting a photo changes its length, its modification time
-/// or both, which is the pair git's index caches for exactly the same job. The
-/// residual gap is an edit that preserves the length *and* lands inside one
-/// filesystem timestamp tick, which needs FAT's 2-second granularity to matter.
+/// Deliberately not a content hash: hashing the batch again costs a full read of
+/// every photo on a Move, where the transfer itself is a rename. Rewriting a
+/// photo changes its length, its mtime, or both — the pair git's index caches
+/// for the same job. The residual gap is an edit that preserves the length *and*
+/// lands inside one filesystem timestamp tick, which needs FAT's 2-second
+/// granularity to matter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Fingerprint {
     pub bytes: u64,
@@ -150,10 +121,8 @@ pub struct FileOperation {
 
 /// A planned file that did not make it, and why.
 ///
-/// Recorded at file granularity rather than photo granularity, because a sidecar
-/// can fail on its own: the photo beside it has already moved, so failing the
-/// whole operation would leave that photo in the output folder with no record
-/// to undo it.
+/// At file granularity rather than photo granularity, because a sidecar can fail
+/// on its own while the photo beside it has already moved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FailedOp {
     pub operation: FileOperation,
@@ -172,11 +141,11 @@ impl FailedOp {
 }
 
 /// What one finished transfer leaves behind: which photos landed where, which
-/// did not, and whether the batch was a move or a copy.
+/// did not, and whether the batch was a move or a copy. This is the whole of
+/// what undo knows.
 ///
-/// This is the whole of what undo knows. It is written once, after the batch,
-/// so a transfer interrupted by a crash leaves no journal and nothing claims
-/// otherwise.
+/// Written once, after the batch, so a transfer interrupted by a crash leaves no
+/// journal and nothing claims otherwise.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct TransferJournal {
     /// The mode of the batch. `None` only in a journal written before the mode
@@ -205,9 +174,9 @@ impl TransferJournal {
 
     /// Writes the journal so undo can find it.
     ///
-    /// Written beside the target and renamed into place: a journal is only
-    /// useful if it is complete, and `fs::write` truncates first, so a full disk
-    /// would otherwise leave half a JSON document that undo cannot parse.
+    /// Staged and renamed into place, because a journal is only useful if it is
+    /// complete: `fs::write` truncates first, so a full disk would otherwise
+    /// leave half a JSON document that undo cannot parse.
     pub fn save_to(&self, path: &Path) -> Result<()> {
         let json = serde_json::to_string_pretty(self)?;
         let staging = path.with_extension("json.staging");
@@ -235,18 +204,13 @@ impl TransferJournal {
     /// Reverses the batch, newest operation first, reporting one status per
     /// file.
     ///
-    /// The two modes need opposite actions, which is what the recorded mode is
-    /// for:
+    /// A **Move** is undone with another move, through the same [`place`] call
+    /// with the two paths swapped. A **Copy** is undone by deleting the copies:
+    /// nothing left the source folder, so leaving them behind would make the
+    /// button a lie for half the toolbar.
     ///
-    /// - **Move**: the file goes back where it came from, through the same
-    ///   [`place`] call the forward direction made with the two paths swapped.
-    /// - **Copy**: nothing ever left the source folder, so the inverse is to
-    ///   remove the copies this app made in the output folder.
-    ///
-    /// In both directions undo refuses to destroy work: it will not overwrite a
-    /// path that is occupied again, and it will not move or delete a file whose
-    /// fingerprint no longer matches the journal's — that file has been edited
-    /// or replaced, so it is left where it is and reported.
+    /// Either way it refuses to destroy work — see [`undo_file`] for the two
+    /// checks.
     pub fn undo<F>(&self, progress: F) -> Result<Vec<UndoStatus>>
     where
         F: Fn(usize, usize, &FileOperation),
@@ -346,17 +310,15 @@ impl ExecutionEngine {
 
     /// Works out where each input lands, without touching the filesystem.
     ///
-    /// Pure planning is deliberate: `execute_batch` can then be handed exactly
-    /// the paths undo will later reverse, rather than re-deriving them.
+    /// Pure planning so the journal records exactly the paths undo later
+    /// reverses, rather than undo re-deriving them.
     pub fn plan_batch(&self, inputs: &[RawPhotoInput]) -> Vec<FileOperation> {
         let mut planned_ops = Vec::new();
         let mut reserved_paths: HashSet<PathBuf> = HashSet::new();
 
         for input in inputs {
-            // Safe because `subject` is a `CategoryName`: it is one component by
-            // construction, so this joins exactly three levels. It used to be a
-            // display `String`, which meant a category typed as `A/B` silently
-            // created two directories and `..` walked out of the output folder.
+            // Exactly three levels, because `subject` is a `CategoryName` and so
+            // is one path component by construction.
             let rel_dir = Path::new(input.subject.as_str())
                 .join(format!("{:04}", input.year))
                 .join(format!("{:02}", input.month));
@@ -390,10 +352,9 @@ impl ExecutionEngine {
 
     /// Runs every planned operation, recording what landed and what did not.
     ///
-    /// One failure does not stop the batch: a photo that cannot be written
-    /// should not cost the user the other nineteen. Every failure is kept in
-    /// `failed_ops` rather than logged, so the app can say which photos did not
-    /// make it instead of dropping them from the grid as if they had.
+    /// One failure does not stop the batch, and every failure is kept rather
+    /// than logged, so the app can say which photos did not make it instead of
+    /// dropping them from the grid as if they had.
     pub fn execute_batch<F>(&self, operations: &[FileOperation], progress: F) -> TransferJournal
     where
         F: Fn(usize, usize, &FileOperation),
@@ -419,10 +380,8 @@ impl ExecutionEngine {
 
     /// Transfers one photo and its sidecars, or reports why it did not happen.
     ///
-    /// A sidecar that fails is recorded separately and does not fail the photo:
-    /// the photo is already in place by then, and recording the operation as
-    /// failed would leave it in the output folder with no journal entry to move
-    /// it back.
+    /// A sidecar that fails is recorded separately and does not fail the photo,
+    /// which is already in place by then.
     fn execute_single(
         &self,
         op: &FileOperation,
@@ -468,24 +427,20 @@ pub struct RawPhotoInput {
     pub month: u32,
 }
 
-/// The one rule for putting a file at `to`.
+/// The one rule for putting a file at `to`, called by both directions: forward
+/// as `place(source, destination, mode)`, undo as
+/// `place(destination, source, mode)`.
 ///
-/// Both directions call it: the forward direction as
-/// `place(source, destination, mode)`, undo as
-/// `place(destination, source, mode)`. That is what makes undo the inverse of
-/// execute rather than a second implementation of it.
-///
-/// It refuses to overwrite whatever is already at `to`, never removes `from`
-/// until the copy at `to` is verified complete, and leaves nothing
-/// half-written behind. Returns the fingerprint of `to` as it now is, which is
-/// what the journal records.
+/// Refuses to overwrite, never removes `from` until the copy at `to` is verified
+/// complete, and leaves nothing half-written behind. Returns `to`'s fingerprint,
+/// which is what the journal records.
 fn place(from: &Path, to: &Path, mode: TransferMode) -> Result<Fingerprint> {
     if !from.exists() {
         return Err(anyhow!("{} does not exist", from.display()));
     }
     // Also what stops the degenerate case where the user picks the input folder
     // as the output folder: copying a file onto itself truncates it, and the
-    // length check below would then compare zero against zero and pass.
+    // length check below would compare zero against zero and pass.
     if to.exists() {
         return Err(anyhow!("refusing to overwrite {}", to.display()));
     }
@@ -497,15 +452,12 @@ fn place(from: &Path, to: &Path, mode: TransferMode) -> Result<Fingerprint> {
         TransferMode::Copy => copy_verified(from, to)?,
         TransferMode::Move => {
             // A rename within one filesystem cannot truncate, so it is
-            // preferred. It fails across devices, which is the common case
-            // here: a source folder on an internal disk and a library on an
-            // external one.
+            // preferred. It fails across devices, which is the common case here.
             if fs::rename(from, to).is_err() {
                 copy_verified(from, to)?;
-                // The copy is verified complete before this runs, so the
-                // original can be left behind but never lost. A failure here
-                // means the file is now in both places, which the message has to
-                // say rather than reporting as a plain refusal.
+                // Verified complete before this runs, so the original can be left
+                // behind but never lost. A failure here means the file is now in
+                // both places, which the message has to say.
                 fs::remove_file(from).map_err(|e| {
                     anyhow!(
                         "{} was copied but the original at {} could not be removed: {e}",
@@ -523,10 +475,8 @@ fn place(from: &Path, to: &Path, mode: TransferMode) -> Result<Fingerprint> {
 /// Copies `from` to `to` and refuses to leave the copy behind unless it is
 /// complete.
 ///
-/// `fs::copy` returns how many bytes it wrote, so a copy that stopped early —
-/// a full disk, a cable pulled out — is caught here without re-reading either
-/// file. The forward direction did this and the reverse direction did not, which
-/// is how a truncated restore could take the original with it.
+/// `fs::copy` returns how many bytes it wrote, so a copy that stopped early — a
+/// full disk, a cable pulled out — is caught without re-reading either file.
 fn copy_verified(from: &Path, to: &Path) -> Result<()> {
     let written = fs::copy(from, to)?;
     let expected = fs::metadata(from)?.len();
@@ -534,12 +484,9 @@ fn copy_verified(from: &Path, to: &Path) -> Result<()> {
     reject_short_copy(from, to, written, landed, expected)
 }
 
-/// Decides whether a copy that reported `written` bytes and left `landed` behind
-/// is complete enough to keep.
-///
-/// Split out of [`copy_verified`] because a short write cannot be provoked on
-/// demand: a full disk and a pulled cable both leave behind exactly this state,
-/// and neither can be arranged from a test.
+/// The decision [`copy_verified`] makes, split out because a short write cannot
+/// be provoked on demand: a full disk and a pulled cable both leave exactly this
+/// state, and neither can be arranged from a test.
 fn reject_short_copy(
     from: &Path,
     to: &Path,
@@ -594,9 +541,8 @@ fn undo_file(
     }
 
     let Some(filed) = filed else {
-        // No fingerprint means nothing recorded what this file looked like, so
-        // there is no way to tell this app's copy from a file the user has
-        // since edited. Leave it.
+        // Nothing recorded what this file looked like, so there is no way to
+        // tell this app's copy from one the user has since edited. Leave it.
         return UndoStatus::SkippedChanged(from.to_path_buf());
     };
     if !filed.still_matches(from) {
@@ -604,9 +550,8 @@ fn undo_file(
     }
 
     match mode {
-        // Nothing left the source folder, so the inverse of a copy is that the
-        // copy is gone. This is the only deletion undo performs, and the
-        // fingerprint above is what makes it safe.
+        // The only deletion undo performs, and the fingerprint above is what
+        // makes it safe.
         TransferMode::Copy => match fs::remove_file(from) {
             Ok(()) => {
                 prune_empty_dirs(from, output_dir);
@@ -614,9 +559,6 @@ fn undo_file(
             }
             Err(e) => UndoStatus::Failed(from.to_path_buf(), e.to_string()),
         },
-        // A move is undone with another move: the file comes back the same way it
-        // went out, through the same rule, so the two directions cannot disagree
-        // about renames, cross-device copies or a truncated write.
         TransferMode::Move => {
             // `place` refuses to overwrite, so an occupied original path is a
             // refusal rather than a failure. Deciding it here keeps the filed
@@ -629,9 +571,8 @@ fn undo_file(
                     prune_empty_dirs(from, output_dir);
                     UndoStatus::Restored(to.to_path_buf())
                 }
-                // `place` never removes `from` until the copy at `to` is
-                // verified complete, so a failure here leaves the file in the
-                // output folder exactly as it was.
+                // `place` never removes `from` until the copy at `to` is verified
+                // complete, so a failure leaves the file exactly as it was.
                 Err(e) => UndoStatus::Failed(from.to_path_buf(), e.to_string()),
             }
         }
@@ -641,18 +582,16 @@ fn undo_file(
 /// Removes the category folders a reversal emptied, stopping at the first one
 /// that is not empty.
 ///
-/// Bounded twice over: it never walks above `output_dir`, and it only removes
-/// directories with nothing in them, so undo cannot delete anything of the
-/// user's — including the output folder itself, which is theirs by name. Both
-/// bounds also fail safe: a journal whose `output_dir` no longer lines up with
-/// the paths in it leaves the folders alone.
+/// Bounded twice over so undo cannot delete anything of the user's, including
+/// the output folder itself: it never walks above `output_dir`, and only removes
+/// directories with nothing in them.
 fn prune_empty_dirs(from: &Path, output_dir: &Path) {
     let Some(mut dir) = from.parent().map(Path::to_path_buf) else {
         return;
     };
     while dir != output_dir && dir.starts_with(output_dir) {
-        // Anything left in a folder, or a folder that cannot be read, means we
-        // have reached the edge of what this reversal emptied.
+        // Anything left in a folder, or one that cannot be read, is the edge of
+        // what this reversal emptied.
         let is_empty = fs::read_dir(&dir)
             .map(|mut entries| entries.next().is_none())
             .unwrap_or(false);
@@ -668,7 +607,7 @@ fn prune_empty_dirs(from: &Path, output_dir: &Path) {
 
 /// Picks a free filename in `target_dir`, appending `_1`, `_2` and so on.
 ///
-/// Checks the disk and the batch's own reservations, because the plan and the
+/// Checks the disk *and* the batch's own reservations, because the plan and the
 /// transfer can be minutes apart for a large batch.
 fn resolve_destination(
     target_dir: &Path,
@@ -700,16 +639,13 @@ fn resolve_destination(
 /// Finds the sidecars that travel with `source`, each with its direction in
 /// field names rather than as a tuple.
 fn discover_sidecars(source: &Path, target_dir: &Path, final_stem: &str) -> Vec<Sidecar> {
-    // The extension list carries both cases because a `.XMP` next to a `.jpg` is
-    // a real thing on a case-sensitive filesystem, and both are then a real
-    // sidecar of the photo. On a case-insensitive one (macOS, Windows) both
-    // lookups find the *same* file, so the sources are deduplicated: without
-    // that, half of these sidecars would be transferred twice and the second
-    // attempt reported as a failure.
+    // Both cases are listed because a `.XMP` beside a `.jpg` is a real thing on a
+    // case-sensitive filesystem. On a case-insensitive one (macOS, Windows) both
+    // lookups find the *same* file, hence the dedupe: without it half these
+    // sidecars transfer twice and the second attempt reads as a failure.
     //
     // The destinations need no collision check: they are built from the photo's
-    // own resolved stem, which `resolve_destination` has already made unique
-    // across the batch.
+    // own stem, which `resolve_destination` already made unique.
     let mut seen_sources: HashSet<PathBuf> = HashSet::new();
     let mut sidecars = Vec::new();
 
