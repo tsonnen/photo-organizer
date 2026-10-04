@@ -1,11 +1,10 @@
 //! Moving and copying staged photos into the output folder, and the undo that
 //! reverses a transfer from its journal.
 //!
-//! Everything that touches the filesystem here goes through
-//! [`crate::transfer`], which owns the on-disk layout. This module owns what the
-//! user is told about it: both the journal write and the undo run report their
-//! failures, because a transfer that quietly fails to record itself leaves Undo
-//! pointing at the wrong batch.
+//! [`crate::transfer`] owns the filesystem; this module owns what the user is told
+//! about it. The journal write and the undo run both report their failures,
+//! because a transfer that quietly fails to record itself leaves Undo pointing at
+//! the wrong batch.
 
 use super::PhotoOrganizerApp;
 use crate::category_name::CategoryName;
@@ -56,9 +55,8 @@ impl PhotoOrganizerApp {
             println!("Transferring {curr}/{total}");
         });
 
-        // Only the photos that actually landed leave the grid. A photo that
-        // failed stays selected in place, so the reason is still on screen to be
-        // read and the retry is one click away.
+        // Only photos that landed leave the grid. A failed one stays selected in
+        // place, so the reason is on screen and the retry is one click away.
         let landed: HashSet<&Path> = journal
             .completed_ops
             .iter()
@@ -130,12 +128,10 @@ impl PhotoOrganizerApp {
 
     /// Writes the journal, and takes a stale one away if the write fails.
     ///
-    /// The journal is a single slot that undo reads as "the last batch". If this
-    /// batch's journal cannot be written, leaving the previous one in place would
-    /// make Undo reverse an older batch while the user is looking at the newest
-    /// one — so the stale journal goes and the user is told that this batch
-    /// cannot be undone. The alternative is a confusing undo; this is a visible
-    /// one.
+    /// The journal is a single slot that undo reads as "the last batch", so leaving
+    /// the previous one in place would make Undo reverse an older batch while the
+    /// user is looking at the newest. The alternative is a confusing undo; this is
+    /// a visible one.
     fn persist_journal(journal: &TransferJournal) -> Option<String> {
         let path = Path::new(LAST_JOURNAL);
         match journal.save_to(path) {
@@ -149,8 +145,8 @@ impl PhotoOrganizerApp {
         }
     }
 
-    /// One line describing what undo did, with the first thing it left for the
-    /// user spelled out.
+    /// One line describing what undo did, with the first thing it left for the user
+    /// spelled out.
     fn undo_summary(statuses: &[UndoStatus]) -> String {
         let restored = statuses
             .iter()
@@ -183,8 +179,8 @@ impl PhotoOrganizerApp {
             format!("Undo: {}.", parts.join(", "))
         };
         if restored > 0 {
-            // A restored photo is on disk in the source folder but no longer in
-            // the grid, and re-staging it means a rescan.
+            // A restored photo is on disk but no longer in the grid; re-staging it
+            // means a rescan.
             message.push_str(" Re-scan the source folder to see them again.");
         }
         match statuses.iter().find(|s| s.needs_attention()) {

@@ -68,10 +68,8 @@ impl PhotoOrganizerApp {
                 self.execute_transfer(TransferMode::Copy);
             }
             // The two buttons above are opposites, so undo is not a single gesture
-            // either: it moves the last moved batch home again, and it deletes
-            // the copies the last copied batch made. Both directions leave
-            // anything edited since alone, which is worth saying where the
-            // button is rather than only in the manual.
+            // either: it moves the last moved batch home again, or deletes the
+            // copies the last copied batch made.
             let undo = ui.button("↩ Undo").on_hover_text(
                 "Reverse the last transfer: move a moved batch home again, or delete the copies a copied batch made. Files you have edited since are left alone.",
             );
