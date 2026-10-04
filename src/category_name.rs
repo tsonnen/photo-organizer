@@ -1,12 +1,12 @@
 //! A category name that is safe to use as a single directory component.
 //!
 //! A category is three things at once: the label in the grid's dropdown, the
-//! value a [`ClassificationResult`](crate::profile_store::ClassificationResult)
-//! carries, and a directory under the output folder. Only the third constrains
-//! what the string may contain, and nothing in the type system said so — the
-//! transfer engine joined a display string straight into a path, so a category
-//! typed as `A/B` silently created an extra directory level and one typed as
-//! `..` escaped the output folder entirely.
+//! value a [`Decision`](crate::classification::Decision) carries, and a directory
+//! under the output folder. Only the third constrains what the string may
+//! contain, and nothing in the type system said so — the transfer engine joined a
+//! display string straight into a path, so a category typed as `A/B` silently
+//! created an extra directory level and one typed as `..` escaped the output
+//! folder entirely.
 //!
 //! This module is the one place that decides which names are allowed. The name
 //! it returns is always a single component, so a caller joining it into a path
@@ -17,8 +17,8 @@ use std::fmt;
 
 /// A category name, guaranteed to be usable as exactly one path component.
 ///
-/// Serialises as a plain string, so `ClassificationResult` and `RankedProfile`
-/// keep the JSON shape they have always had on disk.
+/// Serialises as a plain string, so `Decision` and `RankedProfile` keep the
+/// JSON shape they have always had on disk.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CategoryName(String);
@@ -194,9 +194,9 @@ mod tests {
     fn test_display_and_serde_round_trip_as_a_plain_string() {
         let name = CategoryName::from_user_input("Sunsets");
         assert_eq!(name.to_string(), "Sunsets");
-        // `ClassificationResult` is written into the grid's state and read back
-        // in tests, so it has to keep serialising as the bare string it always
-        // was rather than as `{"0": "Sunsets"}`.
+        // A decided category is written into the grid's state and read back in
+        // tests, so it has to keep serialising as the bare string it always was
+        // rather than as `{"0": "Sunsets"}`.
         assert_eq!(serde_json::to_string(&name).unwrap(), "\"Sunsets\"");
         let back: CategoryName = serde_json::from_str("\"Sunsets\"").unwrap();
         assert_eq!(back, name);

@@ -6,17 +6,17 @@ This document describes the multi-tiered classification pipeline implemented in 
 flowchart TD
     A["Input Photo / Image"] --> B["Compute BLAKE3 Hash"]
     B --> C["SQLite Photo Cache"]
-    C -->|"Cache Hit (Embedding & Thumbnail)"| G["Classifier"]
+    C -->|"Cache Hit (Embedding, Thumbnail & Frame Size)"| G["ProfileStore::classify"]
     C -->|"Cache Miss"| D["Decode Image at Scan Resolution & Generate Thumbnail"]
     D --> E{"Candle CLIP Vision Model Available?"}
     E -->|"Yes (SafeTensors)"| F1["Extract L2-Normalized Embedding Vector"]
     E -->|"No"| F2["Empty Embedding (Graceful Fallback)"]
-    F1 --> F3["Cache in SQLite"]
+    F1 --> F3["Cache Embedding & Frame Size in SQLite"]
     F3 --> G
     F2 --> G
 
     subgraph Classifier ["Multi-Tier Classification Engine"]
-        G --> H{"Valid Embedding & Profiles Available?"}
+        G["ProfileStore::classify(PhotoFacts) -> Classification"] --> H{"Valid Embedding & Profiles Available?"}
         H -->|"Yes"| I["Compute Cosine Similarity against Profile Centroids"]
         I --> J{"Max Similarity >= 0.65?"}
         J -->|"Yes"| K["Assign Best Category Profile (Visual AI)"]
@@ -34,6 +34,69 @@ flowchart TD
         S --> T["Trigger Instant Re-classification"]
     end
 ```
+
+## PhotoFacts and Classification
+
+Classification is expressed as two records rather than a pile of fields passed
+between functions, and those two records are what `ProfileStore::classify` reads
+and returns:
+
+- **`PhotoFacts`** — what a photo *is*: `path`, `date`, `frame` (its true pixel
+  size), `is_exif`, `embedding`. One argument, so a caller cannot assemble a
+  photo's facts out of the wrong pieces.
+- **`Classification`** — what was *decided*: `Pending`, or a `Decision` carrying
+  `category` (`CategoryName`), `confidence`, `source` and `is_custom`.
+  `is_custom` — whether the name matches no trained profile, and so belongs on
+  the free-text path — is settled once, in `ProfileStore::classify`, from the
+  profiles in force at the time. No caller re-asks.
+
+### One entry point, one write path
+
+`ProfileStore::classify(&PhotoFacts) -> Classification` is the only way a
+category is decided; the visual tier, the rules and the `Unsorted` fallback all
+live behind it.
+
+`StagedItem::apply_classification` is the only way a decided category reaches a
+photo on screen. A scan's `Update` and **Re-classify All** both go through it,
+so they cannot disagree about what a manual pick means:
+
+- A **pending** photo is never preserved. Its category is the
+  `Classifying...` label rather than a decision, and the decision that follows
+  always lands. Before this was a variant, the placeholder was stored as a real
+  category, which rendered an editable text input bound to it; one keystroke
+  marked the photo manual and the scan's real answer was then skipped, leaving
+  the photo filed as "Classifying..." permanently.
+- A **manual** photo is never re-decided: the name, confidence and source are
+  the user's call. `is_custom` *is* still re-derived against the live profiles,
+  because a profile can be deleted while the category stands and the name then
+  has to become editable again.
+- The **facts** always refresh, manual or not, so the embedding a photo was
+  staged without catches up with the decision that follows.
+
+`ScanMessage::Update` carries `(PhotoFacts, Classification)` rather than the
+eight individual values this used to declare and the app then destructured into
+eight bindings to pass to an eight-argument function.
+
+## Frame size is persisted, not reconstructed
+
+The rule tier keys off resolution, and the grid only ever decodes a ≤200x140
+thumbnail. `photo_cache` therefore stores `original_width`/`original_height`
+alongside the thumbnail, and `CachedPhotoData::frame` is `Option<FrameSize>`: a
+row written before those columns existed reports `None`, and the resolution rule
+declines to fire rather than guessing from the thumbnail.
+
+This is what removed a divergence. A 1920x1080 PNG was **Screenshots** on the
+scan that read the file and **Unsorted** on every scan after it, with nothing
+the user did to cause it: the first scan had the true frame size, and the cached
+rescan substituted the thumbnail's. A scan of such a row backfills the frame
+size once from the file header, so the two scans now reach the same answer.
+
+`ScanMessage` events carry the id of the scan that produced them, and
+`drain_scan_messages` drops any but the current scan's. Starting a scan clears
+the staged items but cannot un-send what a superseded scan already put on the
+shared channel, and a late `Update` from it was decided against the profile
+store as it was at the time — it would otherwise overwrite the current scan's
+photo.
 
 ## Managing Profiles
 
@@ -67,11 +130,16 @@ tuning and `PHOTO_ORGANIZER_SCAN_THREADS` to override it.
    - If similarity $\ge$ `CONFIDENCE_THRESHOLD` (0.65, a constant in `profile_store.rs`), category is assigned with `ClassificationSource::VisualModel`.
 2. **Tier 2: Rule-Based & Metadata Heuristics**:
    - Reached when the best centroid match falls below the threshold, or when there is no embedding or no profiles at all.
-   - **Screenshots**: Detected through filename patterns (`screenshot`, `screen_shot`, `capture`, `snip`) and screen aspect ratios ($16:9, 16:10, 19.5:9$, etc.) on non-EXIF PNGs.
+   - **Screenshots**: Detected through filename patterns (`screenshot`, `screen_shot`, `capture`, `snip`) and screen aspect ratios ($16:9, 16:10, 19.5:9$, etc.) on non-EXIF PNGs of at least `SCREENSHOT_MIN_WIDTH` (800px).
    - **Documents / Receipts**: Detected through filename keywords (`receipt`, `invoice`, `document`, `scan`, `bill`, `statement`).
    - **Camera Photos**: Identified when EXIF camera metadata is present.
 3. **Tier 3: Fallback**:
-   - Items with no visual match and no rule triggers are categorized as `"Unsorted"`.
+   - Items with no visual match and no rule triggers are categorized as `"Unsorted"`, still reporting how near the closest profile came.
+
+The resolution rule is the only one that reads the frame size, so it is also the
+only one that declines to fire when `PhotoFacts::frame` is `None` — a photo
+cached by a version that did not record its dimensions. The filename and EXIF
+rules need no frame size and keep working.
 
 The threshold is fixed in code rather than user-configurable: the per-photo category
 dropdown already ranks every profile with its confidence, so a weak match can be
@@ -83,7 +151,7 @@ profile.
 ## Category Names
 
 Every category is also a directory name, so the pipeline never hands a raw string to
-the transfer engine. `ClassificationResult.category` and `RawPhotoInput.subject` are both
+the transfer engine. `Decision.category` and `RawPhotoInput.subject` are both
 `CategoryName`, which is one path component by construction, and `CategoryName` is the
 single place that decides which names are allowed.
 
@@ -149,3 +217,8 @@ than a visible "this batch cannot be undone".
 that ties the two directions together: for each mode, `undo(execute(inputs, mode))`
 leaves the filesystem exactly as it started, sidecars included.
 
+A staged photo's `category` is a plain `String` rather than a `CategoryName`, and is
+sanitised again at the transfer seam (`CategoryName::from_user_input`). That is
+deliberate: the field is bound to the grid's and the modal's free-text inputs, which
+have to be able to hold a half-typed name and whatever the user is about to change it
+to. Nothing is filed from it unsanitised.

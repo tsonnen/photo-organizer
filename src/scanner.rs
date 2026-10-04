@@ -1,9 +1,10 @@
+use crate::classification::{Classification, FrameSize, PhotoDate, PhotoFacts};
 use crate::db::{CachedPhotoData, Database};
 use crate::inference::{extract_embedding, find_model_path, init_clip_session};
 use crate::media::{
     cached_thumb_to_egui, dynamic_to_cached_thumb, extract_date, load_scan_preview,
 };
-use crate::profile_store::{ClassificationSource, ProfileStore};
+use crate::profile_store::ProfileStore;
 use eframe::egui;
 use rayon::prelude::*;
 use std::fs;
@@ -12,31 +13,42 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+/// A photo as the scan has it so far: its facts, whatever has been decided about
+/// them, and the thumbnail to show while the rest is still working.
 pub struct ProcessedPayload {
-    pub source_path: PathBuf,
-    pub year: u32,
-    pub month: u32,
-    pub is_exif: bool,
-    pub category: String,
-    pub confidence: f32,
-    pub source: ClassificationSource,
-    pub embedding: Vec<f32>,
+    pub facts: PhotoFacts,
+    pub classification: Classification,
     pub image: egui::ColorImage,
 }
 
+/// What a scan tells the UI.
 pub enum ScanMessage {
+    /// A photo to stage now, with its thumbnail.
     Item(ProcessedPayload),
+    /// A decision about a photo already staged, carrying the facts the scan
+    /// holds for it alongside it.
+    ///
+    /// Two records rather than the eight fields this used to declare and the
+    /// app then destructured into eight bindings to pass to an eight-argument
+    /// function: the same eight values, spelled once.
     Update {
-        source_path: PathBuf,
-        year: u32,
-        month: u32,
-        is_exif: bool,
-        category: String,
-        confidence: f32,
-        source: ClassificationSource,
-        embedding: Vec<f32>,
+        facts: PhotoFacts,
+        classification: Classification,
     },
+    /// Every photo in the folder has been sent.
     Complete,
+}
+
+/// A message together with the scan it came from.
+///
+/// `start_scan` clears the staged items but cannot un-send what a superseded
+/// scan already put on the shared channel, and a late `Update` from that scan
+/// was decided against the profile store as it was at the time — it would
+/// otherwise overwrite a decision the current scan is still working towards. So
+/// the receiver drops anything but the newest scan's.
+pub struct ScanEvent {
+    pub scan_id: u64,
+    pub message: ScanMessage,
 }
 
 /// Checks if a file has a supported image or camera RAW extension.
@@ -73,10 +85,26 @@ pub fn is_supported_image(path: &Path) -> bool {
 pub fn scan_folder(
     folder: PathBuf,
     profiles: ProfileStore,
-    tx: Sender<ScanMessage>,
+    tx: Sender<ScanEvent>,
     ctx: egui::Context,
+    scan_id: u64,
 ) {
-    scan_folder_with_db(folder, profiles, tx, ctx, PathBuf::from("photo_cache.db"));
+    scan_folder_with_db(
+        folder,
+        profiles,
+        tx,
+        ctx,
+        PathBuf::from("photo_cache.db"),
+        scan_id,
+    );
+}
+
+/// Sends a message tagged with the scan it belongs to.
+///
+/// The tag is stamped here rather than at each call site so that a message
+/// cannot be sent without one.
+fn send(tx: &Sender<ScanEvent>, scan_id: u64, message: ScanMessage) {
+    let _ = tx.send(ScanEvent { scan_id, message });
 }
 
 /// Number of worker threads the scan runs on.
@@ -108,9 +136,10 @@ fn scan_thread_count() -> usize {
 pub fn scan_folder_with_db(
     folder: PathBuf,
     profiles: ProfileStore,
-    tx: Sender<ScanMessage>,
+    tx: Sender<ScanEvent>,
     ctx: egui::Context,
     db_path: PathBuf,
+    scan_id: u64,
 ) {
     thread::spawn(move || {
         let mut paths = Vec::new();
@@ -124,7 +153,7 @@ pub fn scan_folder_with_db(
         }
 
         if paths.is_empty() {
-            let _ = tx.send(ScanMessage::Complete);
+            send(&tx, scan_id, ScanMessage::Complete);
             ctx.request_repaint();
             return;
         }
@@ -157,25 +186,34 @@ pub fn scan_folder_with_db(
                 };
 
                 if let Some(mut c) = cached {
+                    // A row written before the cache stored the frame size has
+                    // none, and the rules key off resolution: re-read the file's
+                    // header once and fill it in, so this photo is decided the
+                    // same way on every later scan as it was on the one that
+                    // cached it. Costs one header read per legacy row, once.
+                    if c.frame.is_none() {
+                        if let Ok(preview) = load_scan_preview(path) {
+                            c.frame = Some(FrameSize::new(
+                                preview.original_width,
+                                preview.original_height,
+                            ));
+                            let db_guard = db.lock().unwrap();
+                            if let Some(ref db_conn) = *db_guard {
+                                let _ = db_conn.insert_cache(&file_hash, &c);
+                            }
+                        }
+                    }
+
                     // If photo was previously cached without embedding, backfill it now
                     if c.embedding.is_empty() {
                         if let Some(ref sess) = *session {
                             if let Ok(preview) = load_scan_preview(path) {
                                 if let Ok(emb) = extract_embedding(sess, &preview.image) {
                                     if !emb.is_empty() {
-                                        c.embedding = emb.clone();
+                                        c.embedding = emb;
                                         let db_guard = db.lock().unwrap();
                                         if let Some(ref db_conn) = *db_guard {
-                                            let _ = db_conn.insert_cache(
-                                                &file_hash,
-                                                &CachedPhotoData {
-                                                    year: c.year,
-                                                    month: c.month,
-                                                    is_exif_date: c.is_exif_date,
-                                                    embedding: emb,
-                                                    thumbnail: c.thumbnail.clone(),
-                                                },
-                                            );
+                                            let _ = db_conn.insert_cache(&file_hash, &c);
                                         }
                                     }
                                 }
@@ -183,49 +221,38 @@ pub fn scan_folder_with_db(
                         }
                     }
 
-                    let (w, h) = if let Some(ref thumb) = c.thumbnail {
-                        (thumb.width, thumb.height)
-                    } else {
-                        (1920, 1080)
+                    let facts = PhotoFacts {
+                        path: path.clone(),
+                        date: c.date,
+                        frame: c.frame,
+                        is_exif: c.is_exif_date,
+                        embedding: c.embedding.clone(),
                     };
-                    let class_res =
-                        profiles.classify_with_heuristics(&c.embedding, path, c.is_exif_date, w, h);
+                    let classification = profiles.classify(&facts);
 
                     let image = if let Some(ref thumb) = c.thumbnail {
                         cached_thumb_to_egui(thumb)
                     } else if let Ok(preview) = load_scan_preview(path) {
                         let (cached_thumb, color_img) = dynamic_to_cached_thumb(&preview.image);
+                        c.thumbnail = Some(cached_thumb);
                         let db_guard = db.lock().unwrap();
                         if let Some(ref db_conn) = *db_guard {
-                            let _ = db_conn.insert_cache(
-                                &file_hash,
-                                &CachedPhotoData {
-                                    year: c.year,
-                                    month: c.month,
-                                    is_exif_date: c.is_exif_date,
-                                    embedding: c.embedding.clone(),
-                                    thumbnail: Some(cached_thumb),
-                                },
-                            );
+                            let _ = db_conn.insert_cache(&file_hash, &c);
                         }
                         color_img
                     } else {
                         return;
                     };
 
-                    let _ = tx.send(ScanMessage::Item(ProcessedPayload {
-                        source_path: path.clone(),
-                        year: c.year,
-                        month: c.month,
-                        is_exif: c.is_exif_date,
-                        // The staged item holds the name as the user sees it; it
-                        // is sanitised again at the transfer seam.
-                        category: class_res.category.into_string(),
-                        confidence: class_res.confidence,
-                        source: class_res.source,
-                        embedding: c.embedding,
-                        image,
-                    }));
+                    send(
+                        &tx,
+                        scan_id,
+                        ScanMessage::Item(ProcessedPayload {
+                            facts,
+                            classification,
+                            image,
+                        }),
+                    );
                     ctx.request_repaint();
                     return;
                 }
@@ -240,71 +267,76 @@ pub fn scan_folder_with_db(
                     Err(_) => return,
                 };
 
-                // Immediately send thumbnail to UI so user sees the photo right away!
-                let _ = tx.send(ScanMessage::Item(ProcessedPayload {
-                    source_path: path.clone(),
-                    year: date_info.0,
-                    month: date_info.1,
+                let mut facts = PhotoFacts {
+                    path: path.clone(),
+                    date: PhotoDate::new(date_info.0, date_info.1),
+                    // The heuristics read real resolution (a 1920x1080 PNG is a
+                    // screenshot), so the facts carry the source dimensions
+                    // rather than the preview's.
+                    frame: Some(FrameSize::new(
+                        preview.original_width,
+                        preview.original_height,
+                    )),
                     is_exif: date_info.2,
-                    category: "Classifying...".to_string(),
-                    confidence: 0.0,
-                    source: ClassificationSource::UnsortedFallback,
                     embedding: Vec::new(),
-                    image,
-                }));
+                };
+
+                // Immediately send thumbnail to UI so user sees the photo right
+                // away! `Pending` rather than a "Classifying..." category: there
+                // is no category yet, so there is nothing there for the user to
+                // edit into one.
+                send(
+                    &tx,
+                    scan_id,
+                    ScanMessage::Item(ProcessedPayload {
+                        facts: facts.clone(),
+                        classification: Classification::Pending,
+                        image,
+                    }),
+                );
                 ctx.request_repaint();
 
                 // 3. Extract embedding in background
-                let emb = if let Some(ref sess) = *session {
+                facts.embedding = if let Some(ref sess) = *session {
                     extract_embedding(sess, &preview.image).unwrap_or_default()
                 } else {
                     Vec::new()
                 };
 
-                // The heuristics read real resolution (a 1920x1080 PNG is a
-                // screenshot), so they get the source dimensions rather than the
-                // preview's.
-                let class_res = profiles.classify_with_heuristics(
-                    &emb,
-                    path,
-                    date_info.2,
-                    preview.original_width,
-                    preview.original_height,
-                );
+                let classification = profiles.classify(&facts);
 
-                // 4. Save to cache with thumbnail
+                // 4. Save to cache with thumbnail and frame size, so the next
+                // scan classifies this photo from the same resolution.
                 {
                     let db_guard = db.lock().unwrap();
                     if let Some(ref db_conn) = *db_guard {
                         let _ = db_conn.insert_cache(
                             &file_hash,
                             &CachedPhotoData {
-                                year: date_info.0,
-                                month: date_info.1,
-                                is_exif_date: date_info.2,
-                                embedding: emb.clone(),
+                                date: facts.date,
+                                is_exif_date: facts.is_exif,
+                                embedding: facts.embedding.clone(),
                                 thumbnail: Some(cached_thumb),
+                                frame: facts.frame,
                             },
                         );
                     }
                 }
 
                 // 5. Update UI with final classification
-                let _ = tx.send(ScanMessage::Update {
-                    source_path: path.clone(),
-                    year: date_info.0,
-                    month: date_info.1,
-                    is_exif: date_info.2,
-                    category: class_res.category.into_string(),
-                    confidence: class_res.confidence,
-                    source: class_res.source,
-                    embedding: emb,
-                });
+                send(
+                    &tx,
+                    scan_id,
+                    ScanMessage::Update {
+                        facts,
+                        classification,
+                    },
+                );
                 ctx.request_repaint();
             });
         });
 
-        let _ = tx.send(ScanMessage::Complete);
+        send(&tx, scan_id, ScanMessage::Complete);
         ctx.request_repaint();
     });
 }
@@ -312,6 +344,60 @@ pub fn scan_folder_with_db(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn png_of_size(path: &Path, width: u32, height: u32, rgb: [u8; 3]) {
+        let mut img = image::RgbImage::new(width, height);
+        for p in img.pixels_mut() {
+            *p = image::Rgb(rgb);
+        }
+        img.save(path).unwrap();
+    }
+
+    /// What one scan of a folder produced, keyed by file name: the category each
+    /// photo was staged with, and whether it was still pending.
+    type ScanResult = std::collections::HashMap<String, (String, bool)>;
+
+    /// Runs a scan to completion over `folder`, returning what it staged and what
+    /// it later updated.
+    fn scan_once(folder: &Path, db_path: &Path) -> (ScanResult, ScanResult) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        scan_folder_with_db(
+            folder.to_path_buf(),
+            ProfileStore::default(),
+            tx,
+            egui::Context::default(),
+            db_path.to_path_buf(),
+            1,
+        );
+
+        let name_of = |p: &Path| p.file_name().unwrap().to_string_lossy().into_owned();
+        let mut items = ScanResult::new();
+        let mut updates = ScanResult::new();
+        while let Ok(event) = rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            match event.message {
+                ScanMessage::Item(payload) => {
+                    let decision = payload.classification.decided();
+                    let category = decision.map(|d| d.category.as_str()).unwrap_or_default();
+                    items.insert(
+                        name_of(&payload.facts.path),
+                        (category.to_string(), decision.is_none()),
+                    );
+                }
+                ScanMessage::Update {
+                    facts,
+                    classification,
+                } => {
+                    let category = classification.decided().map(|d| d.category.as_str());
+                    updates.insert(
+                        name_of(&facts.path),
+                        (category.unwrap_or_default().to_string(), false),
+                    );
+                }
+                ScanMessage::Complete => break,
+            }
+        }
+        (items, updates)
+    }
 
     // One test, because the env var is process-global and cargo runs tests in
     // parallel threads.
@@ -367,11 +453,12 @@ mod tests {
             tx,
             ctx,
             temp_dir.join("empty_cache.db"),
+            1,
         );
 
         let mut received_complete = false;
-        while let Ok(msg) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
-            if let ScanMessage::Complete = msg {
+        while let Ok(event) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
+            if let ScanMessage::Complete = event.message {
                 received_complete = true;
                 break;
             }
@@ -388,92 +475,49 @@ mod tests {
         fs::create_dir_all(&temp_dir).unwrap();
         let test_db_path = temp_dir.join("isolated_cache.db");
 
-        // Create 2 test PNG images (one screenshot-like naming, one generic)
-        let img_path1 = temp_dir.join("screenshot_test.png");
-        let mut img1 = image::RgbImage::new(40, 40);
-        for p in img1.pixels_mut() {
-            *p = image::Rgb([10, 100, 150]);
-        }
-        img1.save(&img_path1).unwrap();
-
-        let img_path2 = temp_dir.join("test_pic_1.png");
-        let mut img2 = image::RgbImage::new(40, 40);
-        for p in img2.pixels_mut() {
-            *p = image::Rgb([50, 100, 150]);
-        }
-        img2.save(&img_path2).unwrap();
-
-        let txt_path = temp_dir.join("readme.txt");
-        fs::write(&txt_path, b"not a photo").unwrap();
-
-        // 1st scan: uncached
-        let (tx, rx) = std::sync::mpsc::channel();
-        let ctx = egui::Context::default();
-        scan_folder_with_db(
-            temp_dir.clone(),
-            ProfileStore::default(),
-            tx,
-            ctx,
-            test_db_path.clone(),
+        // Two PNGs with no screenshot keyword in their names: only the frame size
+        // can make them screenshots, which is what makes them the test.
+        png_of_size(
+            &temp_dir.join("holiday_pic.png"),
+            1920,
+            1080,
+            [10, 100, 150],
         );
+        png_of_size(&temp_dir.join("small_pic.png"), 640, 360, [50, 100, 150]);
+        fs::write(temp_dir.join("readme.txt"), b"not a photo").unwrap();
 
-        let mut items = Vec::new();
-        let mut updates = Vec::new();
-        let mut completed = false;
-
-        while let Ok(msg) = rx.recv_timeout(std::time::Duration::from_secs(60)) {
-            match msg {
-                ScanMessage::Item(payload) => items.push(payload),
-                ScanMessage::Update {
-                    source_path,
-                    category,
-                    ..
-                } => updates.push((source_path, category)),
-                ScanMessage::Complete => {
-                    completed = true;
-                    break;
-                }
-            }
-        }
-
-        assert!(completed);
+        // 1st scan: uncached. The thumbnail appears immediately as Pending, and
+        // the decision lands in an Update.
+        let (items, updates) = scan_once(&temp_dir, &test_db_path);
         assert_eq!(items.len(), 2);
         assert_eq!(updates.len(), 2);
-
-        // Verify screenshot got heuristic category
-        let screenshot_update = updates
-            .iter()
-            .find(|(p, _)| p.file_name().unwrap() == "screenshot_test.png");
-        assert!(screenshot_update.is_some());
-        assert_eq!(screenshot_update.unwrap().1, "Screenshots");
-
-        // 2nd scan: should hit cache and complete
-        let (tx2, rx2) = std::sync::mpsc::channel();
-        let ctx2 = egui::Context::default();
-        scan_folder_with_db(
-            temp_dir.clone(),
-            ProfileStore::default(),
-            tx2,
-            ctx2,
-            test_db_path,
+        assert!(
+            items.values().all(|(_, pending)| *pending),
+            "every freshly decoded photo is staged before it is classified: {items:?}"
         );
+        // The screenshot rule needs width >= 800 and a 16:9 frame; only the
+        // photo read at its true size passes both.
+        assert_eq!(
+            updates["holiday_pic.png"].0, "Screenshots",
+            "a 1920x1080 PNG is a screenshot: {updates:?}"
+        );
+        assert_eq!(updates["small_pic.png"].0, "Unsorted", "{updates:?}");
 
-        let mut cached_items = Vec::new();
-        let mut cached_completed = false;
-
-        while let Ok(msg) = rx2.recv_timeout(std::time::Duration::from_secs(60)) {
-            match msg {
-                ScanMessage::Item(payload) => cached_items.push(payload),
-                ScanMessage::Complete => {
-                    cached_completed = true;
-                    break;
-                }
-                _ => {}
-            }
-        }
-
-        assert!(cached_completed);
+        // 2nd scan: served from the cache, and it must reach the same answer —
+        // out of the cached frame size rather than the 200x140 thumbnail.
+        let (cached_items, cached_updates) = scan_once(&temp_dir, &test_db_path);
         assert_eq!(cached_items.len(), 2);
+        assert!(cached_updates.is_empty(), "a cached photo needs no update");
+        assert!(
+            cached_items.values().all(|(_, pending)| !*pending),
+            "a cached photo is classified before it is staged: {cached_items:?}"
+        );
+        for name in ["holiday_pic.png", "small_pic.png"] {
+            assert_eq!(
+                cached_items[name].0, updates[name].0,
+                "{name} classified differently on a cached rescan: {cached_items:?} vs {updates:?}"
+            );
+        }
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
