@@ -1,6 +1,8 @@
 //! The inspection modal: a large view of one photo with keyboard navigation
 //! and the category controls.
 
+use super::chrome;
+use super::layout;
 use super::PhotoOrganizerApp;
 use crate::app::models::ModalPreview;
 use eframe::egui;
@@ -121,121 +123,80 @@ impl PhotoOrganizerApp {
         let mut next_requested = false;
         let mut single_train_requested = false;
 
-        let item = &mut self.items[modal_index];
-        let filename = item
+        // Split out so the closure below can borrow the item and the profiles
+        // separately: `render_modal_controls` needs both.
+        let filename = self.items[modal_index]
             .source_path
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
+        let profiles = &self.profiles;
+        let item = &mut self.items[modal_index];
 
-        egui::Area::new(egui::Id::new("photo_verification_modal_area"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(screen_rect.min)
-            .show(ctx, |ui| {
-                let modal_w = (screen_rect.width() * 0.85).clamp(500.0, 1100.0);
-                let modal_h = (screen_rect.height() * 0.85).clamp(400.0, 800.0);
-                let modal_rect = egui::Rect::from_center_size(
-                    screen_rect.center(),
-                    egui::vec2(modal_w, modal_h),
-                );
+        let modal_size = layout::inspection_modal_size(screen_rect.size());
 
-                // 1. Dark translucent masking backdrop
-                let (backdrop_rect, backdrop_resp) =
-                    ui.allocate_exact_size(screen_rect.size(), egui::Sense::click());
-                ui.painter()
-                    .rect_filled(backdrop_rect, 0.0, egui::Color32::from_black_alpha(200));
+        let (_, frame) =
+            chrome::show_modal_card(ctx, "photo_verification_modal_area", modal_size, |ui| {
+                // Header / Title & Metadata
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut item.selected, "☑ Selected");
+                    ui.separator();
+                    ui.label(egui::RichText::new(&filename).strong());
+                    ui.separator();
+                    ui.label(format!("Date: {}/{:02}", item.year, item.month));
+                    if is_loading {
+                        ui.separator();
+                        ui.spinner();
+                        ui.colored_label(egui::Color32::LIGHT_GRAY, "Loading full image...");
+                    } else if high_res_tex.is_some() {
+                        ui.separator();
+                        ui.colored_label(egui::Color32::from_rgb(0, 200, 100), "✨ High-Res");
+                    }
 
-                if backdrop_resp.clicked() {
-                    // Only close if the click occurred outside the modal card bounds
-                    if let Some(interact_pos) = backdrop_resp.interact_pointer_pos() {
-                        if !modal_rect.contains(interact_pos) {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("✖").clicked() {
                             close_modal = true;
                         }
-                    }
-                }
-
-                // 2. Centered Modal Card Container
-                ui.scope_builder(egui::UiBuilder::new().max_rect(modal_rect), |ui| {
-                    egui::Frame::window(&ctx.style())
-                        .rounding(8.0)
-                        .show(ui, |ui| {
-                            ui.set_min_size(modal_rect.size());
-                            ui.set_max_size(modal_rect.size());
-
-                            // Header / Title & Metadata
-                            ui.horizontal(|ui| {
-                                ui.checkbox(&mut item.selected, "☑ Selected");
-                                ui.separator();
-                                ui.label(egui::RichText::new(&filename).strong());
-                                ui.separator();
-                                ui.label(format!("Date: {}/{:02}", item.year, item.month));
-                                if is_loading {
-                                    ui.separator();
-                                    ui.spinner();
-                                    ui.colored_label(
-                                        egui::Color32::LIGHT_GRAY,
-                                        "Loading full image...",
-                                    );
-                                } else if high_res_tex.is_some() {
-                                    ui.separator();
-                                    ui.colored_label(
-                                        egui::Color32::from_rgb(0, 200, 100),
-                                        "✨ High-Res",
-                                    );
-                                }
-
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        if ui.button("✖").clicked() {
-                                            close_modal = true;
-                                        }
-                                    },
-                                );
-                            });
-                            ui.separator();
-
-                            // Image View
-                            let active_tex = high_res_tex.as_ref().unwrap_or(&item.texture);
-                            let tex_size = active_tex.size_vec2();
-                            let avail_w = ui.available_width();
-                            let avail_h = (ui.available_height() - 50.0).max(150.0);
-
-                            let img_aspect = tex_size.x / tex_size.y;
-                            let container_aspect = avail_w / avail_h;
-
-                            let (disp_w, disp_h) = if img_aspect > container_aspect {
-                                (avail_w, avail_w / img_aspect)
-                            } else {
-                                (avail_h * img_aspect, avail_h)
-                            };
-
-                            ui.vertical_centered(|ui| {
-                                ui.image(egui::load::SizedTexture::new(
-                                    active_tex.id(),
-                                    [disp_w, disp_h],
-                                ));
-                            });
-
-                            ui.separator();
-
-                            // Bottom Navigation & Controls. The custom category
-                            // input is inline here, unlike the grid cell.
-                            let actions = Self::render_modal_controls(
-                                &self.profiles,
-                                ui,
-                                item,
-                                modal_index,
-                                item_count,
-                            );
-                            prev_requested = actions.prev;
-                            next_requested = actions.next;
-                            single_train_requested = actions.train;
-                            close_modal |= actions.close;
-                        });
+                    });
                 });
+                ui.separator();
+
+                // Image View
+                let active_tex = high_res_tex.as_ref().unwrap_or(&item.texture);
+                let tex_size = active_tex.size_vec2();
+                let avail_w = ui.available_width();
+                let avail_h = (ui.available_height() - 50.0).max(150.0);
+
+                let img_aspect = tex_size.x / tex_size.y;
+                let container_aspect = avail_w / avail_h;
+
+                let (disp_w, disp_h) = if img_aspect > container_aspect {
+                    (avail_w, avail_w / img_aspect)
+                } else {
+                    (avail_h * img_aspect, avail_h)
+                };
+
+                ui.vertical_centered(|ui| {
+                    ui.image(egui::load::SizedTexture::new(
+                        active_tex.id(),
+                        [disp_w, disp_h],
+                    ));
+                });
+
+                ui.separator();
+
+                // Bottom Navigation & Controls. The custom category input is
+                // inline here, unlike the grid cell.
+                let actions =
+                    Self::render_modal_controls(profiles, ui, item, modal_index, item_count);
+                prev_requested = actions.prev;
+                next_requested = actions.next;
+                single_train_requested = actions.train;
+                close_modal |= actions.close;
             });
+
+        close_modal |= frame.close;
 
         if close_modal {
             self.modal_preview = None;
@@ -244,7 +205,7 @@ impl PhotoOrganizerApp {
         } else if next_requested {
             self.navigate_modal(ctx, 1);
         } else if single_train_requested {
-            let cat = item.category.clone();
+            let cat = self.items[modal_index].category.clone();
             self.train_single_item(modal_index, &cat);
         }
     }

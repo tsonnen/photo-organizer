@@ -1,5 +1,5 @@
 use crate::db::{CachedPhotoData, Database};
-use crate::inference::{extract_embedding, find_model_path, init_clip_session};
+use crate::inference::{extract_embedding, init_clip_session};
 use crate::media::{
     cached_thumb_to_egui, dynamic_to_cached_thumb, extract_date, load_scan_preview,
 };
@@ -73,10 +73,32 @@ pub fn is_supported_image(path: &Path) -> bool {
 pub fn scan_folder(
     folder: PathBuf,
     profiles: ProfileStore,
+    config: ScanConfig,
     tx: Sender<ScanMessage>,
     ctx: egui::Context,
 ) {
-    scan_folder_with_db(folder, profiles, tx, ctx, PathBuf::from("photo_cache.db"));
+    scan_folder_with_db(
+        folder,
+        profiles,
+        config,
+        tx,
+        ctx,
+        PathBuf::from("photo_cache.db"),
+    )
+}
+
+/// Everything the scan needs from [`crate::settings::Settings`].
+///
+/// Passed as one value rather than as loose parameters so the scan cannot be
+/// wired to a threshold from one place and a model from another: the two are
+/// read by the same workers in the same pass, and a mismatch between them
+/// classifies photos against a bar the UI never showed.
+pub struct ScanConfig {
+    /// Cosine similarity a centroid match must reach to beat the rules.
+    pub threshold: f32,
+    /// Resolved CLIP checkpoint. `None` means no model, so the scan runs
+    /// rules-only rather than failing.
+    pub model_path: Option<PathBuf>,
 }
 
 /// Number of worker threads the scan runs on.
@@ -108,6 +130,7 @@ fn scan_thread_count() -> usize {
 pub fn scan_folder_with_db(
     folder: PathBuf,
     profiles: ProfileStore,
+    config: ScanConfig,
     tx: Sender<ScanMessage>,
     ctx: egui::Context,
     db_path: PathBuf,
@@ -130,7 +153,11 @@ pub fn scan_folder_with_db(
         }
 
         let db = Arc::new(Mutex::new(Database::init(&db_path).ok()));
-        let model_path = find_model_path();
+        // The model path is resolved by the caller from the user's setting, so
+        // the workers never re-run the search: every one of them would stat the
+        // same candidate list to reach the same answer.
+        let model_path = config.model_path;
+        let threshold = config.threshold;
         let session = Arc::new(model_path.and_then(|p| init_clip_session(p).ok()));
 
         // Deliberately not the global rayon pool: the scan wants a smaller,
@@ -188,8 +215,14 @@ pub fn scan_folder_with_db(
                     } else {
                         (1920, 1080)
                     };
-                    let class_res =
-                        profiles.classify_with_heuristics(&c.embedding, path, c.is_exif_date, w, h);
+                    let class_res = profiles.classify_with_heuristics(
+                        &c.embedding,
+                        path,
+                        c.is_exif_date,
+                        w,
+                        h,
+                        threshold,
+                    );
 
                     let image = if let Some(ref thumb) = c.thumbnail {
                         cached_thumb_to_egui(thumb)
@@ -268,6 +301,7 @@ pub fn scan_folder_with_db(
                     date_info.2,
                     preview.original_width,
                     preview.original_height,
+                    threshold,
                 );
 
                 // 4. Save to cache with thumbnail
@@ -310,6 +344,15 @@ pub fn scan_folder_with_db(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A rules-only scan config: no model, so these tests exercise the
+    /// heuristic path without depending on a CLIP checkpoint being present.
+    fn rules_only() -> ScanConfig {
+        ScanConfig {
+            threshold: crate::settings::DEFAULT_CONFIDENCE_THRESHOLD,
+            model_path: None,
+        }
+    }
 
     // One test, because the env var is process-global and cargo runs tests in
     // parallel threads.
@@ -362,6 +405,7 @@ mod tests {
         scan_folder_with_db(
             temp_dir.clone(),
             ProfileStore::default(),
+            rules_only(),
             tx,
             ctx,
             temp_dir.join("empty_cache.db"),
@@ -410,6 +454,7 @@ mod tests {
         scan_folder_with_db(
             temp_dir.clone(),
             ProfileStore::default(),
+            rules_only(),
             tx,
             ctx,
             test_db_path.clone(),
@@ -451,6 +496,7 @@ mod tests {
         scan_folder_with_db(
             temp_dir.clone(),
             ProfileStore::default(),
+            rules_only(),
             tx2,
             ctx2,
             test_db_path,

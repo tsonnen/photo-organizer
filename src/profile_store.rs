@@ -11,15 +11,6 @@ pub enum ClassificationSource {
     UnsortedFallback,
 }
 
-/// Similarity a centroid match must reach before it is believed over the rules.
-///
-/// Fixed in code rather than exposed as a setting: the per-photo category
-/// dropdown already ranks every profile with its confidence, so a user who
-/// disagrees with a low-confidence match can correct that photo directly
-/// instead of re-sorting the whole library. The gate itself has to stay, though
-/// — it is what hands a weak CLIP match to the filename and EXIF rules below.
-pub const CONFIDENCE_THRESHOLD: f32 = 0.65;
-
 impl std::fmt::Display for ClassificationSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -139,7 +130,14 @@ impl ProfileStore {
         }
     }
 
-    pub fn classify(&self, embedding: &[f32]) -> ClassificationResult {
+    /// Assigns the closest centroid, if it is similar enough to believe.
+    ///
+    /// `threshold` is the user-configured bar from
+    /// [`crate::settings::Settings::confidence_threshold`], passed in rather
+    /// than read from the store: profiles are learned data, the bar is a
+    /// setting, and keeping them apart means a `profiles.json` never carries a
+    /// stale copy of a knob the UI owns.
+    pub fn classify(&self, embedding: &[f32], threshold: f32) -> ClassificationResult {
         if embedding.is_empty() || self.profiles.is_empty() {
             return ClassificationResult {
                 category: "Unsorted".to_string(),
@@ -160,7 +158,7 @@ impl ProfileStore {
         }
 
         if let Some((profile, sim)) = best_match {
-            if sim >= CONFIDENCE_THRESHOLD {
+            if sim >= threshold {
                 return ClassificationResult {
                     category: profile.name.clone(),
                     confidence: sim.clamp(0.0, 1.0),
@@ -222,9 +220,10 @@ impl ProfileStore {
         is_exif: bool,
         width: u32,
         height: u32,
+        threshold: f32,
     ) -> ClassificationResult {
         // 1. Try Visual CLIP classification first if embedding exists
-        let visual_res = self.classify(embedding);
+        let visual_res = self.classify(embedding, threshold);
         if visual_res.source == ClassificationSource::VisualModel {
             return visual_res;
         }
@@ -344,6 +343,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::DEFAULT_CONFIDENCE_THRESHOLD;
     use std::f32::consts::FRAC_1_SQRT_2;
 
     #[test]
@@ -372,12 +372,12 @@ mod tests {
     #[test]
     fn test_classify_empty() {
         let store = ProfileStore::default();
-        let res = store.classify(&[]);
+        let res = store.classify(&[], DEFAULT_CONFIDENCE_THRESHOLD);
         assert_eq!(res.category, "Unsorted");
         assert_eq!(res.confidence, 0.0);
         assert_eq!(res.source, ClassificationSource::UnsortedFallback);
 
-        let res2 = store.classify(&[1.0, 0.0]);
+        let res2 = store.classify(&[1.0, 0.0], DEFAULT_CONFIDENCE_THRESHOLD);
         assert_eq!(res2.category, "Unsorted");
         assert_eq!(res2.confidence, 0.0);
         assert_eq!(res2.source, ClassificationSource::UnsortedFallback);
@@ -392,14 +392,14 @@ mod tests {
             ],
         };
 
-        let res1 = store.classify(&[0.9, 0.1, 0.0]);
+        let res1 = store.classify(&[0.9, 0.1, 0.0], DEFAULT_CONFIDENCE_THRESHOLD);
         assert_eq!(res1.category, "Landscape");
-        assert!(res1.confidence > CONFIDENCE_THRESHOLD);
+        assert!(res1.confidence > DEFAULT_CONFIDENCE_THRESHOLD);
         assert_eq!(res1.source, ClassificationSource::VisualModel);
 
-        let res2 = store.classify(&[0.1, 0.9, 0.0]);
+        let res2 = store.classify(&[0.1, 0.9, 0.0], DEFAULT_CONFIDENCE_THRESHOLD);
         assert_eq!(res2.category, "Portrait");
-        assert!(res2.confidence > CONFIDENCE_THRESHOLD);
+        assert!(res2.confidence > DEFAULT_CONFIDENCE_THRESHOLD);
         assert_eq!(res2.source, ClassificationSource::VisualModel);
     }
 
@@ -409,12 +409,37 @@ mod tests {
             profiles: vec![CategoryProfile::new("Landscape", vec![1.0, 0.0, 0.0])],
         };
 
-        // Similarity is 0.5, under the fixed threshold: the closest centroid
+        // Similarity is 0.5, under the default threshold: the closest centroid
         // still cannot claim the photo, so it is handed to the rules.
-        let res = store.classify(&[0.5, 0.866, 0.0]);
+        let res = store.classify(&[0.5, 0.866, 0.0], DEFAULT_CONFIDENCE_THRESHOLD);
         assert_eq!(res.category, "Unsorted");
-        assert!(res.confidence < CONFIDENCE_THRESHOLD);
+        assert!(res.confidence < DEFAULT_CONFIDENCE_THRESHOLD);
         assert_eq!(res.source, ClassificationSource::UnsortedFallback);
+    }
+
+    #[test]
+    fn test_classify_honours_the_given_threshold() {
+        // The bar is the user's setting, so the same embedding has to be
+        // classifiable or not purely by which threshold it is given.
+        let store = ProfileStore {
+            profiles: vec![CategoryProfile::new("Landscape", vec![1.0, 0.0, 0.0])],
+        };
+        // A unit vector at 0.6 to the profile axis, so the similarity is exactly 0.6
+        // rather than a rounded approximation of it.
+        let embedding = [0.6_f32, 0.8, 0.0];
+
+        let lenient = store.classify(&embedding, 0.30);
+        assert_eq!(lenient.category, "Landscape");
+        assert_eq!(lenient.source, ClassificationSource::VisualModel);
+        assert!((lenient.confidence - 0.6).abs() < 1e-5);
+
+        let strict = store.classify(&embedding, 0.80);
+        assert_eq!(strict.category, "Unsorted");
+        assert_eq!(strict.source, ClassificationSource::UnsortedFallback);
+
+        // The rejected match still reports the similarity it found, so the UI
+        // can show the user how close it came.
+        assert!((strict.confidence - 0.6).abs() < 1e-5);
     }
 
     #[test]
@@ -454,10 +479,11 @@ mod tests {
 
     #[test]
     fn test_load_ignores_a_saved_threshold() {
-        // `confidence_threshold` is no longer a field, but existing profiles.json
-        // files still carry one. Serde ignores unknown fields, so those files
-        // have to keep loading and the stale value has to be dropped on the next
-        // save rather than crashing the app on start.
+        // The confidence threshold is a setting in `settings.json`, not profile
+        // data, so a `profiles.json` that still carries one is stale from a
+        // build that predates the split. Serde ignores unknown fields, so those
+        // files have to keep loading and the stale value has to be dropped on
+        // the next save rather than resurfacing as a phantom setting.
         let temp_dir = std::env::temp_dir();
         let file_path = temp_dir.join(format!("test_legacy_profiles_{}.json", std::process::id()));
 
@@ -541,13 +567,20 @@ mod tests {
             false,
             1920,
             1080,
+            DEFAULT_CONFIDENCE_THRESHOLD,
         );
         assert_eq!(res1.category, "Landscape");
         assert_eq!(res1.source, ClassificationSource::VisualModel);
 
         // 2. Visual below threshold or missing, falls back to heuristic
-        let res2 =
-            store.classify_with_heuristics(&[], Path::new("my_screenshot.png"), false, 1920, 1080);
+        let res2 = store.classify_with_heuristics(
+            &[],
+            Path::new("my_screenshot.png"),
+            false,
+            1920,
+            1080,
+            DEFAULT_CONFIDENCE_THRESHOLD,
+        );
         assert_eq!(res2.category, "Screenshots");
         assert_eq!(res2.source, ClassificationSource::Heuristic);
 
@@ -559,13 +592,20 @@ mod tests {
             false,
             800,
             1200,
+            DEFAULT_CONFIDENCE_THRESHOLD,
         );
         assert_eq!(res2b.category, "Documents");
         assert_eq!(res2b.source, ClassificationSource::Heuristic);
 
         // 3. Neither matches -> Unsorted
-        let res3 =
-            store.classify_with_heuristics(&[], Path::new("unknown_file.xyz"), false, 500, 500);
+        let res3 = store.classify_with_heuristics(
+            &[],
+            Path::new("unknown_file.xyz"),
+            false,
+            500,
+            500,
+            DEFAULT_CONFIDENCE_THRESHOLD,
+        );
         assert_eq!(res3.category, "Unsorted");
         assert_eq!(res3.source, ClassificationSource::UnsortedFallback);
     }

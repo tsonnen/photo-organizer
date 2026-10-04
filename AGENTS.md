@@ -77,7 +77,7 @@ CI (`.github/workflows/build-and-test.yaml`) runs these in order, so match it lo
 cargo fmt --check
 cargo clippy -- -D warnings     # warnings are errors; the tree is currently clean
 cargo build
-cargo test                      # 59 tests, ~8s once built
+cargo test                      # 116 tests, ~5s once built
 ```
 
 - One test / one area: `cargo test media::tests::test_scan_preview_jpeg_scales_down_and_keeps_original_size`,
@@ -101,10 +101,15 @@ cargo test                      # 59 tests, ~8s once built
 
 ## State written at runtime
 
-`profiles.json`, `photo_cache.db`, `last_execution_manifest.json` are opened by **relative path**, so they
-land in the process CWD (repo root under `cargo run`), not next to the binary as the README implies. All
-three are gitignored and safe to delete. The SQLite cache is keyed by BLAKE3 of file contents; schema
-self-migrates with `CREATE TABLE IF NOT EXISTS` + best-effort `ALTER TABLE`.
+`profiles.json`, `settings.json`, `photo_cache.db`, `last_execution_manifest.json` are opened by **relative
+path**, so they land in the process CWD (repo root under `cargo run`), not next to the binary as the README
+implies. All four are gitignored and safe to delete. The SQLite cache is keyed by BLAKE3 of file contents;
+schema self-migrates with `CREATE TABLE IF NOT EXISTS` + best-effort `ALTER TABLE`.
+
+`settings.json` is deliberately *not* folded into `profiles.json`: profiles are learned data, settings are
+knobs, and keeping them apart is what stops an older `profiles.json` carrying a stale copy of a value the
+UI owns. `Settings::clamp_threshold` runs on both load and save — serde will happily read `99.0`, which would
+classify every photo as Unsorted.
 
 `Cargo.lock` is committed even though `.gitignore` lists it — the rule is inert for tracked files. Don't
 commit a regenerated lock unless dependencies actually changed.
@@ -112,8 +117,19 @@ commit a regenerated lock unless dependencies actually changed.
 ## Execution flow
 
 `src/main.rs` → `PhotoOrganizerApp::update`: drain the high-res channel, drain scan messages, then
-render toolbar → grid → modal. Actions discovered during drawing are collected into a `ModalActions`/
-local flags and applied *after* the frame, because acting mid-draw would re-enter `open_modal`.
+render toolbar → footer → grid → modals. Actions discovered during drawing are collected into a
+`ModalActions`/`SettingsActions` struct or a local flag and applied *after* the frame, because acting
+mid-draw would re-enter `open_modal`. `rfd`'s pickers block for the same reason, so they are opened once the
+row (or the modal card) has finished laying out, never from inside the button handler. Panel order is
+load-bearing — egui hands `CentralPanel` whatever the top and bottom panels leave, so `render_footer` has to
+be shown *before* `render_grid`.
+
+All three modals share `src/app/chrome.rs` (`show_modal_card`): dimming backdrop, centred card,
+backdrop-click-to-close. Two traps live in there — the card is sized on the ui *around* the window
+`Frame`, not inside it (asking for the full card from within the frame overflows by the frame's margin,
+which is what `the_profile_modal_fits_its_card` guards), and `ui.with_layout(Layout::right_to_left)` does
+**not** advance the parent ui's cursor, so a widget added after one lands past it. The settings modal
+puts its Browse buttons on section headers for that reason.
 
 - **Scan** (`src/scanner.rs`): one spawned thread walks the folder (non-recursive, files only) and runs a
   *dedicated* rayon pool, not the global one — sized `scan_thread_count()` = `(cores / 2).clamp(2, 12)`,
@@ -123,11 +139,32 @@ local flags and applied *after* the frame, because acting mid-draw would re-ente
 - **Decode** (`src/media.rs`): a scan never full-decodes. JPEG goes through `jpeg-decoder`'s DCT scaling;
   every other format full-decodes then rescales. `ScanPreview::original_*` carries the true frame size
   because the heuristics key off resolution.
-- **Classify** (`src/profile_store.rs`): CLIP centroid match above `CONFIDENCE_THRESHOLD` (0.65, a
-  constant, not a setting) → rules (screenshot/document/EXIF) → `Unsorted`. That threshold is the only
-  path into the rules tier, so dropping it would make screenshot/document/EXIF detection unreachable
-  for anyone with a trained profile. `ClassificationSource::Manual` items are never overwritten by
-  `reclassify_all`, the **Re-classify All** button, or a scan `Update`; only their embedding refreshes.
+- **Classify** (`src/profile_store.rs`): CLIP centroid match above the user's confidence threshold
+  (default `settings::DEFAULT_CONFIDENCE_THRESHOLD` = 0.65, slider range 0.30..=0.95) → rules
+  (screenshot/document/EXIF) → `Unsorted`. The threshold is a **parameter**, not a store field: it is
+  passed into `classify`/`classify_with_heuristics`, and reaches the scanner via `ScanConfig`. That
+  threshold is the only path into the rules tier, so dropping it would make screenshot/document/EXIF
+  detection unreachable for anyone with a trained profile. `ClassificationSource::Manual` items are never
+  overwritten by `reclassify_all`, the **Re-classify All** button, or a scan `Update`; only their
+  embedding refreshes.
+- **Settings** (`src/settings.rs`, `src/app/settings_modal.rs`): threshold slider, output folder, model
+  path. Edits are written on change rather than on a Save button. The slider re-classifies when it comes to
+  rest at a value other than `classified_threshold` (kept in step by `reclassify_all`, the only place the
+  grid's classifications are rewritten) — *not* on `changed()` and *not* on `Response::drag_stopped()`.
+  Neither of those works: egui puts a slider where the pointer is on the press frame and on every frame the
+  handle travels, so the release frame carries no change at all and a per-frame test misses the decision;
+  and the arrow keys never start a drag. Per-frame firing would re-run `reclassify_all` ~60×/sec. The same
+  "rest, not movement" rule governs `settings.json`, via `SettingsActions::worth_persisting`: a drag in
+  flight (`threshold_settling`) writes nothing, the commit frame writes. The output-folder and model rows
+  are discrete edits and still go to disk as they happen — a deferred write there would lose a path. Note
+  the live threshold *is* written back to `self.settings` during a drag, or the handle would jump back on
+  every frame; only the file write waits.
+  A threshold moved mid-scan sets `pending_reclassify` instead, which `ScanMessage::Complete` spends: the scan
+  classifies against the threshold it started with, so re-running it there would only fix half the grid.
+  Switching model deletes `photo_cache.db` (embeddings from one checkpoint are meaningless in another's
+  space) but keeps `profiles.json`: the centroids are stale too, but they are the user's work. The chosen
+  path is preferred but not required — the row warns when what resolves isn't what was chosen, because a
+  green dot next to a silently substituted checkpoint reads as confirmation.
 - **Transfer** (`src/execution_engine.rs`, `src/undo_engine.rs`): `plan_batch` → `execute_batch`, `_1`
   collision suffixes instead of overwriting, `.xmp`/`.aae` sidecars travel with the photo. The manifest
   records the whole batch and Undo reverses **only the last batch**.
@@ -143,7 +180,16 @@ Carry the original dimensions on `StagedItem` if you touch this.
 
 - `src/app/layout_tests.rs` uses `egui_kittest` to assert **real** geometry from the production
   renderers. The grid cell deliberately stacks the custom-category input *below* the combo while the modal
-  puts it *inline* — both directions are asserted. Don't "unify" those layouts.
+  puts it *inline* — both directions are asserted. Don't "unify" those layouts. Modal tests filter
+  `placed_widgets` down to what lies inside the card rect, because the backdrop covers the whole screen.
+- The same file drives the settings modal with **real** pointer and key events, which has two traps: egui
+  only hands a widget an `interact_pointer_pos` while a button is held or was released *that* frame, so a
+  press and a release queued into one frame cancel out (hence `press_at`/`drag_to`/`release_at`, one event
+  per frame); and clicking a widget does *not* focus it in egui 0.30, so keyboard tests need kittest's
+  `Node::focus()`, which sends the accesskit Focus action. Those tests commit a threshold change, so they
+  rewrite `settings.json` in the crate root — gitignored, and safe to delete, but expect your threshold to
+  have moved after a test run. The write *policy* is unit-tested in `settings_modal.rs` rather than through
+  the file: a test reading `settings.json` would race the other tests' writes.
 - `categories.rs` has a source-text test (`include_str!`) requiring exactly two call sites of
   `render_custom_category_input` (grid + modal). Adding a third call site fails the build.
 - `scanner.rs` mutates the process-global `PHOTO_ORGANIZER_SCAN_THREADS` in exactly one test on purpose

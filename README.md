@@ -19,6 +19,8 @@ something sensible, and you teach it your own categories as you go.
 - Moves or copies the approved photos into the output folder, and can undo the last run.
 - Caches thumbnails and embeddings in SQLite, so a second scan of the same folder is
   almost instant.
+- Remembers your confidence threshold, output folder and model location in a settings
+  file, so they survive a restart.
 
 It runs entirely on the CPU. There's no server, no API key, and no network calls at
 runtime.
@@ -86,17 +88,31 @@ puts the last batch back where it came from.
 
 Every photo becomes a 512-dimension CLIP embedding. A category is a centroid, and a
 photo is assigned to the category it sits closest to, as long as the similarity clears
-a fixed 0.65. Below that, the rules get a turn: filename keywords and aspect ratios for
-screenshots, keywords like `receipt` or `invoice` for documents, EXIF presence for camera
-photos. Failing all of that, the photo is marked **Unsorted**.
+the confidence threshold. Below that, the rules get a turn: filename keywords and aspect
+ratios for screenshots, keywords like `receipt` or `invoice` for documents, EXIF
+presence for camera photos. Failing all of that, the photo is marked **Unsorted**.
 
-That 0.65 is a constant in the code rather than a setting, because you don't need to
-tune it: the dropdown on any photo ranks every category with its own confidence, so you
-can overrule a weak match on that one photo instead of re-sorting the whole library.
-Worth knowing why the bar exists at all, though — it's what hands a photo that doesn't
-really resemble anything you've trained to the filename and EXIF rules below. Take it
-away and every screenshot gets filed under whatever your centroids happen to lean
-towards, instead of **Screenshots**.
+The threshold defaults to 0.65 and is a slider in **Settings**. Worth knowing why the
+bar exists at all, though — it's what hands a photo that doesn't really resemble
+anything you've trained to the filename and EXIF rules below. Turn it all the way down
+and every screenshot gets filed under whatever your centroids happen to lean towards,
+instead of **Screenshots**. Turn it up if confident-looking matches are landing in the
+wrong category; the default sits where a mediocre match loses to the rules. Moving it
+re-sorts what is already staged, and if a scan is still running that re-sort waits for it
+to finish — so the whole grid always ends up judged by the same bar.
+
+Two settings live alongside it. **Output folder** decides where transfers go, and the
+current destination is shown in the status bar along the bottom of the window, so you
+can always see where **Move** is about to put things. **Model** points at the CLIP
+checkpoint, and is left on auto-detect — `models/next to the binary` — for the normal
+case. Pointing it somewhere else makes sense if you keep the weights on another drive;
+switching models clears the photo cache, because embeddings from one checkpoint mean
+nothing in another's space.
+
+Settings are written to `settings.json` as you change them, so they survive a restart. There is no
+Save button, and nothing waits for one: the only thing held back is a slider drag that is still in
+progress, so the file gets the value you let go at rather than the sixty-odd values the handle
+passed through on the way.
 
 Training a category folds the photo's embedding into the category centroid as a weighted
 average, so a handful of representative examples gets you a usable profile. Adding more

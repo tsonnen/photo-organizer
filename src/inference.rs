@@ -266,7 +266,20 @@ unsafe impl Send for ClipVisionSession {}
 unsafe impl Sync for ClipVisionSession {}
 
 /// Searches for the CLIP visual model weights in multiple standard locations.
-pub fn find_model_path() -> Option<PathBuf> {
+///
+/// `preferred` is the user's explicit choice from
+/// [`crate::settings::Settings::model_path`]. It is tried first and honoured
+/// when it points at a file, so a user who kept the weights somewhere other
+/// than beside the binary does not have to arrange symlinks for the app to
+/// find them. Anything else falls back to the standard locations, which is
+/// what auto-detect means.
+pub fn find_model_path(preferred: Option<&Path>) -> Option<PathBuf> {
+    if let Some(path) = preferred {
+        if !path.as_os_str().is_empty() && path.is_file() {
+            return Some(path.to_path_buf());
+        }
+    }
+
     let candidate_paths = [
         PathBuf::from("models/clip_vision.safetensors"),
         PathBuf::from("models/model.safetensors"),
@@ -288,9 +301,10 @@ pub fn find_model_path() -> Option<PathBuf> {
     None
 }
 
-/// Checks if a valid CLIP visual model is reachable.
-pub fn is_model_available() -> bool {
-    find_model_path().is_some()
+/// Checks if a valid CLIP visual model is reachable, preferring the user's
+/// explicit choice over the standard locations.
+pub fn is_model_available(preferred: Option<&Path>) -> bool {
+    find_model_path(preferred).is_some()
 }
 
 /// Initializes a Candle CLIP vision session from a SafeTensors model file (supporting HF and OpenCLIP).
@@ -441,7 +455,56 @@ mod tests {
 
     #[test]
     fn test_find_model_path_nonexistent() {
-        let _ = is_model_available();
+        let _ = is_model_available(None);
+    }
+
+    #[test]
+    fn a_preferred_model_path_is_used_when_it_exists() {
+        // The point of the setting: a user who keeps the weights somewhere
+        // unusual gets them found without arranging the directory layout the
+        // auto-detect search expects.
+        let dir = std::env::temp_dir().join(format!("test_model_pick_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let weights = dir.join("my_clip.safetensors");
+        std::fs::write(&weights, b"not really weights").expect("write stub model");
+
+        assert_eq!(
+            find_model_path(Some(&weights)).as_deref(),
+            Some(weights.as_path()),
+            "an existing preferred file should win over the search"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_preferred_model_path_falls_back_to_the_search() {
+        // Auto-detect has to keep working for a user who points the setting at
+        // a file that has since been moved or deleted: falling back is better
+        // than reporting the model missing when it is sitting in `models/`.
+        let missing = Path::new("/nonexistent/preferred_clip.safetensors");
+
+        assert_eq!(
+            find_model_path(Some(missing)),
+            find_model_path(None),
+            "a missing preferred file should behave exactly like auto-detect"
+        );
+    }
+
+    #[test]
+    fn a_directory_is_not_a_model() {
+        // Pointing the setting at a folder is an easy mistake; it must not be
+        // accepted as a checkpoint and then fail to load with a confusing error.
+        let dir = std::env::temp_dir().join(format!("test_model_dir_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+
+        assert_eq!(
+            find_model_path(Some(&dir)),
+            find_model_path(None),
+            "a directory should not be accepted as a model file"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -452,7 +515,7 @@ mod tests {
 
     #[test]
     fn test_init_clip_session_real_file() {
-        if let Some(path) = find_model_path() {
+        if let Some(path) = find_model_path(None) {
             // Skip if the file is a Git LFS pointer (tiny stub, not the real model).
             // A real SafeTensors model is at least several MB; LFS pointers are ~130 bytes.
             let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);

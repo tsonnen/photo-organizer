@@ -6,8 +6,9 @@
 
 use super::PhotoOrganizerApp;
 use crate::app::models::StagedItem;
+use crate::inference::find_model_path;
 use crate::profile_store::ClassificationSource;
-use crate::scanner::{scan_folder, ProcessedPayload, ScanMessage};
+use crate::scanner::{scan_folder, ProcessedPayload, ScanConfig, ScanMessage};
 use eframe::egui;
 use std::path::PathBuf;
 
@@ -18,9 +19,23 @@ impl PhotoOrganizerApp {
         self.items.clear();
         self.status_message = None;
         self.is_processing = true;
+        // This scan classifies against the threshold in force now, so the grid
+        // starts out agreeing with the slider. That also discharges whatever a
+        // held re-classification was owed: it was owed for the photos just
+        // discarded, and there is nothing left half-sorted for it to put right.
+        self.classified_threshold = self.settings.confidence_threshold;
+        self.pending_reclassify = false;
         let tx = self.tx.clone();
         let profiles = self.profiles.clone();
-        scan_folder(folder, profiles, tx, ctx);
+
+        // Resolved here, once, rather than inside the scan: every worker would
+        // otherwise run the same model search to reach the same answer.
+        let config = ScanConfig {
+            threshold: self.settings.confidence_threshold,
+            model_path: find_model_path(self.settings.model_path.as_deref()),
+        };
+
+        scan_folder(folder, profiles, config, tx, ctx);
     }
 
     /// Applies every scan message queued since the last frame.
@@ -47,7 +62,18 @@ impl PhotoOrganizerApp {
                     source,
                     embedding,
                 ),
-                ScanMessage::Complete => self.is_processing = false,
+                ScanMessage::Complete => {
+                    self.is_processing = false;
+                    // A threshold moved while this scan was running leaves the
+                    // grid sorted against two different bars: the photos that
+                    // arrived after the change were classified by the scan
+                    // against the threshold it started with, and the ones
+                    // before it by the new one. Settle on the value the user
+                    // can see now.
+                    if std::mem::take(&mut self.pending_reclassify) {
+                        self.reclassify_all();
+                    }
+                }
             }
         }
     }
