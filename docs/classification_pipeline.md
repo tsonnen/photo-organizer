@@ -97,6 +97,10 @@ classifies against the threshold it started with, so the photos already staged a
 still arriving would sit either side of the new value; the request is held in
 `pending_reclassify` and spent when `ScanMessage::Complete` arrives.
 
+`settings.json` follows the same rule — a drag in flight writes nothing, the commit frame
+writes — so the file records the value the user chose rather than every value the handle
+passed through on the way there.
+
 `ProfileStore` does not own the threshold. Profiles are learned data and the threshold is
 a setting, so keeping them apart is what stops a `profiles.json` written by an older
 build from carrying a stale copy of a knob the UI owns.

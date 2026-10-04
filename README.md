@@ -109,7 +109,10 @@ case. Pointing it somewhere else makes sense if you keep the weights on another 
 switching models clears the photo cache, because embeddings from one checkpoint mean
 nothing in another's space.
 
-Settings are written to `settings.json` as you change them, so they survive a restart.
+Settings are written to `settings.json` as you change them, so they survive a restart. There is no
+Save button, and nothing waits for one: the only thing held back is a slider drag that is still in
+progress, so the file gets the value you let go at rather than the sixty-odd values the handle
+passed through on the way.
 
 Training a category folds the photo's embedding into the category centroid as a weighted
 average, so a handful of representative examples gets you a usable profile. Adding more

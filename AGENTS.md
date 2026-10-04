@@ -77,7 +77,7 @@ CI (`.github/workflows/build-and-test.yaml`) runs these in order, so match it lo
 cargo fmt --check
 cargo clippy -- -D warnings     # warnings are errors; the tree is currently clean
 cargo build
-cargo test                      # 112 tests, ~5s once built
+cargo test                      # 116 tests, ~5s once built
 ```
 
 - One test / one area: `cargo test media::tests::test_scan_preview_jpeg_scales_down_and_keeps_original_size`,
@@ -153,8 +153,13 @@ puts its Browse buttons on section headers for that reason.
   grid's classifications are rewritten) — *not* on `changed()` and *not* on `Response::drag_stopped()`.
   Neither of those works: egui puts a slider where the pointer is on the press frame and on every frame the
   handle travels, so the release frame carries no change at all and a per-frame test misses the decision;
-  and the arrow keys never start a drag. Per-frame firing would re-run `reclassify_all` ~60×/sec. A
-  threshold moved mid-scan sets `pending_reclassify` instead, which `ScanMessage::Complete` spends: the scan
+  and the arrow keys never start a drag. Per-frame firing would re-run `reclassify_all` ~60×/sec. The same
+  "rest, not movement" rule governs `settings.json`, via `SettingsActions::worth_persisting`: a drag in
+  flight (`threshold_settling`) writes nothing, the commit frame writes. The output-folder and model rows
+  are discrete edits and still go to disk as they happen — a deferred write there would lose a path. Note
+  the live threshold *is* written back to `self.settings` during a drag, or the handle would jump back on
+  every frame; only the file write waits.
+  A threshold moved mid-scan sets `pending_reclassify` instead, which `ScanMessage::Complete` spends: the scan
   classifies against the threshold it started with, so re-running it there would only fix half the grid.
   Switching model deletes `photo_cache.db` (embeddings from one checkpoint are meaningless in another's
   space) but keeps `profiles.json`: the centroids are stale too, but they are the user's work. The chosen
@@ -181,7 +186,10 @@ Carry the original dimensions on `StagedItem` if you touch this.
   only hands a widget an `interact_pointer_pos` while a button is held or was released *that* frame, so a
   press and a release queued into one frame cancel out (hence `press_at`/`drag_to`/`release_at`, one event
   per frame); and clicking a widget does *not* focus it in egui 0.30, so keyboard tests need kittest's
-  `Node::focus()`, which sends the accesskit Focus action.
+  `Node::focus()`, which sends the accesskit Focus action. Those tests commit a threshold change, so they
+  rewrite `settings.json` in the crate root — gitignored, and safe to delete, but expect your threshold to
+  have moved after a test run. The write *policy* is unit-tested in `settings_modal.rs` rather than through
+  the file: a test reading `settings.json` would race the other tests' writes.
 - `categories.rs` has a source-text test (`include_str!`) requiring exactly two call sites of
   `render_custom_category_input` (grid + modal). Adding a third call site fails the build.
 - `scanner.rs` mutates the process-global `PHOTO_ORGANIZER_SCAN_THREADS` in exactly one test on purpose

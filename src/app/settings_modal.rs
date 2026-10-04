@@ -23,6 +23,9 @@ struct SettingsActions {
     close: bool,
     /// The confidence threshold moved, so the staged photos need re-classifying.
     threshold_changed: bool,
+    /// The threshold slider has the handle and has not let go of it, so the
+    /// value on screen is a value in progress rather than a decision.
+    threshold_settling: bool,
     /// The user picked a different checkpoint.
     model_changed: bool,
     /// A Browse button was pressed. Carried out once the card has finished
@@ -30,6 +33,22 @@ struct SettingsActions {
     /// inside a draw would stall egui mid-layout.
     pick_output: bool,
     pick_model: bool,
+}
+
+impl SettingsActions {
+    /// Whether this frame is worth writing to `settings.json`.
+    ///
+    /// A drag moves the threshold on every frame the handle travels, and the
+    /// file only wants the value it came to rest on — writing it live would put
+    /// dozens of rewrites a second on the disk to record the intermediate values
+    /// nobody will read, and on a release frame the value is no longer moving,
+    /// so "changed this frame" alone would miss the write that matters.
+    /// `threshold_changed` is that frame: a threshold that has settled at a new
+    /// value. The other two rows are discrete edits — a keystroke, a picker
+    /// result — so they reach the disk as they happen.
+    fn worth_persisting(&self, settings_changed: bool) -> bool {
+        self.threshold_changed || (settings_changed && !self.threshold_settling)
+    }
 }
 
 /// Green when a checkpoint is reachable, the app's warning orange when it is
@@ -65,7 +84,9 @@ impl PhotoOrganizerApp {
     /// Every edit is written to `settings.json` as it is made, rather than on
     /// a Save button: the settings are independent of one another, so there is
     /// no set of edits to commit together, and a modal that silently discards
-    /// them on backdrop-click would be a trap.
+    /// them on backdrop-click would be a trap. "As it is made" means as it is
+    /// *committed*, though — see [`SettingsActions::worth_persisting`] for why a
+    /// drag in flight writes nothing.
     pub(super) fn render_settings_modal(&mut self, ctx: &egui::Context) {
         if !self.show_settings_modal {
             return;
@@ -175,6 +196,7 @@ impl PhotoOrganizerApp {
         );
 
         let still_dragging = response.dragged() || response.drag_started();
+        actions.threshold_settling = still_dragging;
         if !still_dragging && settings.confidence_threshold != classified_threshold {
             actions.threshold_changed = true;
         }
@@ -309,7 +331,7 @@ impl PhotoOrganizerApp {
                 crate::inference::is_model_available(self.settings.model_path.as_deref());
         }
 
-        if settings_changed {
+        if actions.worth_persisting(settings_changed) {
             self.save_settings();
         }
 
@@ -368,7 +390,7 @@ impl PhotoOrganizerApp {
 
 #[cfg(test)]
 mod tests {
-    use super::chosen_model_in_use;
+    use super::{chosen_model_in_use, SettingsActions};
     use std::path::Path;
 
     const CHOSEN: &str = "/models/clip_vision.safetensors";
@@ -402,5 +424,53 @@ mod tests {
     fn nothing_is_chosen_when_the_user_left_it_on_auto_detect() {
         assert!(!chosen_model_in_use(None, Some(Path::new(FALLBACK))));
         assert!(!chosen_model_in_use(None, None));
+    }
+
+    #[test]
+    fn a_drag_in_flight_is_not_worth_a_write() {
+        // A drag crosses the slider in ~60 frames, each with a different value.
+        // Writing them all would put dozens of rewrites of `settings.json` on
+        // the disk to record values that were never the user's decision.
+        let actions = SettingsActions {
+            threshold_settling: true,
+            ..Default::default()
+        };
+
+        assert!(
+            !actions.worth_persisting(true),
+            "the threshold moving under the pointer is not an edit to record"
+        );
+    }
+
+    #[test]
+    fn the_frame_a_threshold_comes_to_rest_is_worth_a_write() {
+        // The write has to happen here rather than on the frames that moved it:
+        // by the release frame the value is no longer changing, so a "changed
+        // this frame" test would find nothing left to write.
+        let actions = SettingsActions {
+            threshold_changed: true,
+            ..Default::default()
+        };
+
+        assert!(
+            actions.worth_persisting(false),
+            "the settled value is the one that belongs on disk"
+        );
+    }
+
+    #[test]
+    fn the_other_two_rows_are_written_as_they_happen() {
+        // Typing a path or picking a folder is discrete, and the modal's promise
+        // is that edits are not held back — a deferred write would hand the
+        // user a path they typed and then lost.
+        assert!(
+            SettingsActions::default().worth_persisting(true),
+            "a keystroke or a picker result should not wait for anything"
+        );
+    }
+
+    #[test]
+    fn a_frame_that_changed_nothing_is_not_worth_a_write() {
+        assert!(!SettingsActions::default().worth_persisting(false));
     }
 }
