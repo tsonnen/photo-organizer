@@ -1,5 +1,6 @@
 mod app;
 mod category_name;
+mod classification;
 mod db;
 mod inference;
 mod media;
