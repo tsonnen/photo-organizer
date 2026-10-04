@@ -128,20 +128,32 @@ impl PhotoOrganizerApp {
 
     /// Writes the journal, and takes a stale one away if the write fails.
     ///
-    /// The journal is a single slot that undo reads as "the last batch", so leaving
-    /// the previous one in place would make Undo reverse an older batch while the
-    /// user is looking at the newest. The alternative is a confusing undo; this is
-    /// a visible one.
+    /// The journal is a single slot that undo reads as "the last batch", so
+    /// leaving the previous one in place would make Undo reverse an older batch
+    /// while the user is looking at the newest. The alternative is a confusing
+    /// undo; this is a visible one.
+    ///
+    /// A batch that landed nothing is not written at all, for the same reason
+    /// from the other side: there is no new batch to record, and overwriting
+    /// would throw away the only record of the last one that did move anything.
+    /// The note says which batch Undo is still holding, so it is not a surprise.
     fn persist_journal(journal: &TransferJournal) -> Option<String> {
-        let path = Path::new(LAST_JOURNAL);
-        match journal.save_to(path) {
+        Self::persist_journal_to(journal, Path::new(LAST_JOURNAL))
+    }
+
+    /// [`PhotoOrganizerApp::persist_journal`] against a given path, so the policy
+    /// can be tested without writing into the process working directory — the
+    /// reason the settings write policy is unit-tested rather than read back off
+    /// the file too.
+    fn persist_journal_to(journal: &TransferJournal, path: &Path) -> Option<String> {
+        if journal.completed_ops.is_empty() {
+            return Some("Undo still refers to the batch before this one.".to_string());
+        }
+        match journal.save_as_last_batch(path) {
             Ok(()) => None,
-            Err(e) => {
-                let _ = std::fs::remove_file(path);
-                Some(format!(
-                    "The undo journal could not be written ({e}), so this batch cannot be undone."
-                ))
-            }
+            Err(e) => Some(format!(
+                "The undo journal could not be written ({e}), so this batch cannot be undone."
+            )),
         }
     }
 
@@ -200,5 +212,131 @@ fn first_failure(journal: &TransferJournal) -> String {
     match journal.failed_ops.first() {
         Some(failure) => failure.describe(),
         None => "Nothing failed.".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transfer::FileOperation;
+
+    /// A journal with nothing in it, which is what a batch that landed no
+    /// photos produces.
+    fn empty_journal() -> TransferJournal {
+        TransferJournal {
+            mode: Some(TransferMode::Copy),
+            ..Default::default()
+        }
+    }
+
+    /// A journal with one landed photo, so it is a batch worth recording.
+    fn journal_with_one_photo() -> TransferJournal {
+        let mut journal = empty_journal();
+        journal.completed_ops.push(FileOperation {
+            source: Path::new("/photos/photo.jpg").into(),
+            destination: Path::new("/library/Nature/2024/05/photo.jpg").into(),
+            filed: None,
+            sidecars: Vec::new(),
+        });
+        journal
+    }
+
+    /// Undo reads whatever is at `LAST_JOURNAL` as "the last batch", so the slot
+    /// is worth more than the file it holds: a batch that landed nothing must not
+    /// overwrite the record of the batch that did, or the photos the user moved
+    /// an hour ago become unundoable because an unrelated transfer failed.
+    ///
+    /// The note is not decoration either — without it, "Undo still refers to the
+    /// batch before this one" is a surprise rather than an explanation.
+    #[test]
+    fn test_a_batch_that_landed_nothing_keeps_the_previous_journal() {
+        let dir = std::env::temp_dir().join(format!("app_journal_empty_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(crate::transfer::LAST_JOURNAL);
+
+        // The earlier batch's journal, as `execute_transfer` would have left it.
+        journal_with_one_photo().save_to(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let note = PhotoOrganizerApp::persist_journal_to(&empty_journal(), &path)
+            .expect("the user is told which batch Undo still holds");
+        assert!(
+            note.contains("batch before"),
+            "the note has to say what Undo now refers to: {note}"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "the previous batch's journal survives a batch that landed nothing"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other half of the same policy: a batch that did land something is
+    /// recorded, and a write that fails says so rather than passing for success.
+    #[test]
+    fn test_a_batch_that_landed_photos_is_recorded() {
+        let dir = std::env::temp_dir().join(format!("app_journal_written_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(crate::transfer::LAST_JOURNAL);
+
+        assert_eq!(
+            PhotoOrganizerApp::persist_journal_to(&journal_with_one_photo(), &path),
+            None
+        );
+        let written = TransferJournal::load_from(&path).expect("the journal is readable");
+        assert_eq!(written.completed_ops.len(), 1);
+
+        // A write that cannot land is reported, and the stale journal goes with
+        // it, because a journal describing an older batch is worse than none. A
+        // directory where the staging file goes is the one failure that leaves
+        // the folder writable, so the removal is observable rather than refused
+        // for the same reason as the write.
+        std::fs::create_dir_all(path.with_extension("json.staging")).unwrap();
+        let note = PhotoOrganizerApp::persist_journal_to(&journal_with_one_photo(), &path)
+            .expect("a failed write is not silent");
+        assert!(note.contains("cannot be undone"), "{note}");
+        assert!(
+            !path.exists(),
+            "the stale journal is taken with the failure"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The status line is the only feedback a transfer gives, and it is built
+    /// from the journal's counts. A caveat now shares `failed_ops` with a real
+    /// failure, so "N of M" must stay true when a photo landed with a warning on
+    /// it: the counts come from the two lists independently.
+    #[test]
+    fn test_a_warning_counts_as_a_landed_photo_that_also_failed() {
+        let mut journal = journal_with_one_photo();
+        journal.failed_ops.push(crate::transfer::FailedOp {
+            operation: FileOperation {
+                source: Path::new("/photos/photo.jpg").into(),
+                destination: Path::new("/photos/photo.jpg").into(),
+                filed: None,
+                sidecars: Vec::new(),
+            },
+            error: "the original could not be removed; that file is now in both places".to_string(),
+        });
+
+        let message = format!(
+            "Moved {} of {} photo(s). {}",
+            journal.completed_ops.len(),
+            1,
+            first_failure(&journal)
+        );
+        assert!(
+            message.starts_with("Moved 1 of 1 photo(s)."),
+            "the photo landed, so it is counted as landed: {message}"
+        );
+        assert!(
+            message.contains("both places"),
+            "and the user is still told what happened to it: {message}"
+        );
     }
 }

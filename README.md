@@ -102,7 +102,15 @@ emptied, stopping at the output folder itself, which is yours.
 
 Every transfer says how many photos landed and what failed; the ones that failed stay
 in the grid so a retry is one click away. Undo reports the same way, and it can only
-undo the last batch — the journal it reads is rewritten by the next transfer.
+undo the last batch — the journal it reads is rewritten by the next transfer that
+lands anything, and a transfer that landed nothing leaves the previous batch's Undo
+intact rather than replacing it.
+
+One case is worth knowing about because the files are in both places afterwards: if
+the original cannot be deleted — a read-only source folder, or a read-only file on
+Windows — the photo is still filed, and the status line says so rather than calling
+the transfer a failure. Undo can still reverse the filed copy; what it cannot do is
+guess which of the two you want to keep.
 
 The category is always exactly one folder. Slashes, backslashes and the characters
 Windows reserves are replaced with `-`, so a category named `Vacation / Japan` files

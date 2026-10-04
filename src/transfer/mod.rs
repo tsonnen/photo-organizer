@@ -119,10 +119,11 @@ pub struct FileOperation {
     pub sidecars: Vec<Sidecar>,
 }
 
-/// A planned file that did not make it, and why.
+/// A file the user has to know did not go the way they asked, and why.
 ///
 /// At file granularity rather than photo granularity, because a sidecar can fail
-/// on its own while the photo beside it has already moved.
+/// on its own while the photo beside it has already moved, and because a file
+/// can land and still need saying something about (see [`Placed::warning`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FailedOp {
     pub operation: FileOperation,
@@ -130,6 +131,24 @@ pub struct FailedOp {
 }
 
 impl FailedOp {
+    /// A report about `path`, named by the file itself so the status line can
+    /// say which one it was.
+    ///
+    /// The operation carries no paths of its own: this is a note about one file,
+    /// not a reversal waiting to happen, and putting the photo's own source and
+    /// destination in it would suggest it was.
+    fn at(path: &Path, error: String) -> Self {
+        Self {
+            operation: FileOperation {
+                source: path.to_path_buf(),
+                destination: path.to_path_buf(),
+                filed: None,
+                sidecars: Vec::new(),
+            },
+            error,
+        }
+    }
+
     /// One clause naming the file and what went wrong, for the status line.
     pub fn describe(&self) -> String {
         format!(
@@ -190,6 +209,20 @@ impl TransferJournal {
             // Never leave the half-written staging file next to the real one:
             // the next attempt would read as a stale journal to whoever finds it.
             let _ = fs::remove_file(&staging);
+        }
+        result
+    }
+
+    /// [`TransferJournal::save_to`], with the single-slot rule applied.
+    ///
+    /// Undo reads whatever is at `path` as "the last batch", so a journal that
+    /// cannot be written must not leave the previous one there to be read as
+    /// that: it goes, and the batch is reported as one that cannot be undone.
+    /// Either way the failure is returned.
+    pub fn save_as_last_batch(&self, path: &Path) -> Result<()> {
+        let result = self.save_to(path);
+        if result.is_err() {
+            let _ = fs::remove_file(path);
         }
         result
     }
@@ -255,7 +288,9 @@ pub enum UndoStatus {
     /// Something already occupies the path the file would go back to, and undo
     /// does not overwrite.
     SkippedOccupied(PathBuf),
-    /// The reversal failed. Nothing was removed.
+    /// The reversal hit something the user has to deal with. Nothing was lost:
+    /// the message says what was left behind, and the file is still where it
+    /// was found.
     Failed(PathBuf, String),
 }
 
@@ -315,6 +350,8 @@ impl ExecutionEngine {
     pub fn plan_batch(&self, inputs: &[RawPhotoInput]) -> Vec<FileOperation> {
         let mut planned_ops = Vec::new();
         let mut reserved_paths: HashSet<PathBuf> = HashSet::new();
+        // Batch-wide, not per photo: see `discover_sidecars`.
+        let mut claimed_sidecars: HashSet<PathBuf> = HashSet::new();
 
         for input in inputs {
             // Exactly three levels, because `subject` is a `CategoryName` and so
@@ -339,11 +376,18 @@ impl ExecutionEngine {
                 resolve_destination(&target_dir, stem, ext, &reserved_paths);
             reserved_paths.insert(destination.clone());
 
+            let sidecars = discover_sidecars(
+                &input.source_path,
+                &target_dir,
+                &final_stem,
+                &mut claimed_sidecars,
+            );
+
             planned_ops.push(FileOperation {
                 source: input.source_path.clone(),
                 destination,
                 filed: None,
-                sidecars: discover_sidecars(&input.source_path, &target_dir, &final_stem),
+                sidecars,
             });
         }
 
@@ -364,16 +408,15 @@ impl ExecutionEngine {
 
         for (idx, op) in operations.iter().enumerate() {
             progress(idx + 1, total, op);
-            let mut sidecar_failures = Vec::new();
-            let outcome = self.execute_single(op, &mut sidecar_failures);
-            journal.failed_ops.append(&mut sidecar_failures);
-            match outcome {
+            let mut failures = Vec::new();
+            match self.execute_single(op, &mut failures) {
                 Ok(filed) => journal.completed_ops.push(filed),
                 Err(e) => journal.failed_ops.push(FailedOp {
                     operation: op.clone(),
                     error: e.to_string(),
                 }),
             }
+            journal.failed_ops.append(&mut failures);
         }
         journal
     }
@@ -381,38 +424,40 @@ impl ExecutionEngine {
     /// Transfers one photo and its sidecars, or reports why it did not happen.
     ///
     /// A sidecar that fails is recorded separately and does not fail the photo,
-    /// which is already in place by then.
+    /// which is already in place by then. Neither does a file that landed with a
+    /// warning: it goes into `failures` as a report, and the operation itself is
+    /// still journalled so undo can reverse it.
     fn execute_single(
         &self,
         op: &FileOperation,
-        sidecar_failures: &mut Vec<FailedOp>,
+        failures: &mut Vec<FailedOp>,
     ) -> Result<FileOperation> {
-        let filed = place(&op.source, &op.destination, self.mode)?;
+        let placed = place(&op.source, &op.destination, self.mode)?;
+        if let Some(warning) = placed.warning {
+            failures.push(FailedOp::at(&op.source, warning));
+        }
         let mut sidecars = Vec::with_capacity(op.sidecars.len());
 
         for sidecar in &op.sidecars {
             match place(&sidecar.source, &sidecar.destination, self.mode) {
-                Ok(filed) => sidecars.push(Sidecar {
-                    source: sidecar.source.clone(),
-                    destination: sidecar.destination.clone(),
-                    filed: Some(filed),
-                }),
-                Err(e) => sidecar_failures.push(FailedOp {
-                    operation: FileOperation {
+                Ok(placed) => {
+                    if let Some(warning) = placed.warning {
+                        failures.push(FailedOp::at(&sidecar.source, format!("sidecar: {warning}")));
+                    }
+                    sidecars.push(Sidecar {
                         source: sidecar.source.clone(),
                         destination: sidecar.destination.clone(),
-                        filed: None,
-                        sidecars: Vec::new(),
-                    },
-                    error: format!("sidecar: {e}"),
-                }),
+                        filed: Some(placed.fingerprint),
+                    })
+                }
+                Err(e) => failures.push(FailedOp::at(&sidecar.source, format!("sidecar: {e}"))),
             }
         }
 
         Ok(FileOperation {
             source: op.source.clone(),
             destination: op.destination.clone(),
-            filed: Some(filed),
+            filed: Some(placed.fingerprint),
             sidecars,
         })
     }
@@ -427,6 +472,21 @@ pub struct RawPhotoInput {
     pub month: u32,
 }
 
+/// A file that is safely at its destination, plus anything the user has to be
+/// told about the way it got there.
+#[derive(Debug)]
+struct Placed {
+    /// Of the file at the destination: what the journal records, and what undo
+    /// later compares against.
+    fingerprint: Fingerprint,
+    /// The transfer happened; the step that should have followed it did not. A
+    /// cross-device Move whose original could not be unlinked leaves the file in
+    /// both places, which is not a failed transfer — the copy is there, it is
+    /// fingerprinted, and undo can still reverse it — but it is not the state the
+    /// user asked for either, so it is reported rather than folded into `Ok`.
+    warning: Option<String>,
+}
+
 /// The one rule for putting a file at `to`, called by both directions: forward
 /// as `place(source, destination, mode)`, undo as
 /// `place(destination, source, mode)`.
@@ -434,7 +494,7 @@ pub struct RawPhotoInput {
 /// Refuses to overwrite, never removes `from` until the copy at `to` is verified
 /// complete, and leaves nothing half-written behind. Returns `to`'s fingerprint,
 /// which is what the journal records.
-fn place(from: &Path, to: &Path, mode: TransferMode) -> Result<Fingerprint> {
+fn place(from: &Path, to: &Path, mode: TransferMode) -> Result<Placed> {
     if !from.exists() {
         return Err(anyhow!("{} does not exist", from.display()));
     }
@@ -448,28 +508,39 @@ fn place(from: &Path, to: &Path, mode: TransferMode) -> Result<Fingerprint> {
         fs::create_dir_all(parent)?;
     }
 
-    match mode {
-        TransferMode::Copy => copy_verified(from, to)?,
+    let warning = match mode {
+        TransferMode::Copy => {
+            copy_verified(from, to)?;
+            None
+        }
         TransferMode::Move => {
             // A rename within one filesystem cannot truncate, so it is
             // preferred. It fails across devices, which is the common case here.
             if fs::rename(from, to).is_err() {
                 copy_verified(from, to)?;
                 // Verified complete before this runs, so the original can be left
-                // behind but never lost. A failure here means the file is now in
-                // both places, which the message has to say.
-                fs::remove_file(from).map_err(|e| {
-                    anyhow!(
-                        "{} was copied but the original at {} could not be removed: {e}",
+                // behind but never lost. A failure here leaves the file in both
+                // places: recorded as a warning on a transfer that did happen,
+                // because dropping it would put a copy in the output folder that
+                // no journal mentions and no undo can reach.
+                fs::remove_file(from).err().map(|e| {
+                    format!(
+                        "{} is a copy, and the original at {} could not be removed: {e}; \
+                         that file is now in both places",
                         to.display(),
                         from.display()
                     )
-                })?;
+                })
+            } else {
+                None
             }
         }
-    }
+    };
 
-    Fingerprint::read(to)
+    Ok(Placed {
+        fingerprint: Fingerprint::read(to)?,
+        warning,
+    })
 }
 
 /// Copies `from` to `to` and refuses to leave the copy behind unless it is
@@ -479,7 +550,13 @@ fn place(from: &Path, to: &Path, mode: TransferMode) -> Result<Fingerprint> {
 /// full disk, a cable pulled out — is caught without re-reading either file.
 fn copy_verified(from: &Path, to: &Path) -> Result<()> {
     let written = fs::copy(from, to)?;
-    let expected = fs::metadata(from)?.len();
+    // A source that cannot be measured after it was copied is a source that has
+    // gone or become unreadable; the copy it left is not a usable file, and the
+    // same "nothing else is at `to`" invariant as below makes removing it safe.
+    let expected = fs::metadata(from).map(|m| m.len()).map_err(|e| {
+        let _ = fs::remove_file(to);
+        anyhow!("reading {}: {e}", from.display())
+    })?;
     let landed = fs::metadata(to).map(|m| m.len()).unwrap_or(u64::MAX);
     reject_short_copy(from, to, written, landed, expected)
 }
@@ -567,10 +644,19 @@ fn undo_file(
                 return UndoStatus::SkippedOccupied(from.to_path_buf());
             }
             match place(from, to, TransferMode::Move) {
-                Ok(_) => {
-                    prune_empty_dirs(from, output_dir);
-                    UndoStatus::Restored(to.to_path_buf())
-                }
+                // A restored photo that carries a warning is in both places, so
+                // reporting a plain `Restored` would leave the user to find the
+                // leftover copy themselves.
+                Ok(placed) => match placed.warning {
+                    Some(warning) => {
+                        prune_empty_dirs(from, output_dir);
+                        UndoStatus::Failed(from.to_path_buf(), warning)
+                    }
+                    None => {
+                        prune_empty_dirs(from, output_dir);
+                        UndoStatus::Restored(to.to_path_buf())
+                    }
+                },
                 // `place` never removes `from` until the copy at `to` is verified
                 // complete, so a failure leaves the file exactly as it was.
                 Err(e) => UndoStatus::Failed(from.to_path_buf(), e.to_string()),
@@ -586,6 +672,14 @@ fn undo_file(
 /// the output folder itself: it never walks above `output_dir`, and only removes
 /// directories with nothing in them.
 fn prune_empty_dirs(from: &Path, output_dir: &Path) {
+    // Every path starts with an empty one — `Path::starts_with("")` is true for
+    // anything — so without this the bound below is no bound at all and the walk
+    // climbs to the filesystem root. A journal can only get an empty
+    // `output_dir` by being written by something other than this app, but the
+    // cost of finding out is the user's empty directories.
+    if output_dir.as_os_str().is_empty() {
+        return;
+    }
     let Some(mut dir) = from.parent().map(Path::to_path_buf) else {
         return;
     };
@@ -638,20 +732,33 @@ fn resolve_destination(
 
 /// Finds the sidecars that travel with `source`, each with its direction in
 /// field names rather than as a tuple.
-fn discover_sidecars(source: &Path, target_dir: &Path, final_stem: &str) -> Vec<Sidecar> {
+///
+/// `claimed` is the whole batch's, not this photo's: one sidecar file can only
+/// travel once, and two photos can want the same one. `photo.jpg` and
+/// `photo.jpeg` beside each other both resolve to `photo.xmp`, and their
+/// destinations collide too, since the `_1` suffix only ever lands on the photo
+/// itself. Letting both claim it made the second attempt fail with "does not
+/// exist" (or "refusing to overwrite", for a Copy) and the status line report a
+/// sidecar as broken when it had in fact travelled. So the first photo to claim
+/// a sidecar gets it, and the rest get none.
+///
+/// The destinations need no collision check: they are built from the photo's own
+/// stem, which `resolve_destination` already made unique among the photos.
+fn discover_sidecars(
+    source: &Path,
+    target_dir: &Path,
+    final_stem: &str,
+    claimed: &mut HashSet<PathBuf>,
+) -> Vec<Sidecar> {
     // Both cases are listed because a `.XMP` beside a `.jpg` is a real thing on a
     // case-sensitive filesystem. On a case-insensitive one (macOS, Windows) both
-    // lookups find the *same* file, hence the dedupe: without it half these
-    // sidecars transfer twice and the second attempt reads as a failure.
-    //
-    // The destinations need no collision check: they are built from the photo's
-    // own stem, which `resolve_destination` already made unique.
-    let mut seen_sources: HashSet<PathBuf> = HashSet::new();
+    // lookups find the *same* file, and the batch-wide claim set is what dedupes
+    // them, along with the second pair.
     let mut sidecars = Vec::new();
 
     for sidecar_ext in ["xmp", "XMP", "aae", "AAE"] {
         let sidecar_src = source.with_extension(sidecar_ext);
-        if sidecar_src.exists() && seen_sources.insert(sidecar_src.clone()) {
+        if sidecar_src.exists() && claimed.insert(sidecar_src.clone()) {
             sidecars.push(Sidecar {
                 source: sidecar_src,
                 destination: target_dir.join(format!("{}.{}", final_stem, sidecar_ext)),
@@ -1078,6 +1185,37 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// `save_as_last_batch` is the app's policy: the journal is one slot that
+    /// undo reads as "the last batch", so a journal describing a newer batch
+    /// must not sit next to an older one waiting to be read as it.
+    ///
+    /// A failed write therefore takes the stale journal with it, and says so by
+    /// returning the error rather than leaving a usable-looking file behind.
+    #[test]
+    fn test_a_failed_journal_write_removes_the_stale_journal() {
+        let root = temp_root("journal_stale_removed");
+        let path = root.join(LAST_JOURNAL);
+        TransferJournal::for_batch(TransferMode::Move, root.clone())
+            .save_to(&path)
+            .unwrap();
+        assert!(path.exists(), "the earlier batch left a journal");
+
+        // A directory where the staging file goes, which is the one write in
+        // `save_to` that can fail while the directory itself stays writable — so
+        // the removal of the stale journal can also be observed.
+        fs::create_dir_all(path.with_extension("json.staging")).unwrap();
+
+        let journal = TransferJournal::for_batch(TransferMode::Copy, root.clone());
+        assert!(journal.save_as_last_batch(&path).is_err());
+        assert!(
+            !path.exists(),
+            "a journal describing the previous batch must not survive a failed write, \
+             or undo reverses it while the user is looking at this one"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
     // --- Planning ------------------------------------------------------------
 
     #[test]
@@ -1217,6 +1355,59 @@ mod tests {
         );
     }
 
+    /// Two photos whose stems match want the same sidecar file and the same
+    /// sidecar destination, because the `_1` suffix only ever lands on the photo
+    /// itself. `photo.jpg` and `photo.jpeg` beside each other is the realistic
+    /// version.
+    ///
+    /// Before the batch-wide claim, both planned `photo.xmp` as their sidecar
+    /// and the second attempt to place it failed — "does not exist" for a Move,
+    /// having been carried off by the first, or "refusing to overwrite" for a
+    /// Copy. The status line then named a sidecar as broken when it had in fact
+    /// travelled with the first photo.
+    #[test]
+    fn test_one_sidecar_travels_with_one_photo_and_both_still_land() {
+        for mode in [TransferMode::Move, TransferMode::Copy] {
+            let root = temp_root(&format!("shared_sidecar_{mode:?}").to_lowercase());
+            let src = root.join("photos");
+            let out = root.join("library");
+            fs::create_dir_all(&src).unwrap();
+            write_file(&src.join("photo.jpg"), b"the original");
+            write_file(&src.join("photo.jpeg"), b"the same photo, other extension");
+            write_file(&src.join("photo.xmp"), b"<xmp/>");
+
+            let engine = ExecutionEngine::new(out.clone(), mode);
+            let inputs = vec![
+                nature_input(src.join("photo.jpg")),
+                nature_input(src.join("photo.jpeg")),
+            ];
+            let plan = engine.plan_batch(&inputs);
+            let claimed: Vec<&Path> = plan
+                .iter()
+                .flat_map(|op| op.sidecars.iter().map(|s| s.source.as_path()))
+                .collect();
+            assert_eq!(
+                claimed,
+                vec![src.join("photo.xmp").as_path()],
+                "{mode:?}: the sidecar is claimed once"
+            );
+
+            let journal = engine.execute_batch(&plan, |_, _, _| {});
+            assert_eq!(journal.completed_ops.len(), 2, "{mode:?}");
+            assert!(
+                journal.failed_ops.is_empty(),
+                "{mode:?}: nothing failed, so {:?}",
+                journal.failed_ops
+            );
+            assert!(
+                out.join("Nature/2024/05/photo.xmp").exists(),
+                "{mode:?}: the sidecar travelled with the photo that claimed it"
+            );
+
+            let _ = fs::remove_dir_all(&root);
+        }
+    }
+
     #[test]
     fn test_plan_batch_finds_both_cases_of_a_sidecar_extension() {
         let root = temp_root("sidecar_cases");
@@ -1344,6 +1535,13 @@ mod tests {
             0,
             "the sidecar that did not travel must not be journalled as if it had"
         );
+        assert_eq!(
+            journal.completed_ops[0].filed,
+            journal.completed_ops[0]
+                .filed
+                .filter(|f| f.still_matches(&journal.completed_ops[0].destination)),
+            "the journalled fingerprint must be the one the photo landed with"
+        );
         assert_eq!(journal.failed_ops.len(), 1, "{:?}", journal.failed_ops);
         assert_eq!(
             journal.failed_ops[0].operation.source,
@@ -1401,6 +1599,70 @@ mod tests {
         assert!(from.exists(), "a refused transfer moves nothing");
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The cross-device Move path cannot be reached end to end on one
+    /// filesystem, but the step that makes a `Move` a *move* can be: renaming
+    /// out of a read-only directory fails while reading the file does not, so
+    /// `place` falls through to copy-then-remove exactly as it does across
+    /// devices, and the unlink is refused.
+    ///
+    /// The file is in both places afterwards, and the caller has to be told —
+    /// the whole point being that the transfer is not reported as a failure,
+    /// because the copy is there and undo still has to be able to reverse it.
+    #[test]
+    fn test_place_warns_when_a_move_cannot_remove_the_original() {
+        let root = temp_root("place_move_unremovable");
+        let src = root.join("photos");
+        let to = root.join("library/Nature/2024/05/photo.jpg");
+        fs::create_dir_all(&src).unwrap();
+        write_file(&src.join("photo.jpg"), b"image data");
+
+        let photo = src.join("photo.jpg");
+        set_dir_read_only(&src, true);
+        let placed = place(&photo, &to, TransferMode::Move);
+        set_read_only_bit(&src, false);
+
+        let placed = placed.expect("the copy landed, so the transfer happened");
+        assert!(placed.warning.is_some(), "{placed:?}");
+        let warning = placed.warning.unwrap();
+        assert!(warning.contains("both places"), "{warning}");
+        assert!(photo.exists(), "the original could not be unlinked");
+        assert_eq!(fs::read(&to).unwrap(), b"image data", "the copy is there");
+
+        // The fingerprint is of the copy, which is what the journal records.
+        assert!(placed.fingerprint.still_matches(&to));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Makes a directory read-only, which refuses `rename` and `unlink` into and
+    /// out of it while leaving reads alone — the permission shape the test above
+    /// needs.
+    ///
+    /// Whether the bit was honoured is confirmed rather than assumed: as root it
+    /// is advisory, and a test that quietly stopped testing anything would be
+    /// worse than one that fails.
+    fn set_dir_read_only(dir: &Path, read_only: bool) {
+        let probe = dir.join("probe");
+        // Written before the bit is set: a read-only directory refuses creation
+        // as well as unlinking, and this is a probe of the unlink.
+        fs::write(&probe, b"probe").unwrap();
+        set_read_only_bit(dir, read_only);
+        let refused = fs::remove_file(&probe).is_err();
+        assert_eq!(
+            refused,
+            read_only,
+            "{} does not honour its read-only bit; this filesystem cannot provoke the \
+             unlink failure this test is about",
+            dir.display()
+        );
+    }
+
+    fn set_read_only_bit(dir: &Path, read_only: bool) {
+        let mut perms = fs::metadata(dir).unwrap().permissions();
+        perms.set_readonly(read_only);
+        fs::set_permissions(dir, perms).unwrap();
     }
 
     #[test]
@@ -1498,6 +1760,37 @@ mod tests {
         // must not walk out of it, even when every folder it meets is empty.
         prune_empty_dirs(&filed, &root.join("somewhere-else"));
         assert!(out.join("Nature").is_dir());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Every path starts with an empty one — `Path::starts_with("")` is true for
+    /// anything — so an empty `output_dir` is not a bound at all: without the
+    /// guard the walk climbed `Nature/2024/05` → `2024` → `Nature` → `library` →
+    /// `out` and kept going for as far as the folders stayed empty.
+    ///
+    /// Only empty directories go, so this was never a data-loss bug, but it is
+    /// the user's empty folder tree, and it stopped at the filesystem root rather
+    /// than anywhere in particular. A journal can only get an empty `output_dir`
+    /// from something other than this app; the cost of finding that out was not
+    /// worth it.
+    #[test]
+    fn test_prune_empty_dirs_stops_at_an_empty_output_folder() {
+        let root = temp_root("prune_no_output_dir");
+        let filed = root.join("library/Nature/2024/05/photo.jpg");
+        write_file(&filed, b"image data");
+        // Also an empty sibling, to show the walk is not merely stopping early
+        // because it hit something non-empty.
+        fs::create_dir_all(root.join("elsewhere/2024")).unwrap();
+
+        fs::remove_file(&filed).unwrap();
+        prune_empty_dirs(&filed, Path::new(""));
+
+        assert!(
+            root.join("library/Nature/2024/05").is_dir(),
+            "nothing pruned"
+        );
+        assert!(root.join("elsewhere/2024").is_dir(), "nothing above pruned");
 
         let _ = fs::remove_dir_all(&root);
     }

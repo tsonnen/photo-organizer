@@ -77,7 +77,7 @@ CI (`.github/workflows/build-and-test.yaml`) runs these in order, so match it lo
 cargo fmt --check
 cargo clippy -- -D warnings     # warnings are errors; the tree is currently clean
 cargo build
-cargo test                      # 147 tests, ~5s once built
+cargo test                      # 154 tests, ~5s once built
 ```
 
 - One test / one area: `cargo test media::tests::test_scan_preview_jpeg_scales_down_and_keeps_original_size`,
@@ -175,6 +175,15 @@ puts its Browse buttons on section headers for that reason.
   `Fingerprint` per file, and undo refuses to overwrite an occupied path or touch a file
   that changed since it was filed. The manifest records the whole batch and Undo reverses
   **only the last batch**.
+  Two things distinguish *failed* from *landed but not as asked*, because the journal
+  records what happened rather than what was attempted: `place` returns a
+  `Placed.warning` for a cross-device Move whose original could not be unlinked (the
+  file is in both places, so the operation stays in `completed_ops` and is still
+  undoable, and the warning becomes its own `failed_ops` entry), and a batch that lands
+  nothing is not journalled at all, so it cannot displace the previous batch's Undo.
+  `discover_sidecars` claims sidecar files batch-wide — `photo.jpg` and `photo.jpeg`
+  both want `photo.xmp` at the same destination, and the second attempt failing used to
+  report a sidecar as broken when it had in fact travelled.
 
 ### Known divergence
 
@@ -207,6 +216,12 @@ Carry the original dimensions on `StagedItem` if you touch this.
   `undo(execute(inputs, mode))` puts the filesystem back exactly as it started, for both
   modes, sidecars included. It is the reason the two directions share a module — keep it
   passing, and add to it rather than to a hand-built manifest when you touch either side.
+- The cross-device `Move` fallback is unreachable on one filesystem, so
+  `transfer::tests::set_dir_read_only` provokes its second half instead: a read-only
+  directory refuses `rename` and `unlink` out of it while leaving reads alone, which is
+  the same code path a failed rename takes. It asserts that the read-only bit was
+  honoured rather than skipping when it was not, because a test that quietly stopped
+  testing anything is worse than one that fails.
 - `src/app/` was split out of `app.rs` (commit 161b3e7); `mod.rs` documents the submodule split. Keep the
   module boundary and the top-of-file `//!` orientation comments that go with it.
 
