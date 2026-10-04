@@ -11,7 +11,8 @@ use super::layout::{self, MIN_CONTROL_WIDTH};
 use super::models::StagedItem;
 use super::profiles_modal::DeletePrompt;
 use super::PhotoOrganizerApp;
-use crate::profile_store::{CategoryProfile, ClassificationSource, ProfileStore};
+use crate::classification::{ClassificationSource, FrameSize};
+use crate::profile_store::{CategoryProfile, ProfileStore};
 use eframe::egui;
 use egui_kittest::kittest::{by, Queryable};
 use egui_kittest::Harness;
@@ -55,9 +56,11 @@ fn staged_item(ctx: &egui::Context) -> StagedItem {
         year: 2024,
         month: 5,
         is_exif: true,
+        frame: Some(FrameSize::new(3000, 2000)),
         category: "Beach Trip".into(),
         confidence: 0.5,
         source: ClassificationSource::Manual,
+        pending: false,
         embedding: vec![0.1, 0.2, 0.3],
         selected: false,
         is_custom: true,

@@ -6,7 +6,7 @@
 
 use super::PhotoOrganizerApp;
 use crate::app::models::StagedItem;
-use crate::profile_store::ClassificationSource;
+use crate::classification::{Classification, PhotoFacts};
 use crate::scanner::{scan_folder, ProcessedPayload, ScanMessage};
 use eframe::egui;
 use std::path::PathBuf;
@@ -14,39 +14,34 @@ use std::path::PathBuf;
 impl PhotoOrganizerApp {
     /// Kicks off a background scan of `folder`, discarding anything staged
     /// from a previous one.
+    ///
+    /// Bumps the scan generation first. A previous scan's messages are already
+    /// on the shared channel and cannot be recalled, and they were decided
+    /// against the profile store as it was then; the tag is what keeps one
+    /// scan's late answer from overwriting another's photo.
     pub(super) fn start_scan(&mut self, ctx: egui::Context, folder: PathBuf) {
         self.items.clear();
         self.status_message = None;
         self.is_processing = true;
+        self.scan_id += 1;
         let tx = self.tx.clone();
         let profiles = self.profiles.clone();
-        scan_folder(folder, profiles, tx, ctx);
+        scan_folder(folder, profiles, tx, ctx, self.scan_id);
     }
 
-    /// Applies every scan message queued since the last frame.
+    /// Applies every scan message queued since the last frame, ignoring any that
+    /// a superseded scan sent.
     pub(super) fn drain_scan_messages(&mut self, ctx: &egui::Context) {
-        while let Ok(msg) = self.rx.try_recv() {
-            match msg {
+        while let Ok(event) = self.rx.try_recv() {
+            if event.scan_id != self.scan_id {
+                continue;
+            }
+            match event.message {
                 ScanMessage::Item(payload) => self.stage_scanned_item(ctx, payload),
                 ScanMessage::Update {
-                    source_path,
-                    year,
-                    month,
-                    is_exif,
-                    category,
-                    confidence,
-                    source,
-                    embedding,
-                } => self.apply_scan_update(
-                    source_path,
-                    year,
-                    month,
-                    is_exif,
-                    category,
-                    confidence,
-                    source,
-                    embedding,
-                ),
+                    facts,
+                    classification,
+                } => self.apply_scan_update(facts, classification),
                 ScanMessage::Complete => self.is_processing = false,
             }
         }
@@ -55,57 +50,30 @@ impl PhotoOrganizerApp {
     /// Appends a newly scanned photo, selected and ready to review.
     fn stage_scanned_item(&mut self, ctx: &egui::Context, payload: ProcessedPayload) {
         let filename = payload
-            .source_path
+            .facts
+            .path
             .file_name()
             .unwrap_or_default()
             .to_string_lossy();
         let texture = ctx.load_texture(filename, payload.image, egui::TextureOptions::LINEAR);
-        let is_custom = Self::is_custom_category(&self.profiles, &payload.category);
 
-        self.items.push(StagedItem {
-            source_path: payload.source_path,
-            year: payload.year,
-            month: payload.month,
-            is_exif: payload.is_exif,
-            category: payload.category,
-            confidence: payload.confidence,
-            source: payload.source,
-            embedding: payload.embedding,
+        self.items.push(StagedItem::new(
+            &self.profiles,
+            payload.facts,
+            payload.classification,
             texture,
-            selected: true,
-            is_custom,
-        });
+        ));
     }
 
-    /// Applies a re-classification for an already staged photo.
+    /// Applies a scan's decision to the photo it is about, if it is still staged.
     ///
-    /// A manual category is the user's call and keeps its name, but the
-    /// embedding still updates so later training uses the current model.
-    #[allow(clippy::too_many_arguments)]
-    fn apply_scan_update(
-        &mut self,
-        source_path: PathBuf,
-        year: u32,
-        month: u32,
-        is_exif: bool,
-        category: String,
-        confidence: f32,
-        source: ClassificationSource,
-        embedding: Vec<f32>,
-    ) {
-        if let Some(item) = self.items.iter_mut().find(|i| i.source_path == source_path) {
-            if item.source != ClassificationSource::Manual {
-                item.year = year;
-                item.month = month;
-                item.is_exif = is_exif;
-                item.category = category.clone();
-                item.confidence = confidence;
-                item.source = source;
-                item.embedding = embedding;
-                item.is_custom = Self::is_custom_category(&self.profiles, &category);
-            } else {
-                item.embedding = embedding;
-            }
-        }
+    /// The write itself is `StagedItem::apply_classification`, shared with
+    /// **Re-classify All**; this only finds the item, because a scan's answer
+    /// is keyed by path and the grid holds photos by position.
+    fn apply_scan_update(&mut self, facts: PhotoFacts, classification: Classification) {
+        let Some(item) = self.items.iter_mut().find(|i| i.source_path == facts.path) else {
+            return;
+        };
+        item.apply_classification(&self.profiles, &facts, classification);
     }
 }

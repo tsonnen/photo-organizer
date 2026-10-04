@@ -77,11 +77,11 @@ CI (`.github/workflows/build-and-test.yaml`) runs these in order, so match it lo
 cargo fmt --check
 cargo clippy -- -D warnings     # warnings are errors; the tree is currently clean
 cargo build
-cargo test                      # 106 tests, ~7s once built
+cargo test                      # 123 tests, ~7s once built
 ```
 
 - One test / one area: `cargo test media::tests::test_scan_preview_jpeg_scales_down_and_keeps_original_size`,
-  `cargo test app::layout_tests`, `cargo test scanner`, `cargo test transfer`.
+  `cargo test app::layout_tests`, `cargo test scanner`, `cargo test transfer`, `cargo test app::models::tests`.
 - `cargo test -- --nocapture inference::tests::test_init_clip_session_real_file` to watch the real
   CLIP load + forward pass. It **silently returns** if the model file is under 1024 bytes (an LFS pointer).
 - Linux build deps: `libgtk-3-dev libxkbcommon-dev` (the release workflow installs these).
@@ -118,16 +118,23 @@ local flags and applied *after* the frame, because acting mid-draw would re-ente
 - **Scan** (`src/scanner.rs`): one spawned thread walks the folder (non-recursive, files only) and runs a
   *dedicated* rayon pool, not the global one — sized `scan_thread_count()` = `(cores / 2).clamp(2, 12)`,
   overridable with `PHOTO_ORGANIZER_SCAN_THREADS`. Bandwidth-bound CLIP, not core-bound. It streams
-  `ScanMessage::Item` (thumbnail now, category `"Classifying..."`) → `ScanMessage::Update` (final call) →
-  `Complete`, so the UI is usable while classification runs.
+  `ScanMessage::Item` (thumbnail now, `Classification::Pending`) → `ScanMessage::Update` (final call) →
+  `Complete`, so the UI is usable while classification runs. Every message is tagged with the id of the
+  scan that sent it and `drain_scan_messages` drops any but the current scan's: starting a scan clears
+  `items` but cannot un-send what a superseded scan already put on the shared channel, and that scan's
+  `Update` was decided against the profile store as it was at the time.
 - **Decode** (`src/media.rs`): a scan never full-decodes. JPEG goes through `jpeg-decoder`'s DCT scaling;
   every other format full-decodes then rescales. `ScanPreview::original_*` carries the true frame size
   because the heuristics key off resolution.
-- **Classify** (`src/profile_store.rs`): CLIP centroid match above `CONFIDENCE_THRESHOLD` (0.65, a
-  constant, not a setting) → rules (screenshot/document/EXIF) → `Unsorted`. That threshold is the only
-  path into the rules tier, so dropping it would make screenshot/document/EXIF detection unreachable
-  for anyone with a trained profile. `ClassificationSource::Manual` items are never overwritten by
-  `reclassify_all`, the **Re-classify All** button, or a scan `Update`; only their embedding refreshes.
+- **Classify** (`src/profile_store.rs`): `ProfileStore::classify(&PhotoFacts) -> Classification` is the
+  *only* entry point. CLIP centroid match above `CONFIDENCE_THRESHOLD` (0.65, a constant, not a setting)
+  → rules (screenshot/document/EXIF) → `Unsorted`. That threshold is the only path into the rules tier,
+  so dropping it would make screenshot/document/EXIF detection unreachable for anyone with a trained
+  profile.
+- **Apply** (`src/app/models.rs`): `StagedItem::apply_classification` is the *only* write path, called by
+  both a scan's `Update` and `reclassify_all`. A `Manual` item keeps its name/confidence/source but
+  refreshes its facts (embedding included) and re-derives `is_custom`; a `Pending` item is never
+  preserved. Don't write `item.category` / `confidence` / `source` / `is_custom` from a new call site.
 - **Transfer** (`src/transfer/`): `plan_batch` → `execute_batch` → `TransferJournal` →
   `undo`, `_1` collision suffixes instead of overwriting, `.xmp`/`.aae` sidecars travelling
   with the photo. One module owns the on-disk layout on purpose: with the reverse
@@ -139,12 +146,24 @@ local flags and applied *after* the frame, because acting mid-draw would re-ente
   that changed since it was filed. The manifest records the whole batch and Undo reverses
   **only the last batch**.
 
-### Known divergence
+### Classification types
 
-`reclassify_all` (`src/app/categories.rs`) feeds `item.texture.size()` — the ≤200x140 thumbnail — into
-`classify_with_heuristics`, while the scanner passes the real dimensions. The ratio-based screenshot rule
-needs width ≥ 800, so a photo can classify one way at scan time and another after "Re-classify All".
-Carry the original dimensions on `StagedItem` if you touch this.
+`src/classification.rs` holds the two records the whole pipeline speaks in:
+
+- **`PhotoFacts`** — what a photo *is*: `path`, `date`, `frame: Option<FrameSize>`, `is_exif`, `embedding`.
+  The true frame size lives here, which is what stopped three call sites reconstructing it (two of them
+  from the ≤200x140 thumbnail). `frame` is `Option` because a `photo_cache` row written before the
+  `original_width`/`original_height` columns existed has none; the scanner backfills one from the file
+  header on the next rescan, and the resolution rule declines to fire meanwhile.
+- **`Classification`** — `Pending`, or a `Decision { category: CategoryName, confidence, source,
+  is_custom }`. `is_custom` is derived once in `ProfileStore::decide`, never re-asked. `Pending` replaced
+  the `"Classifying..."` string that was stored as a real category: it read as a custom name, so the grid
+  rendered a `TextEdit` bound to it and one keystroke set `source = Manual`, after which the real
+  `Update` was skipped and the photo stayed filed as "Classifying..." forever.
+
+`ProfileStore::classify` / `classify_with_heuristics` / `classify_heuristics` were collapsed into the one
+entry point, and `ClassificationSource` is re-exported from `profile_store` so existing `use` paths and
+the grid's badge keep working.
 
 ## Testing quirks
 

@@ -17,8 +17,8 @@ something sensible, and you teach it your own categories as you go.
   screenshots and receipts still land somewhere sensible on their own.
 - Lets you train a category from photos you pick, then re-sorts everything immediately.
 - Moves or copies the approved photos into the output folder, and can undo the last run.
-- Caches thumbnails and embeddings in SQLite, so a second scan of the same folder is
-  almost instant.
+- Caches thumbnails, embeddings and each photo's original resolution in SQLite, so a
+  second scan of the same folder is almost instant — and reaches the same answer.
 
 It runs entirely on the CPU. There's no server, no API key, and no network calls at
 runtime.
@@ -124,6 +124,17 @@ really resemble anything you've trained to the filename and EXIF rules below. Ta
 away and every screenshot gets filed under whatever your centroids happen to lean
 towards, instead of **Screenshots**.
 
+One of those rules reads the photo's real resolution: a non-EXIF PNG at a screen aspect
+ratio and at least 800px wide is a screenshot. That's the file's own dimensions, which
+the cache stores alongside the thumbnail — so a photo is sorted the same way the first
+time you scan it and every time after. (Re-sorting with **Re-classify All** re-reads
+the same numbers, rather than the thumbnail's.)
+
+Whatever you set by hand stays set: re-sorting and re-scanning leave a manual category
+alone. A photo the model is still working on shows **Classifying...** in the meantime,
+which is a placeholder rather than a name — nothing can be typed into it, so it can't
+end up as a category of its own.
+
 Training a category folds the photo's embedding into the category centroid as a weighted
 average, so a handful of representative examples gets you a usable profile. Adding more
 examples shifts the centroid gradually rather than replacing it, which means a couple of
@@ -155,7 +166,8 @@ The code is laid out like this:
 | `src/app/` | The egui app, split by responsibility: grid, modal, profile modal, toolbar, categories, transfer |
 | `src/scanner.rs` | Folder scan, threaded and parallel |
 | `src/inference.rs` | CLIP model loading and embedding extraction |
-| `src/profile_store.rs` | Category profiles, centroids, rules |
+| `src/classification.rs` | `PhotoFacts` (what a photo is) and `Classification` (what was decided) |
+| `src/profile_store.rs` | Category profiles, centroids, and the one `classify` entry point |
 | `src/category_name.rs` | Category names, kept safe as one folder name |
 | `src/db.rs` | SQLite cache, keyed by file hash |
 | `src/media.rs` | Image decoding, EXIF dates, thumbnails |
