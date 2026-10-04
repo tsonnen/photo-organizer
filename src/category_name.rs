@@ -1,24 +1,16 @@
 //! A category name that is safe to use as a single directory component.
 //!
-//! A category is three things at once: the label in the grid's dropdown, the
-//! value a [`ClassificationResult`](crate::profile_store::ClassificationResult)
-//! carries, and a directory under the output folder. Only the third constrains
-//! what the string may contain, and nothing in the type system said so — the
-//! transfer engine joined a display string straight into a path, so a category
-//! typed as `A/B` silently created an extra directory level and one typed as
-//! `..` escaped the output folder entirely.
-//!
-//! This module is the one place that decides which names are allowed. The name
-//! it returns is always a single component, so a caller joining it into a path
-//! gets one directory and not two.
+//! A category is a dropdown label *and* a directory under the output folder, and
+//! only the second constrains what the string may contain. `CategoryName` is the
+//! one place that decides which names are allowed; see
+//! [`CategoryName::from_user_input`] for the rules.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// A category name, guaranteed to be usable as exactly one path component.
 ///
-/// Serialises as a plain string, so `ClassificationResult` and `RankedProfile`
-/// keep the JSON shape they have always had on disk.
+/// Serialises as a plain string, so the JSON on disk is unchanged.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CategoryName(String);
@@ -44,29 +36,17 @@ impl CategoryName {
         Self("Camera Photos".to_string())
     }
 
-    /// Sanitises user input into a name that is safe to use as one directory
-    /// component.
-    ///
-    /// Everything the user can reach — the training box, the per-photo custom
-    /// name input, a hand-edited `profiles.json` — goes through here, so there
-    /// is no path by which an unsanitised name reaches the filesystem.
+    /// Sanitises user input into a name safe to use as one directory component.
     ///
     /// Separators become `-` rather than being dropped, so `Vacation / Japan`
-    /// still reads as `Vacation - Japan` and the user can tell what happened to
+    /// still reads as `Vacation - Japan` and the user can see what happened to
     /// their input. A name with nothing usable left falls back to
     /// [`CategoryName::unsorted`].
     pub fn from_user_input(raw: &str) -> Self {
         let replaced: String = raw
             .chars()
             .map(|c| match c {
-                // Path separators. This is the case that actually bites: the
-                // transfer engine joins the category into `<Category>/<YYYY>/`,
-                // so an embedded separator silently adds directory levels.
-                '/' | '\\' => '-',
-                // Characters Windows rejects outright. The release workflow
-                // ships a Windows binary, so a category named `what?` would fail
-                // every transfer rather than merely look odd.
-                ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
                 // Control characters, NUL included, are invalid in a path on
                 // every platform.
                 c if c.is_control() => ' ',
@@ -78,8 +58,7 @@ impl CategoryName {
         // file, which would make `Sunsets.` and `Sunsets` collide on disk.
         let trimmed = replaced.trim().trim_end_matches(['.', ' ']);
 
-        // `.` and `..` are the current and parent directory. Rejecting them is
-        // what stops a category from resolving outside the output folder.
+        // `.` and `..` are the current and parent directory.
         if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
             return Self::unsorted();
         }
@@ -111,8 +90,6 @@ mod tests {
 
     #[test]
     fn test_separators_do_not_add_directory_levels() {
-        // The defect this type exists to prevent: `A/B` used to become two
-        // directories instead of one.
         assert_eq!(CategoryName::from_user_input("A/B").as_str(), "A-B");
         assert_eq!(CategoryName::from_user_input("A\\B").as_str(), "A-B");
 
@@ -140,16 +117,13 @@ mod tests {
     fn test_empty_and_whitespace_fall_back_to_unsorted() {
         assert_eq!(CategoryName::from_user_input("").as_str(), "Unsorted");
         assert_eq!(CategoryName::from_user_input("   ").as_str(), "Unsorted");
-        // Every separator becomes a dash, so a name of nothing but separators
-        // still leaves a single, harmless component behind rather than being
-        // silently emptied.
+        // Separators become dashes rather than being dropped, so a name of
+        // nothing but separators leaves one harmless component.
         assert_eq!(CategoryName::from_user_input("///").as_str(), "---");
     }
 
     #[test]
     fn test_trailing_dots_and_spaces_are_trimmed() {
-        // Windows drops these when creating a file, so leaving them would make
-        // two different categories collide on disk.
         assert_eq!(
             CategoryName::from_user_input("Sunsets.").as_str(),
             "Sunsets"
@@ -194,9 +168,8 @@ mod tests {
     fn test_display_and_serde_round_trip_as_a_plain_string() {
         let name = CategoryName::from_user_input("Sunsets");
         assert_eq!(name.to_string(), "Sunsets");
-        // `ClassificationResult` is written into the grid's state and read back
-        // in tests, so it has to keep serialising as the bare string it always
-        // was rather than as `{"0": "Sunsets"}`.
+        // `#[serde(transparent)]` has to stay, or this becomes `{"0": "Sunsets"}`
+        // and every `profiles.json` on disk changes shape.
         assert_eq!(serde_json::to_string(&name).unwrap(), "\"Sunsets\"");
         let back: CategoryName = serde_json::from_str("\"Sunsets\"").unwrap();
         assert_eq!(back, name);
