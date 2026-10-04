@@ -36,6 +36,7 @@ use crate::inference::is_model_available;
 use crate::profile_store::ProfileStore;
 use crate::scanner::ScanEvent;
 use crate::settings::Settings;
+use crate::transfer::LAST_JOURNAL;
 use eframe::egui;
 use models::{ModalPreview, StagedItem};
 use profiles_modal::DeletePrompt;
@@ -63,6 +64,14 @@ pub struct PhotoOrganizerApp {
     /// not "changed this frame". Kept in step by [`Self::reclassify_all`],
     /// which is every place the grid's classifications are rewritten.
     classified_threshold: f32,
+    /// Where the undo journal is read from and written to.
+    ///
+    /// A field rather than a constant so a transfer can be exercised against a
+    /// temp directory: [`crate::transfer::LAST_JOURNAL`] is a relative path, so
+    /// hard-coding it means every test that runs a real transfer overwrites the
+    /// journal in the crate root — which is the slot the running app's **Undo**
+    /// reads.
+    journal_path: PathBuf,
     /// Set when the threshold moved mid-scan, so the photos still arriving —
     /// classified by the scan against the threshold it started with — are
     /// re-classified once it finishes instead of being left mixed.
@@ -112,6 +121,7 @@ impl PhotoOrganizerApp {
             settings,
             model_available,
             classified_threshold,
+            journal_path: PathBuf::from(LAST_JOURNAL),
             pending_reclassify: false,
             show_categories_panel: false,
             show_profiles_modal: false,

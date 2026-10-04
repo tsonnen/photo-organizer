@@ -13,11 +13,14 @@ use crate::transfer::{
 };
 use eframe::egui;
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 impl PhotoOrganizerApp {
-    /// Transfers every selected photo, then drops the ones that landed from the
-    /// grid.
+    /// The toolbar's Move and Copy: transfer every selected photo into the
+    /// configured output folder, then drop the ones that landed from the grid.
+    ///
+    /// The destination and the two backstops the toolbar's own gating should
+    /// have caught; [`Self::execute_transfer_to`] is where the transfer happens.
     pub(super) fn execute_transfer(&mut self, mode: TransferMode) {
         let Some(out_dir) = self.settings.output_folder.clone() else {
             // A backstop, not the feedback path: the toolbar already greys Move
@@ -34,6 +37,20 @@ impl PhotoOrganizerApp {
             return;
         }
 
+        self.execute_transfer_to(mode, out_dir);
+    }
+
+    /// The whole of a transfer, with its destination as an argument.
+    ///
+    /// Plan the selection, run it, journal it, report what happened. Split out
+    /// from [`Self::execute_transfer`] so that everything below the two backstops
+    /// is reachable with a destination the caller chose rather than the one in
+    /// the settings — the transfer is then a function of its arguments, and the
+    /// only question left for a caller is which folder to hand it.
+    ///
+    /// A pure extraction: the destination the toolbar passes is the one this read
+    /// out of the settings a moment earlier, so the behaviour is unchanged.
+    pub(super) fn execute_transfer_to(&mut self, mode: TransferMode, out_dir: PathBuf) {
         // A photo the model has not reached yet holds `CLASSIFYING_LABEL` where
         // its category goes, and `is_filable` is false for exactly that reason: see
         // `StagedItem::is_filable`. Move and Copy are not gated on the scan
@@ -97,7 +114,7 @@ impl PhotoOrganizerApp {
                 first_failure(&journal)
             ),
         };
-        if let Some(note) = Self::persist_journal(&journal) {
+        if let Some(note) = self.persist_journal(&journal) {
             message = format!("{message} {note}");
         }
         if held > 0 {
@@ -160,8 +177,13 @@ impl PhotoOrganizerApp {
     /// from the other side: there is no new batch to record, and overwriting
     /// would throw away the only record of the last one that did move anything.
     /// The note says which batch Undo is still holding, so it is not a surprise.
-    fn persist_journal(journal: &TransferJournal) -> Option<String> {
-        Self::persist_journal_to(journal, Path::new(LAST_JOURNAL))
+    ///
+    /// A method rather than a free function so it reads `self.journal_path`: the
+    /// slot is a field, so a test can point a whole transfer at a temp directory
+    /// instead of overwriting the journal in the crate root, which is the one the
+    /// running app's **Undo** reads.
+    fn persist_journal(&self, journal: &TransferJournal) -> Option<String> {
+        Self::persist_journal_to(journal, &self.journal_path)
     }
 
     /// [`PhotoOrganizerApp::persist_journal`] against a given path, so the policy
@@ -241,7 +263,38 @@ fn first_failure(journal: &TransferJournal) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::models::StagedItem;
     use crate::transfer::FileOperation;
+
+    /// An app holding one selected, decided photo at `source_path`.
+    ///
+    /// A `StagedItem` needs a thumbnail, and an `egui::Context` is the cheapest
+    /// thing that can hold one — this drives the transfer seam rather than the
+    /// grid, so nothing here is ever drawn.
+    fn app_with_one_selected(source_path: &Path, journal_path: &Path) -> PhotoOrganizerApp {
+        let mut app = PhotoOrganizerApp::new();
+        app.journal_path = journal_path.to_path_buf();
+        app.items = vec![StagedItem {
+            source_path: source_path.to_path_buf(),
+            year: 2024,
+            month: 7,
+            is_exif: false,
+            frame: None,
+            category: "Sunsets".into(),
+            confidence: 0.9,
+            source: crate::classification::ClassificationSource::Heuristic,
+            pending: false,
+            embedding: Vec::new(),
+            texture: egui::Context::default().load_texture(
+                "thumb",
+                egui::ColorImage::new([4, 4], egui::Color32::GRAY),
+                egui::TextureOptions::default(),
+            ),
+            selected: true,
+            is_custom: false,
+        }];
+        app
+    }
 
     /// A journal with nothing in it, which is what a batch that landed no
     /// photos produces.
@@ -292,6 +345,44 @@ mod tests {
             std::fs::read(&path).unwrap(),
             before,
             "the previous batch's journal survives a batch that landed nothing"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What the extraction bought: the destination is an argument, so a transfer
+    /// files where it is told rather than wherever the settings happen to point.
+    ///
+    /// The toolbar's two routes still pass the configured output folder, so this
+    /// is not a behaviour change on its own — it is the property the next caller
+    /// needs, asserted before there is one. It also pins that the engine takes the
+    /// whole of a transfer: plan, execute, journal, report, and drop what landed.
+    #[test]
+    fn a_transfer_files_into_the_destination_it_is_given() {
+        let dir = std::env::temp_dir().join(format!("app_transfer_given_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let source = dir.join("incoming.jpg");
+        std::fs::write(&source, b"bytes").unwrap();
+        let out_dir = dir.join("elsewhere");
+        let journal = dir.join("journal.json");
+
+        let mut app = app_with_one_selected(&source, &journal);
+        app.execute_transfer_to(TransferMode::Move, out_dir.clone());
+
+        assert!(
+            out_dir.join("Sunsets/2024/07/incoming.jpg").exists(),
+            "the batch should have landed under the destination it was handed"
+        );
+        assert!(!source.exists(), "a Move takes the original with it");
+        assert!(
+            journal.exists(),
+            "the batch landed something, so it is recorded for Undo"
+        );
+        assert!(
+            app.items.is_empty(),
+            "a photo that landed leaves the grid, so it cannot be filed twice"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
