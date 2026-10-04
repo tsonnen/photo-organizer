@@ -94,6 +94,20 @@ pub(crate) fn settings_modal_size(screen: egui::Vec2) -> egui::Vec2 {
     )
 }
 
+/// Size of the bulk move modal's card, in points.
+///
+/// Wider than it is tall: the row it spends most of its height on is a single
+/// line of category name beside the names used before, and a destination path
+/// that has to be readable rather than scrolled. Derived from the screen and
+/// clamped like the other cards, so it stays a card on a small window instead of
+/// becoming a sheet that covers the grid it is describing.
+pub(crate) fn bulk_move_modal_size(screen: egui::Vec2) -> egui::Vec2 {
+    egui::vec2(
+        (screen.x * 0.50).clamp(520.0, 720.0),
+        (screen.y * 0.42).clamp(330.0, 460.0),
+    )
+}
+
 /// Size of the profile management modal's card, in points.
 ///
 /// Derived from the screen the way the inspection modal's card is, and clamped
@@ -186,6 +200,48 @@ mod tests {
             assert!(combo >= MIN_CONTROL_WIDTH, "combo {combo} below minimum");
             assert!(input >= MIN_CONTROL_WIDTH, "input {input} below minimum");
         }
+    }
+
+    #[test]
+    fn bulk_move_card_fits_the_window_it_is_shown_on() {
+        // Sized off the screen and clamped, so it stays a card on the smallest
+        // window the app enforces (1240x900) rather than becoming a sheet over
+        // the grid the preview is describing.
+        for screen in [
+            egui::vec2(1240.0, 900.0),
+            egui::vec2(1366.0, 768.0),
+            egui::vec2(1600.0, 1200.0),
+            egui::vec2(2560.0, 1440.0),
+            egui::vec2(3840.0, 2160.0),
+        ] {
+            let card = bulk_move_modal_size(screen);
+            assert!(
+                card.x <= screen.x && card.y <= screen.y,
+                "{card:?} card overflows a {screen:?} screen"
+            );
+            assert!(
+                (520.0..=720.0).contains(&card.x),
+                "card width {} outside 520..=720 at {screen:?}",
+                card.x
+            );
+            assert!(
+                (330.0..=460.0).contains(&card.y),
+                "card height {} outside 330..=460 at {screen:?}",
+                card.y
+            );
+        }
+    }
+
+    #[test]
+    fn the_bulk_move_card_leaves_room_for_a_name_and_its_folder() {
+        // The card is wider than the name field by enough for the recalled-names
+        // dropdown to sit beside it rather than under it, and wide enough that
+        // `NAME_FIELD_WIDTH` plus that dropdown is not the reason a row wraps.
+        let card = bulk_move_modal_size(egui::vec2(1240.0, 900.0));
+        assert!(
+            card.x > 300.0 + 140.0,
+            "a {card:?} card cannot hold the name field and a dropdown on one row"
+        );
     }
 
     #[test]

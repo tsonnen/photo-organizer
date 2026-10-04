@@ -63,6 +63,19 @@ own.
 Open **AI & Categories** in the toolbar to see the model status, re-sort everything, or
 train a whole batch at once from the selected photos.
 
+**🏷 Bulk Move** files a whole selection under one name you type, without training
+anything. Select the photos, type a name, and either **Assign Only** — which labels them
+and leaves them staged — or **Move**/**Copy** them into `<Category>/<YYYY>/<MM>/` under
+your output folder. It previews the exact folders before anything is filed, and says
+"N folders" when the selection spans more than one month. **Choose Folder…** points one
+batch somewhere else without changing where your other transfers go, which is what you
+want for an event that straddles a year boundary.
+
+Names you've used are offered again next time, so a second batch is a click rather than
+a retype. They are just names: no profile is trained and no centroid is built, so this
+is the way to file a one-off event without leaving a category in `profiles.json` that
+describes nothing reusable.
+
 **Manage Profiles** opens a scrollable list of everything you've trained, with each
 category's sample count and a delete button. Deleting is deliberately two clicks —
 confirm and delete — because it throws away that category's training for good and

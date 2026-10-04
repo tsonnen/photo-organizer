@@ -77,7 +77,7 @@ CI (`.github/workflows/build-and-test.yaml`) runs these in order, so match it lo
 cargo fmt --check
 cargo clippy -- -D warnings     # warnings are errors; the tree is currently clean
 cargo build
-cargo test                      # 174 tests, ~5s once built
+cargo test                      # 193 tests, ~5s once built
 ```
 
 - One test / one area: `cargo test media::tests::test_scan_preview_jpeg_scales_down_and_keeps_original_size`,
@@ -188,6 +188,16 @@ puts its Browse buttons on section headers for that reason.
   `discover_sidecars` claims sidecar files batch-wide — `photo.jpg` and `photo.jpeg`
   both want `photo.xmp` at the same destination, and the second attempt failing used to
   report a sidecar as broken when it had in fact travelled.
+- **Bulk move** (`src/app/bulk_move_modal.rs`): the fourth route to a category, and the only one that
+  trains nothing — a name typed over a selection becomes a `Manual` pick, which is exactly what makes it
+  survive re-classification. `assign_selected_to_category` labels the items, then `execute_transfer_to`
+  runs the *same* plan → execute → journal → report sequence the toolbar's Move and Copy use, with the
+  typed name passed as `override_subject` so nothing about the bulk move re-implements a transfer. Its
+  toolbar button is gated on the *selection*, not the destination, which is the opposite of Move and
+  Copy: the card carries its own folder picker, so an unconfigured output folder must not disable it.
+  The names it remembers live in `Settings::custom_categories`, deliberately *not* in `profiles.json` —
+  a name with no centroid is a label the user chose not to retype, and folding it in as learned data
+  would put a profile in the file for an event that has none.
 
 ### Classification types
 
@@ -228,6 +238,8 @@ re-exported from `profile_store` so existing `use` paths and the grid's badge ke
   renderers. The grid cell deliberately stacks the custom-category input *below* the combo while the modal
   puts it *inline* — both directions are asserted. Don't "unify" those layouts. Modal tests filter
   `placed_widgets` down to what lies inside the card rect, because the backdrop covers the whole screen.
+  The bulk move's harness stages its photos on a `Cell<bool>` rather than on `items.is_empty()`: a move
+  empties the grid, so that condition would put the photos straight back and hide whether they were dropped.
 - The same file drives the settings modal with **real** pointer and key events, which has two traps: egui
   only hands a widget an `interact_pointer_pos` while a button is held or was released *that* frame, so a
   press and a release queued into one frame cancel out (hence `press_at`/`drag_to`/`release_at`, one event
@@ -238,6 +250,9 @@ re-exported from `profile_store` so existing `use` paths and the grid's badge ke
   the file: a test reading `settings.json` would race the other tests' writes.
 - `categories.rs` has a source-text test (`include_str!`) requiring exactly two call sites of
   `render_custom_category_input` (grid + modal). Adding a third call site fails the build.
+- A closed egui `ComboBox` puts **no label** in the accesskit tree, so a kittest assertion has to find it
+  by role — and `accesskit::Role` is not a dependency, so stringify it the way `placed_widgets` does. To
+  assert what is *in* the list, open it (click the combo, run a frame) and query by label instead.
 - `scanner.rs` mutates the process-global `PHOTO_ORGANIZER_SCAN_THREADS` in exactly one test on purpose
   (cargo runs tests on parallel threads). Don't split it or add another env-mutating test.
 - Tests create temp files as `temp_dir()/name_<pid>.<ext>`, and `src/transfer/` builds a whole
