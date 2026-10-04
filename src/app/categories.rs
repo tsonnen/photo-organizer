@@ -6,7 +6,8 @@
 
 use crate::app::layout::{grid_cell_combo_width, grid_cell_input_width, MODAL_COMBO_WIDTH};
 use crate::app::models::{ModalActions, StagedItem};
-use crate::profile_store::{ClassificationSource, ProfileStore, RankedProfile};
+use crate::classification::ClassificationSource;
+use crate::profile_store::{ProfileStore, RankedProfile};
 use eframe::egui;
 
 impl super::PhotoOrganizerApp {
@@ -16,27 +17,22 @@ impl super::PhotoOrganizerApp {
         let mut visual_count = 0;
         let total_count = self.items.len();
         for item in &mut self.items {
-            if item.source == ClassificationSource::Manual {
-                item.is_custom = Self::is_custom_category(&self.profiles, &item.category);
-                continue;
-            }
-            let width = item.texture.size()[0] as u32;
-            let height = item.texture.size()[1] as u32;
-            let res = self.profiles.classify_with_heuristics(
-                &item.embedding,
-                &item.source_path,
-                item.is_exif,
-                width,
-                height,
-                self.settings.confidence_threshold,
-            );
-            if res.source == ClassificationSource::VisualModel {
+            let facts = item.facts();
+            let classification = self
+                .profiles
+                .classify(&facts, self.settings.confidence_threshold);
+            if classification
+                .decided()
+                .is_some_and(|d| d.source == ClassificationSource::VisualModel)
+            {
                 visual_count += 1;
             }
-            item.is_custom = Self::is_custom_category(&self.profiles, res.category.as_str());
-            item.category = res.category.into_string();
-            item.confidence = res.confidence;
-            item.source = res.source;
+            // The same write a scan's `Update` makes, so a manual pick is
+            // preserved here exactly as it is there. The facts come off the
+            // staged item, which carries the frame size the scan read — not the
+            // thumbnail's, which is what used to rule a screenshot back out of
+            // Screenshots the moment the user hit this button.
+            item.apply_classification(&self.profiles, &facts, classification);
         }
 
         // The grid now agrees with the threshold, so the slider's next move has
@@ -128,15 +124,6 @@ impl super::PhotoOrganizerApp {
         }
     }
 
-    /// A category is "custom" when it matches no profile name, so the custom
-    /// name input applies to it. Matching ignores case.
-    pub(super) fn is_custom_category(profiles: &ProfileStore, category: &str) -> bool {
-        !profiles
-            .profiles
-            .iter()
-            .any(|p| p.name.eq_ignore_ascii_case(category))
-    }
-
     /// A profile name plus its confidence, when the photo has an embedding to
     /// be scored against.
     fn profile_label(name: &str, confidence: f32, has_embedding: bool) -> String {
@@ -192,8 +179,8 @@ impl super::PhotoOrganizerApp {
                 if ui.selectable_label(is_selected, label).clicked() {
                     item.category = prof.name.clone();
                     item.confidence = prof.confidence;
-                    item.source = ClassificationSource::Manual;
                     item.is_custom = false;
+                    item.mark_manual();
                 }
             }
             if !ranked_profiles.is_empty() {
@@ -201,7 +188,7 @@ impl super::PhotoOrganizerApp {
             }
             if ui.selectable_label(item.is_custom, "Other").clicked() {
                 item.is_custom = true;
-                item.source = ClassificationSource::Manual;
+                item.mark_manual();
             }
         });
     }
@@ -221,7 +208,7 @@ impl super::PhotoOrganizerApp {
                 .desired_width(input_width),
         );
         if custom_input.changed() {
-            item.source = ClassificationSource::Manual;
+            item.mark_manual();
         }
     }
 
@@ -355,16 +342,9 @@ mod tests {
         store.add_exemplar("Sunsets", &[1.0, 0.0, 0.0]);
 
         // Known profile names are not custom, and matching ignores case.
-        assert!(!super::super::PhotoOrganizerApp::is_custom_category(
-            &store, "Sunsets"
-        ));
-        assert!(!super::super::PhotoOrganizerApp::is_custom_category(
-            &store, "sunsets"
-        ));
+        assert!(!store.is_custom_category("Sunsets"));
+        assert!(!store.is_custom_category("sunsets"));
         // Unknown names are custom.
-        assert!(super::super::PhotoOrganizerApp::is_custom_category(
-            &store,
-            "Beach Trip"
-        ));
+        assert!(store.is_custom_category("Beach Trip"));
     }
 }

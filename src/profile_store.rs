@@ -1,34 +1,19 @@
 use crate::category_name::CategoryName;
+use crate::classification::{Classification, Decision, PhotoFacts};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ClassificationSource {
-    VisualModel,
-    Heuristic,
-    Manual,
-    UnsortedFallback,
-}
+// Re-exported for callers that think of the source enum as part of the store:
+// it labels the store's output and was declared here for most of the app's life.
+pub use crate::classification::ClassificationSource;
 
-impl std::fmt::Display for ClassificationSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::VisualModel => write!(f, "AI"),
-            Self::Heuristic => write!(f, "Rule"),
-            Self::Manual => write!(f, "Manual"),
-            Self::UnsortedFallback => write!(f, "None"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ClassificationResult {
-    pub category: CategoryName,
-    pub confidence: f32,
-    pub source: ClassificationSource,
-}
+/// Narrowest frame the resolution rule will call a screenshot.
+///
+/// Below this a 16:9 PNG is a saved thumbnail of a screen or a small graphic,
+/// which is not what the rule is for.
+const SCREENSHOT_MIN_WIDTH: u32 = 800;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RankedProfile {
@@ -159,63 +144,108 @@ impl ProfileStore {
         }
     }
 
-    /// Assigns the closest centroid, if it is similar enough to believe.
+    /// The one entry point for deciding what a photo is: the visual tier, then
+    /// the rules, then `Unsorted`.
     ///
-    /// `threshold` is the user-configured bar from
-    /// [`crate::settings::Settings::confidence_threshold`], passed in rather
-    /// than read from the store: profiles are learned data, the bar is a
-    /// setting, and keeping them apart means a `profiles.json` never carries a
-    /// stale copy of a knob the UI owns.
-    pub fn classify(&self, embedding: &[f32], threshold: f32) -> ClassificationResult {
+    /// Takes the photo's facts rather than a loose `&[f32]` plus a path, an
+    /// EXIF flag and two dimensions, because the rules key off resolution and
+    /// the frame size is the input callers used to get wrong. Two of the three
+    /// callers passed the ≤200x140 thumbnail's dimensions — a cached rescan,
+    /// because the cache stored nothing else, and **Re-classify All**, because
+    /// a staged item carried nothing else — which ruled a 1920x1080 PNG out of
+    /// Screenshots on every scan after the one that read the file.
+    ///
+    /// `threshold` is the user's bar from
+    /// [`crate::settings::Settings::confidence_threshold`], passed in rather than
+    /// read from the store: profiles are learned data, the bar is a setting, and
+    /// keeping them apart means a `profiles.json` never carries a stale copy of a
+    /// knob the UI owns. The gate cannot be dropped, whatever it is set to — it is
+    /// the only path from the visual tier into the rules.
+    pub fn classify(&self, facts: &PhotoFacts, threshold: f32) -> Classification {
+        let best_match = self.best_centroid_match(&facts.embedding);
+        let best_similarity = best_match.as_ref().map(|(_, similarity)| *similarity);
+
+        if let Some((category, confidence)) = best_match {
+            if confidence >= threshold {
+                return self.decide(category, confidence, ClassificationSource::VisualModel);
+            }
+        }
+
+        // Too weak to believe, but still the closest thing there is. The rules
+        // outrank a low-confidence centroid match, which is the whole reason the
+        // threshold gate exists at all.
+        if let Some((category, confidence)) = classify_by_rules(facts) {
+            return self.decide(category, confidence, ClassificationSource::Heuristic);
+        }
+
+        // Nothing claimed it. The similarity is still worth reporting, so the
+        // dropdown can show how near the closest profile came.
+        self.decide(
+            CategoryName::unsorted(),
+            best_similarity.unwrap_or(0.0).max(0.0),
+            ClassificationSource::UnsortedFallback,
+        )
+    }
+
+    /// Builds the one kind of decided classification there is, settling
+    /// `is_custom` here rather than leaving each caller to re-ask.
+    fn decide(
+        &self,
+        category: CategoryName,
+        confidence: f32,
+        source: ClassificationSource,
+    ) -> Classification {
+        Classification::Decided(Decision {
+            is_custom: self.is_custom_category(category.as_str()),
+            category,
+            confidence,
+            source,
+        })
+    }
+
+    /// A category is "custom" when it matches no profile name, so the custom
+    /// name input applies to it. Matching ignores case.
+    ///
+    /// Asked in exactly two places: `decide`, for every classification the
+    /// pipeline makes, and
+    /// [`StagedItem::apply_classification`](crate::app::models::StagedItem::apply_classification),
+    /// which has to re-ask for a manual category because the profile it matched
+    /// can be deleted while the category stands.
+    pub fn is_custom_category(&self, category: &str) -> bool {
+        !self
+            .profiles
+            .iter()
+            .any(|p| p.name.eq_ignore_ascii_case(category))
+    }
+
+    /// The closest trained centroid to `embedding`, with its similarity, or
+    /// `None` when there is nothing to compare against.
+    fn best_centroid_match(&self, embedding: &[f32]) -> Option<(CategoryName, f32)> {
         if embedding.is_empty() || self.profiles.is_empty() {
-            return ClassificationResult {
-                category: CategoryName::unsorted(),
-                confidence: 0.0,
-                source: ClassificationSource::UnsortedFallback,
-            };
+            return None;
         }
 
-        let mut best_match: Option<(&CategoryProfile, f32)> = None;
-
+        let mut best: Option<(&CategoryProfile, f32)> = None;
         for profile in &self.profiles {
-            let sim = cosine_similarity(embedding, &profile.centroid);
-            match best_match {
-                None => best_match = Some((profile, sim)),
-                Some((_, max_sim)) if sim > max_sim => best_match = Some((profile, sim)),
-                _ => {}
+            let similarity = cosine_similarity(embedding, &profile.centroid);
+            // Strictly greater, so a tie keeps the earlier profile: two
+            // categories trained on the same exemplar sort by the order they
+            // were trained in.
+            if best.is_none_or(|(_, top)| similarity > top) {
+                best = Some((profile, similarity));
             }
         }
 
-        if let Some((profile, sim)) = best_match {
-            if sim >= threshold {
-                return ClassificationResult {
-                    // A backstop, not the sanitisation point: `CategoryProfile::new`
-                    // and `load_from_file` both canonicalise the name, so this is
-                    // already a no-op and the result still identifies the profile
-                    // it came from. It stays because the field is public and a
-                    // `CategoryProfile` can be built by struct literal.
-                    category: CategoryName::from_user_input(&profile.name),
-                    confidence: sim.clamp(0.0, 1.0),
-                    source: ClassificationSource::VisualModel,
-                };
-            }
-
-            // Too weak to believe, but still the closest thing we have: report
-            // the similarity and fall through to the rules, which outrank a
-            // low-confidence centroid match. This is what makes
-            // `classify_with_heuristics` worth calling.
-            return ClassificationResult {
-                category: CategoryName::unsorted(),
-                confidence: sim.max(0.0),
-                source: ClassificationSource::UnsortedFallback,
-            };
-        }
-
-        ClassificationResult {
-            category: CategoryName::unsorted(),
-            confidence: 0.0,
-            source: ClassificationSource::UnsortedFallback,
-        }
+let (profile, similarity) = best?;
+        Some((
+            // A backstop, not the sanitisation point: `CategoryProfile::new`
+            // and `load_from_file` both canonicalise the name, so this is
+            // already a no-op and the result still identifies the profile
+            // it came from. It stays because the field is public and a
+            // `CategoryProfile` can be built by struct literal.
+            CategoryName::from_user_input(&profile.name),
+            similarity.clamp(0.0, 1.0),
+        ))
     }
 
     /// Computes similarity of the given embedding against all profile centroids,
@@ -246,72 +276,55 @@ impl ProfileStore {
 
         list
     }
+}
 
-    pub fn classify_with_heuristics(
-        &self,
-        embedding: &[f32],
-        path: &Path,
-        is_exif: bool,
-        width: u32,
-        height: u32,
-        threshold: f32,
-    ) -> ClassificationResult {
-        // 1. Try Visual CLIP classification first if embedding exists
-        let visual_res = self.classify(embedding, threshold);
-        if visual_res.source == ClassificationSource::VisualModel {
-            return visual_res;
-        }
+/// The rule tier: filename, resolution and metadata patterns for photos no
+/// centroid could claim.
+///
+/// Takes the whole [`PhotoFacts`] rather than four arguments because the rules
+/// are only ever about what the photo is — and because `width`/`height` in
+/// particular is the input that two of the three callers used to fill with the
+/// thumbnail's size.
+fn classify_by_rules(facts: &PhotoFacts) -> Option<(CategoryName, f32)> {
+    let filename = facts
+        .path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let ext = facts
+        .path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
 
-        // 2. Try Rule-based / Metadata heuristics
-        if let Some((cat, conf)) = Self::classify_heuristics(path, is_exif, width, height) {
-            return ClassificationResult {
-                category: cat,
-                confidence: conf,
-                source: ClassificationSource::Heuristic,
-            };
-        }
+    // 1. Screenshot detection
+    let screenshot_names = [
+        "screenshot",
+        "screen_shot",
+        "screen shot",
+        "screencap",
+        "capture",
+        "snip",
+        "bildupplösning",
+        "bildschirmfoto",
+        "captura",
+    ];
+    let has_screenshot_keyword = screenshot_names.iter().any(|&k| filename.contains(k));
 
-        // 3. Fallback to visual result (which is Unsorted)
-        visual_res
+    if has_screenshot_keyword {
+        return Some((CategoryName::screenshots(), 0.95));
     }
 
-    pub fn classify_heuristics(
-        path: &Path,
-        is_exif: bool,
-        width: u32,
-        height: u32,
-    ) -> Option<(CategoryName, f32)> {
-        let filename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_lowercase();
-
-        // 1. Screenshot detection
-        let screenshot_names = [
-            "screenshot",
-            "screen_shot",
-            "screen shot",
-            "screencap",
-            "capture",
-            "snip",
-            "bildupplösning",
-            "bildschirmfoto",
-            "captura",
-        ];
-        let has_screenshot_keyword = screenshot_names.iter().any(|&k| filename.contains(k));
-
-        let aspect_ratio = if height > 0 {
-            width as f32 / height as f32
-        } else {
-            1.0
-        };
+    // The ratio rule needs the photo's true frame size, and a photo whose size
+    // was never recorded — a cache row written before the dimensions were
+    // persisted — has nothing to key off. Skipping the rule is the honest
+    // answer; substituting the thumbnail is what ruled real screenshots out of
+    // Screenshots on every rescan.
+    if let Some(frame) = facts.frame {
         // Check standard screen aspect ratios: 16:9 (~1.777), 16:10 (1.6), 19.5:9 (~2.166), 20:9 (~2.222), 21:9 (~2.333) and portrait inverses
+        let aspect_ratio = frame.aspect_ratio();
         let is_screen_ratio = (aspect_ratio - 1.777).abs() < 0.03
             || (aspect_ratio - 1.6).abs() < 0.03
             || (aspect_ratio - 2.166).abs() < 0.04
@@ -319,35 +332,32 @@ impl ProfileStore {
             || (aspect_ratio - 0.625).abs() < 0.03
             || (aspect_ratio - 0.4615).abs() < 0.03;
 
-        if has_screenshot_keyword {
-            return Some((CategoryName::screenshots(), 0.95));
-        }
-
-        if !is_exif && ext == "png" && is_screen_ratio && width >= 800 {
+        if !facts.is_exif && ext == "png" && is_screen_ratio && frame.width >= SCREENSHOT_MIN_WIDTH
+        {
             return Some((CategoryName::screenshots(), 0.85));
         }
-
-        // 2. Document / Receipt detection by filename keywords
-        let doc_keywords = [
-            "receipt",
-            "invoice",
-            "document",
-            "scan",
-            "statement",
-            "bill",
-            "tax",
-        ];
-        if doc_keywords.iter().any(|&k| filename.contains(k)) {
-            return Some((CategoryName::documents(), 0.90));
-        }
-
-        // 3. Camera photos fallback if EXIF tags exist
-        if is_exif {
-            return Some((CategoryName::camera_photos(), 0.70));
-        }
-
-        None
     }
+
+    // 2. Document / Receipt detection by filename keywords
+    let doc_keywords = [
+        "receipt",
+        "invoice",
+        "document",
+        "scan",
+        "statement",
+        "bill",
+        "tax",
+    ];
+    if doc_keywords.iter().any(|&k| filename.contains(k)) {
+        return Some((CategoryName::documents(), 0.90));
+    }
+
+    // 3. Camera photos fallback if EXIF tags exist
+    if facts.is_exif {
+        return Some((CategoryName::camera_photos(), 0.70));
+    }
+
+    None
 }
 
 pub fn normalize_vector(v: &[f32]) -> Vec<f32> {
@@ -377,8 +387,12 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::classification::{FrameSize, PhotoDate};
+    // The bar is a setting, so every test that is not about the bar itself
+    // decides against the shipped default.
     use crate::settings::DEFAULT_CONFIDENCE_THRESHOLD;
     use std::f32::consts::FRAC_1_SQRT_2;
+    use std::path::PathBuf;
 
     #[test]
     fn test_cosine_similarity() {
@@ -403,18 +417,57 @@ mod tests {
         assert_eq!(normalize_vector(&[]), Vec::<f32>::new());
     }
 
+    /// Facts for a photo that trips no rule: no keyword in the name, no EXIF,
+    /// and no frame size the ratio rules could read.
+    fn plain_facts(embedding: Vec<f32>) -> PhotoFacts {
+        PhotoFacts {
+            path: PathBuf::from("/photos/unremarkable_file.xyz"),
+            date: PhotoDate::new(2026, 1),
+            frame: None,
+            is_exif: false,
+            embedding,
+        }
+    }
+
+    fn facts_with(path: &str, is_exif: bool, frame: Option<(u32, u32)>) -> PhotoFacts {
+        PhotoFacts {
+            path: PathBuf::from(path),
+            date: PhotoDate::new(2026, 1),
+            frame: frame.map(|(w, h)| FrameSize::new(w, h)),
+            is_exif,
+            embedding: Vec::new(),
+        }
+    }
+
+    /// The `(category, confidence, source)` a classification decided, panicking
+    /// on a `Pending` — every test here classifies.
+    fn assert_decided(
+        classification: &Classification,
+        category: &CategoryName,
+        source: ClassificationSource,
+    ) {
+        let decision = classification
+            .decided()
+            .unwrap_or_else(|| panic!("expected a decision, got {classification:?}"));
+        assert_eq!(&decision.category, category);
+        assert_eq!(decision.source, source);
+    }
+
     #[test]
     fn test_classify_empty() {
         let store = ProfileStore::default();
-        let res = store.classify(&[], DEFAULT_CONFIDENCE_THRESHOLD);
-        assert_eq!(res.category, CategoryName::unsorted());
-        assert_eq!(res.confidence, 0.0);
-        assert_eq!(res.source, ClassificationSource::UnsortedFallback);
+        assert_decided(
+            &store.classify(&plain_facts(Vec::new()), DEFAULT_CONFIDENCE_THRESHOLD),
+            &CategoryName::unsorted(),
+            ClassificationSource::UnsortedFallback,
+        );
 
-        let res2 = store.classify(&[1.0, 0.0], DEFAULT_CONFIDENCE_THRESHOLD);
-        assert_eq!(res2.category, CategoryName::unsorted());
-        assert_eq!(res2.confidence, 0.0);
-        assert_eq!(res2.source, ClassificationSource::UnsortedFallback);
+        // An embedding with nothing to compare it against is still nothing.
+        assert_decided(
+            &store.classify(&plain_facts(vec![1.0, 0.0]), DEFAULT_CONFIDENCE_THRESHOLD),
+            &CategoryName::unsorted(),
+            ClassificationSource::UnsortedFallback,
+        );
     }
 
     #[test]
@@ -426,15 +479,29 @@ mod tests {
             ],
         };
 
-        let res1 = store.classify(&[0.9, 0.1, 0.0], DEFAULT_CONFIDENCE_THRESHOLD);
-        assert_eq!(res1.category, CategoryName::from_user_input("Landscape"));
-        assert!(res1.confidence > DEFAULT_CONFIDENCE_THRESHOLD);
-        assert_eq!(res1.source, ClassificationSource::VisualModel);
+        let res1 = store.classify(
+            &plain_facts(vec![0.9, 0.1, 0.0]),
+            DEFAULT_CONFIDENCE_THRESHOLD,
+        );
+        assert_decided(
+            &res1,
+            &CategoryName::from_user_input("Landscape"),
+            ClassificationSource::VisualModel,
+        );
+        assert!(res1.decided().unwrap().confidence > DEFAULT_CONFIDENCE_THRESHOLD);
+        // A trained profile's own name is not on the custom path.
+        assert!(!res1.decided().unwrap().is_custom);
 
-        let res2 = store.classify(&[0.1, 0.9, 0.0], DEFAULT_CONFIDENCE_THRESHOLD);
-        assert_eq!(res2.category, CategoryName::from_user_input("Portrait"));
-        assert!(res2.confidence > DEFAULT_CONFIDENCE_THRESHOLD);
-        assert_eq!(res2.source, ClassificationSource::VisualModel);
+        let res2 = store.classify(
+            &plain_facts(vec![0.1, 0.9, 0.0]),
+            DEFAULT_CONFIDENCE_THRESHOLD,
+        );
+        assert_decided(
+            &res2,
+            &CategoryName::from_user_input("Portrait"),
+            ClassificationSource::VisualModel,
+        );
+        assert!(res2.decided().unwrap().confidence > DEFAULT_CONFIDENCE_THRESHOLD);
     }
 
     #[test]
@@ -445,35 +512,90 @@ mod tests {
 
         // Similarity is 0.5, under the default threshold: the closest centroid
         // still cannot claim the photo, so it is handed to the rules.
-        let res = store.classify(&[0.5, 0.866, 0.0], DEFAULT_CONFIDENCE_THRESHOLD);
-        assert_eq!(res.category, CategoryName::unsorted());
-        assert!(res.confidence < DEFAULT_CONFIDENCE_THRESHOLD);
-        assert_eq!(res.source, ClassificationSource::UnsortedFallback);
+        let res = store.classify(
+            &plain_facts(vec![0.5, 0.866, 0.0]),
+            DEFAULT_CONFIDENCE_THRESHOLD,
+        );
+        assert_decided(
+            &res,
+            &CategoryName::unsorted(),
+            ClassificationSource::UnsortedFallback,
+        );
+        assert!(res.decided().unwrap().confidence < DEFAULT_CONFIDENCE_THRESHOLD);
+    }
+
+    #[test]
+    fn an_unknown_category_is_decided_as_custom() {
+        // `is_custom` is settled here, in the one place a decision is built, so
+        // no caller has to re-ask which profiles existed at the time.
+        let store = ProfileStore {
+            profiles: vec![CategoryProfile::new("Sunsets", vec![1.0, 0.0, 0.0])],
+        };
+
+        // Nothing matches this photo, so it lands on Unsorted — which matches no
+        // profile, hence the custom path.
+        assert!(
+            store
+                .classify(&plain_facts(Vec::new()), DEFAULT_CONFIDENCE_THRESHOLD)
+                .decided()
+                .unwrap()
+                .is_custom
+        );
+
+        // A rule category is not a trained profile either.
+        assert!(
+            store
+                .classify(
+                    &facts_with("/photos/my_screenshot.png", false, None),
+                    DEFAULT_CONFIDENCE_THRESHOLD
+                )
+                .decided()
+                .unwrap()
+                .is_custom
+        );
+
+        // A trained profile's name is not custom.
+        assert!(
+            !store
+                .classify(
+                    &plain_facts(vec![1.0, 0.0, 0.0]),
+                    DEFAULT_CONFIDENCE_THRESHOLD
+                )
+                .decided()
+                .unwrap()
+                .is_custom
+        );
     }
 
     #[test]
     fn test_classify_honours_the_given_threshold() {
-        // The bar is the user's setting, so the same embedding has to be
-        // classifiable or not purely by which threshold it is given.
+        // The bar is the user's setting, so the same photo has to be classifiable
+        // or not purely by which threshold it is classified against.
         let store = ProfileStore {
             profiles: vec![CategoryProfile::new("Landscape", vec![1.0, 0.0, 0.0])],
         };
-        // A unit vector at 0.6 to the profile axis, so the similarity is exactly 0.6
-        // rather than a rounded approximation of it.
-        let embedding = [0.6_f32, 0.8, 0.0];
+        // A unit vector at 0.6 to the profile axis, so the similarity is exactly
+        // 0.6 rather than a rounded approximation of it.
+        let facts = plain_facts(vec![0.6, 0.8, 0.0]);
 
-        let lenient = store.classify(&embedding, 0.30);
-        assert_eq!(lenient.category, CategoryName::from_user_input("Landscape"));
-        assert_eq!(lenient.source, ClassificationSource::VisualModel);
-        assert!((lenient.confidence - 0.6).abs() < 1e-5);
+        let lenient = store.classify(&facts, 0.30);
+        assert_decided(
+            &lenient,
+            &CategoryName::from_user_input("Landscape"),
+            ClassificationSource::VisualModel,
+        );
+        assert!((lenient.decided().unwrap().confidence - 0.6).abs() < 1e-5);
 
-        let strict = store.classify(&embedding, 0.80);
-        assert_eq!(strict.category, CategoryName::unsorted());
-        assert_eq!(strict.source, ClassificationSource::UnsortedFallback);
+        let strict = store.classify(&facts, 0.80);
+        assert_decided(
+            &strict,
+            &CategoryName::unsorted(),
+            ClassificationSource::UnsortedFallback,
+        );
 
         // The rejected match still reports the similarity it found, so the UI
         // can show the user how close it came.
-        assert!((strict.confidence - 0.6).abs() < 1e-5);
+        assert!((strict.decided().unwrap().confidence - 0.6).abs() < 1e-5);
     }
 
     #[test]
@@ -551,7 +673,7 @@ mod tests {
     }
 
     #[test]
-    fn test_load_canonicalises_a_name_that_is_not_one_path_component() {
+fn test_load_canonicalises_a_name_that_is_not_one_path_component() {
         // The train box took any text before `CategoryName` existed, so a saved
         // profile can hold a name that is not a legal directory. Canonicalising
         // it here — rather than at the point of use — is what keeps the profile
@@ -597,97 +719,179 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_heuristics_screenshot() {
-        let p1 = Path::new("/path/to/Screenshot_2026-09-14.png");
-        let res = ProfileStore::classify_heuristics(p1, false, 1920, 1080);
-        assert!(res.is_some());
-        let (cat, conf) = res.unwrap();
-        assert_eq!(cat, CategoryName::screenshots());
-        assert!(conf >= 0.85);
+    fn test_classify_rules_screenshot() {
+        let store = ProfileStore::default();
+        let res = store.classify(
+            &facts_with(
+                "/path/to/Screenshot_2026-09-14.png",
+                false,
+                Some((1920, 1080)),
+            ),
+            DEFAULT_CONFIDENCE_THRESHOLD,
+        );
+        assert_decided(
+            &res,
+            &CategoryName::screenshots(),
+            ClassificationSource::Heuristic,
+        );
+        assert!(res.decided().unwrap().confidence >= 0.85);
 
-        let p2 = Path::new("/path/to/Screen Shot 2026.jpg");
-        let res2 = ProfileStore::classify_heuristics(p2, false, 2560, 1440);
-        assert_eq!(res2.unwrap().0, CategoryName::screenshots());
+        let res2 = store.classify(
+            &facts_with("/path/to/Screen Shot 2026.jpg", false, Some((2560, 1440))),
+            DEFAULT_CONFIDENCE_THRESHOLD,
+        );
+        assert_decided(
+            &res2,
+            &CategoryName::screenshots(),
+            ClassificationSource::Heuristic,
+        );
 
-        // Ratio matching without keyword
-        let p3 = Path::new("/path/to/image_12345.png");
-        let res3 = ProfileStore::classify_heuristics(p3, false, 1920, 1080);
-        assert_eq!(res3.unwrap().0, CategoryName::screenshots());
+        // Ratio matching without a keyword, on a non-EXIF PNG at screen size.
+        let res3 = store.classify(
+            &facts_with("/path/to/image_12345.png", false, Some((1920, 1080))),
+            DEFAULT_CONFIDENCE_THRESHOLD,
+        );
+        assert_decided(
+            &res3,
+            &CategoryName::screenshots(),
+            ClassificationSource::Heuristic,
+        );
     }
 
     #[test]
-    fn test_classify_heuristics_documents() {
-        let p = Path::new("/path/to/grocery_receipt_october.jpg");
-        let res = ProfileStore::classify_heuristics(p, false, 800, 1200);
-        assert!(res.is_some());
-        let (cat, conf) = res.unwrap();
-        assert_eq!(cat, CategoryName::documents());
-        assert!(conf >= 0.90);
+    fn test_classify_rules_documents() {
+        let store = ProfileStore::default();
+        let res = store.classify(
+            &facts_with(
+                "/path/to/grocery_receipt_october.jpg",
+                false,
+                Some((800, 1200)),
+            ),
+            DEFAULT_CONFIDENCE_THRESHOLD,
+        );
+        assert_decided(
+            &res,
+            &CategoryName::documents(),
+            ClassificationSource::Heuristic,
+        );
+        assert!(res.decided().unwrap().confidence >= 0.90);
     }
 
     #[test]
-    fn test_classify_heuristics_camera_fallback() {
-        let p = Path::new("/path/to/IMG_4321.jpg");
-        let res = ProfileStore::classify_heuristics(p, true, 4000, 3000);
-        assert!(res.is_some());
-        let (cat, _) = res.unwrap();
-        assert_eq!(cat, CategoryName::camera_photos());
+    fn test_classify_rules_camera_fallback() {
+        let store = ProfileStore::default();
+        let res = store.classify(
+            &facts_with("/path/to/IMG_4321.jpg", true, Some((4000, 3000))),
+            DEFAULT_CONFIDENCE_THRESHOLD,
+        );
+        assert_decided(
+            &res,
+            &CategoryName::camera_photos(),
+            ClassificationSource::Heuristic,
+        );
     }
 
     #[test]
-    fn test_classify_with_heuristics_fallbacks() {
+    fn the_resolution_rule_reads_the_frame_size_it_is_given() {
+        // The rule that made the divergence a bug: a 16:9 PNG at 1920x1080 is a
+        // screenshot, and the same photo's 200x140 thumbnail is not. Since
+        // `frame` is a field of the facts rather than a loose argument, the two
+        // callers that used to pass the thumbnail's size have no way to.
+        let store = ProfileStore::default();
+
+        let full = store.classify(
+            &facts_with("/p/plain.png", false, Some((1920, 1080))),
+            DEFAULT_CONFIDENCE_THRESHOLD,
+        );
+        assert_decided(
+            &full,
+            &CategoryName::screenshots(),
+            ClassificationSource::Heuristic,
+        );
+
+        let thumbnail = store.classify(
+            &facts_with("/p/plain.png", false, Some((200, 140))),
+            DEFAULT_CONFIDENCE_THRESHOLD,
+        );
+        assert_decided(
+            &thumbnail,
+            &CategoryName::unsorted(),
+            ClassificationSource::UnsortedFallback,
+        );
+
+        // And with no frame size recorded at all, the rule declines rather than
+        // guessing from whatever is to hand.
+        let unrecorded = store.classify(
+            &facts_with("/p/plain.png", false, None),
+            DEFAULT_CONFIDENCE_THRESHOLD,
+        );
+        assert_decided(
+            &unrecorded,
+            &CategoryName::unsorted(),
+            ClassificationSource::UnsortedFallback,
+        );
+    }
+
+    #[test]
+    fn test_classify_tier_fallbacks() {
         let store = ProfileStore {
             profiles: vec![CategoryProfile::new("Landscape", vec![1.0, 0.0, 0.0])],
         };
 
-        // 1. Matches visual
-        let res1 = store.classify_with_heuristics(
-            &[0.99, 0.01, 0.0],
-            Path::new("screenshot.png"),
-            false,
-            1920,
-            1080,
+        // 1. The centroid claims it, even over a rule that would also match.
+        let res1 = store.classify(
+            &PhotoFacts {
+                path: PathBuf::from("screenshot.png"),
+                embedding: vec![0.99, 0.01, 0.0],
+                ..facts_with("screenshot.png", false, Some((1920, 1080)))
+            },
             DEFAULT_CONFIDENCE_THRESHOLD,
         );
-        assert_eq!(res1.category, CategoryName::from_user_input("Landscape"));
-        assert_eq!(res1.source, ClassificationSource::VisualModel);
+        assert_decided(
+            &res1,
+            &CategoryName::from_user_input("Landscape"),
+            ClassificationSource::VisualModel,
+        );
 
-        // 2. Visual below threshold or missing, falls back to heuristic
-        let res2 = store.classify_with_heuristics(
-            &[],
-            Path::new("my_screenshot.png"),
-            false,
-            1920,
-            1080,
+        // 2. Visual below threshold or missing, falls back to the rules.
+        let res2 = store.classify(
+            &facts_with("my_screenshot.png", false, Some((1920, 1080))),
             DEFAULT_CONFIDENCE_THRESHOLD,
         );
-        assert_eq!(res2.category, CategoryName::screenshots());
-        assert_eq!(res2.source, ClassificationSource::Heuristic);
+        assert_decided(
+            &res2,
+            &CategoryName::screenshots(),
+            ClassificationSource::Heuristic,
+        );
 
         // 2b. A real embedding that merely resembles the profile still loses to
         // the rules, which is the whole reason the threshold gate exists.
-        let res2b = store.classify_with_heuristics(
-            &[0.5, 0.866, 0.0],
-            Path::new("receipt_from_the_shop.jpg"),
-            false,
-            800,
-            1200,
+        let res2b = store.classify(
+            &PhotoFacts {
+                path: PathBuf::from("receipt_from_the_shop.jpg"),
+                embedding: vec![0.5, 0.866, 0.0],
+                ..facts_with("receipt_from_the_shop.jpg", false, Some((800, 1200)))
+            },
             DEFAULT_CONFIDENCE_THRESHOLD,
         );
-        assert_eq!(res2b.category, CategoryName::documents());
-        assert_eq!(res2b.source, ClassificationSource::Heuristic);
+        assert_decided(
+            &res2b,
+            &CategoryName::documents(),
+            ClassificationSource::Heuristic,
+        );
 
-        // 3. Neither matches -> Unsorted
-        let res3 = store.classify_with_heuristics(
-            &[],
-            Path::new("unknown_file.xyz"),
-            false,
-            500,
-            500,
+        // 3. Neither matches -> Unsorted, still reporting how near the closest
+        // profile came.
+        let res3 = store.classify(
+            &facts_with("unknown_file.xyz", false, Some((500, 500))),
             DEFAULT_CONFIDENCE_THRESHOLD,
         );
-        assert_eq!(res3.category, CategoryName::unsorted());
-        assert_eq!(res3.source, ClassificationSource::UnsortedFallback);
+        assert_decided(
+            &res3,
+            &CategoryName::unsorted(),
+            ClassificationSource::UnsortedFallback,
+        );
+        assert!(res3.decided().unwrap().confidence <= 1.0);
     }
 
     #[test]

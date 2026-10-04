@@ -1,3 +1,4 @@
+use crate::classification::{FrameSize, PhotoDate};
 use anyhow::Result;
 use rusqlite::{params, Connection};
 use std::fs::File;
@@ -15,13 +16,23 @@ pub struct CachedThumbnail {
     pub rgba: Vec<u8>,
 }
 
+/// One cached photo: everything a rescan needs to classify and display it
+/// without reading the file again.
 #[derive(Debug, Clone)]
 pub struct CachedPhotoData {
-    pub year: u32,
-    pub month: u32,
+    pub date: PhotoDate,
     pub is_exif_date: bool,
     pub embedding: Vec<f32>,
     pub thumbnail: Option<CachedThumbnail>,
+    /// The photo's true pixel dimensions, as `media::load_scan_preview` read
+    /// them off the file.
+    ///
+    /// Stored because the rules key off resolution and the thumbnail is at most
+    /// 200x140, so a rescan that used it classified a 1920x1080 PNG as
+    /// Unsorted — the reverse of what the scan that read the file decided.
+    /// `None` for rows written before these columns existed, which the scan
+    /// backfills once.
+    pub frame: Option<FrameSize>,
 }
 
 impl Database {
@@ -36,7 +47,9 @@ impl Database {
                 embedding BLOB NOT NULL,
                 thumb_width INTEGER,
                 thumb_height INTEGER,
-                thumbnail BLOB
+                thumbnail BLOB,
+                original_width INTEGER,
+                original_height INTEGER
             )",
             [],
         )?;
@@ -47,6 +60,14 @@ impl Database {
             [],
         );
         let _ = conn.execute("ALTER TABLE photo_cache ADD COLUMN thumbnail BLOB", []);
+        let _ = conn.execute(
+            "ALTER TABLE photo_cache ADD COLUMN original_width INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE photo_cache ADD COLUMN original_height INTEGER",
+            [],
+        );
 
         // The cache takes one insert per photo during a scan and is read back on
         // every rescan. Under the default rollback journal with
@@ -80,7 +101,7 @@ impl Database {
         // cached rather than re-parsed every time. Safe because all access goes
         // through a single connection guarded by a mutex.
         let mut stmt = self.conn.prepare_cached(
-            "SELECT year, month, is_exif_date, embedding, thumb_width, thumb_height, thumbnail FROM photo_cache WHERE hash = ?1",
+            "SELECT year, month, is_exif_date, embedding, thumb_width, thumb_height, thumbnail, original_width, original_height FROM photo_cache WHERE hash = ?1",
         )?;
         let mut rows = stmt.query(params![hash])?;
 
@@ -112,12 +133,23 @@ impl Database {
                 _ => None,
             };
 
+            // A row cached before the frame columns existed has no size to
+            // offer, and the scan re-reads the file's header once to fill it in.
+            // Zero dimensions are treated the same way: they are not a frame
+            // any ratio rule could read.
+            let original_w: Option<u32> = row.get(7)?;
+            let original_h: Option<u32> = row.get(8)?;
+            let frame = match (original_w, original_h) {
+                (Some(w), Some(h)) if w > 0 && h > 0 => Some(FrameSize::new(w, h)),
+                _ => None,
+            };
+
             Ok(Some(CachedPhotoData {
-                year,
-                month,
+                date: PhotoDate::new(year, month),
                 is_exif_date: is_exif != 0,
                 embedding,
                 thumbnail,
+                frame,
             }))
         } else {
             Ok(None)
@@ -134,13 +166,28 @@ impl Database {
             Some(t) => (Some(t.width), Some(t.height), Some(t.rgba.as_slice())),
             None => (None, None, None),
         };
+        let (frame_w, frame_h) = match data.frame {
+            Some(frame) => (Some(frame.width), Some(frame.height)),
+            None => (None, None),
+        };
 
         self.conn
             .prepare_cached(
-                "INSERT OR REPLACE INTO photo_cache (hash, year, month, is_exif_date, embedding, thumb_width, thumb_height, thumbnail)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT OR REPLACE INTO photo_cache (hash, year, month, is_exif_date, embedding, thumb_width, thumb_height, thumbnail, original_width, original_height)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             )?
-            .execute(params![hash, data.year, data.month, data.is_exif_date as i32, blob, tw, th, trgba])?;
+            .execute(params![
+                hash,
+                data.date.year,
+                data.date.month,
+                data.is_exif_date as i32,
+                blob,
+                tw,
+                th,
+                trgba,
+                frame_w,
+                frame_h,
+            ])?;
         Ok(())
     }
 }
@@ -156,8 +203,7 @@ mod tests {
         let hash = "abc123hash";
         let thumb_rgba = vec![255u8, 0, 0, 255, 0, 255, 0, 255]; // 2 pixels RGBA
         let photo_data = CachedPhotoData {
-            year: 2025,
-            month: 12,
+            date: PhotoDate::new(2025, 12),
             is_exif_date: true,
             embedding: vec![0.123, 0.456, -0.789, 1.0],
             thumbnail: Some(CachedThumbnail {
@@ -165,6 +211,7 @@ mod tests {
                 height: 1,
                 rgba: thumb_rgba.clone(),
             }),
+            frame: Some(FrameSize::new(4000, 3000)),
         };
 
         db.insert_cache(hash, &photo_data).expect("insert cache");
@@ -173,9 +220,9 @@ mod tests {
             .expect("query cache")
             .expect("found record");
 
-        assert_eq!(retrieved.year, 2025);
-        assert_eq!(retrieved.month, 12);
+        assert_eq!(retrieved.date, PhotoDate::new(2025, 12));
         assert!(retrieved.is_exif_date);
+        assert_eq!(retrieved.frame, Some(FrameSize::new(4000, 3000)));
         assert_eq!(retrieved.embedding.len(), 4);
         for (a, b) in retrieved.embedding.iter().zip(&photo_data.embedding) {
             assert!((a - b).abs() < 1e-6);
@@ -254,13 +301,66 @@ mod tests {
             .get_cached("legacy_hash")
             .expect("query legacy item")
             .expect("item exists");
-        assert_eq!(cached.year, 2022);
-        assert_eq!(cached.month, 5);
+        assert_eq!(cached.date, PhotoDate::new(2022, 5));
         assert!(cached.is_exif_date);
         assert_eq!(cached.embedding, vec![1.0, 2.0]);
         assert_eq!(cached.thumbnail, None);
+        // The columns did not exist when this row was written, so it has no
+        // frame size to offer. The scan backfills one from the file's header;
+        // what matters here is that the reader reports the absence rather than
+        // inventing a size from the thumbnail.
+        assert_eq!(cached.frame, None);
 
         let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn test_db_frame_size_survives_a_rescan() {
+        // The reason the frame columns exist: the rescan has to read the same
+        // resolution the first scan decided on, out of the cache alone.
+        let db = Database::init(":memory:").expect("init in-memory db");
+        let hash = "frame_hash";
+        db.insert_cache(
+            hash,
+            &CachedPhotoData {
+                date: PhotoDate::new(2026, 9),
+                is_exif_date: false,
+                embedding: vec![0.1, 0.2],
+                thumbnail: Some(CachedThumbnail {
+                    width: 200,
+                    height: 140,
+                    rgba: vec![0u8; 200 * 140 * 4],
+                }),
+                frame: Some(FrameSize::new(1920, 1080)),
+            },
+        )
+        .expect("insert");
+
+        let cached = db.get_cached(hash).expect("query").expect("found");
+        // The thumbnail is a different shape entirely, and reading the frame
+        // columns is what stops a rescan using it.
+        assert_eq!(cached.frame, Some(FrameSize::new(1920, 1080)));
+        assert_eq!(
+            cached.thumbnail.map(|t| (t.width, t.height)),
+            Some((200, 140))
+        );
+    }
+
+    #[test]
+    fn test_db_zero_frame_dimensions_read_as_unknown() {
+        // A corrupt row must not claim a 0x0 frame: the ratio rules would
+        // divide by it, and the scan would treat it as needing a backfill.
+        let db = Database::init(":memory:").expect("init in-memory db");
+        db.conn
+            .execute(
+                "INSERT INTO photo_cache (hash, year, month, is_exif_date, embedding, original_width, original_height)
+                 VALUES ('zero_frame', 2024, 1, 1, X'0000803f', 0, 0)",
+                [],
+            )
+            .unwrap();
+
+        let cached = db.get_cached("zero_frame").expect("query").expect("found");
+        assert_eq!(cached.frame, None);
     }
 
     #[test]
@@ -279,7 +379,7 @@ mod tests {
             .get_cached("corrupted_thumb")
             .expect("query item")
             .expect("item exists");
-        assert_eq!(cached.year, 2024);
+        assert_eq!(cached.date, PhotoDate::new(2024, 1));
         // Thumbnail should be gracefully set to None when buffer is truncated/mismatched
         assert_eq!(cached.thumbnail, None);
     }
@@ -290,17 +390,16 @@ mod tests {
         let hash = "update_test_hash";
 
         let initial_data = CachedPhotoData {
-            year: 2020,
-            month: 1,
+            date: PhotoDate::new(2020, 1),
             is_exif_date: false,
             embedding: vec![0.1],
             thumbnail: None,
+            frame: None,
         };
         db.insert_cache(hash, &initial_data).expect("insert");
 
         let updated_data = CachedPhotoData {
-            year: 2021,
-            month: 6,
+            date: PhotoDate::new(2021, 6),
             is_exif_date: true,
             embedding: vec![0.5, 0.9],
             thumbnail: Some(CachedThumbnail {
@@ -308,14 +407,15 @@ mod tests {
                 height: 1,
                 rgba: vec![10, 20, 30, 40],
             }),
+            frame: Some(FrameSize::new(3000, 4000)),
         };
         db.insert_cache(hash, &updated_data).expect("update");
 
         let retrieved = db.get_cached(hash).unwrap().unwrap();
-        assert_eq!(retrieved.year, 2021);
-        assert_eq!(retrieved.month, 6);
+        assert_eq!(retrieved.date, PhotoDate::new(2021, 6));
         assert!(retrieved.is_exif_date);
         assert_eq!(retrieved.embedding, vec![0.5, 0.9]);
+        assert_eq!(retrieved.frame, Some(FrameSize::new(3000, 4000)));
         assert_eq!(
             retrieved.thumbnail,
             Some(CachedThumbnail {
@@ -324,6 +424,40 @@ mod tests {
                 rgba: vec![10, 20, 30, 40],
             })
         );
+    }
+
+    #[test]
+    fn test_db_backfilling_a_frame_size_into_a_legacy_row() {
+        // What a rescan of a pre-frame-size cache does: the row comes back
+        // without a frame, and writing the size the file reports puts it there
+        // without disturbing anything else on the row.
+        let db = Database::init(":memory:").expect("init in-memory db");
+        let hash = "backfill_hash";
+        db.insert_cache(
+            hash,
+            &CachedPhotoData {
+                date: PhotoDate::new(2023, 4),
+                is_exif_date: false,
+                embedding: vec![0.3],
+                thumbnail: Some(CachedThumbnail {
+                    width: 2,
+                    height: 1,
+                    rgba: vec![1u8, 2, 3, 4, 5, 6, 7, 8],
+                }),
+                frame: None,
+            },
+        )
+        .expect("insert");
+
+        let mut row = db.get_cached(hash).unwrap().unwrap();
+        assert_eq!(row.frame, None);
+        row.frame = Some(FrameSize::new(1920, 1080));
+        db.insert_cache(hash, &row).expect("backfill");
+
+        let reread = db.get_cached(hash).unwrap().unwrap();
+        assert_eq!(reread.frame, Some(FrameSize::new(1920, 1080)));
+        assert_eq!(reread.date, PhotoDate::new(2023, 4));
+        assert_eq!(reread.thumbnail.map(|t| t.rgba.len()), Some(8));
     }
 
     #[test]
@@ -341,8 +475,7 @@ mod tests {
             handles.push(thread::spawn(move || {
                 let hash = format!("hash_{}", i);
                 let data = CachedPhotoData {
-                    year: 2000 + i as u32,
-                    month: (i % 12 + 1) as u32,
+                    date: PhotoDate::new(2000 + i as u32, (i % 12 + 1) as u32),
                     is_exif_date: true,
                     embedding: vec![i as f32],
                     thumbnail: Some(CachedThumbnail {
@@ -350,6 +483,7 @@ mod tests {
                         height: 1,
                         rgba: vec![i as u8, 0, 0, 255],
                     }),
+                    frame: Some(FrameSize::new(1000 + i as u32, 800)),
                 };
                 let guard = db_clone.lock().unwrap();
                 guard.insert_cache(&hash, &data).unwrap();
@@ -364,7 +498,8 @@ mod tests {
         for i in 0..10 {
             let hash = format!("hash_{}", i);
             let item = guard.get_cached(&hash).unwrap().unwrap();
-            assert_eq!(item.year, 2000 + i as u32);
+            assert_eq!(item.date.year, 2000 + i as u32);
+            assert_eq!(item.frame, Some(FrameSize::new(1000 + i as u32, 800)));
         }
     }
 }
