@@ -18,6 +18,7 @@ Cargo.lock
 # rustc internal compiler error stack dump files
 rustc-ice-*.txt
 
-last_execution_manifest.json
+# Both the transfer journal and the staging file it is renamed in from
+last_execution_manifest.json*
 photo_cache.db
 profiles.json
