@@ -133,10 +133,9 @@ impl Database {
                 _ => None,
             };
 
-            // A row cached before the frame columns existed has no size to
-            // offer, and the scan re-reads the file's header once to fill it in.
-            // Zero dimensions are treated the same way: they are not a frame
-            // any ratio rule could read.
+            // A row cached before the frame columns existed has no size to offer,
+            // and the scan re-reads the header once to fill it in. Zero dimensions
+            // count as unknown: not a frame any ratio rule could read.
             let original_w: Option<u32> = row.get(7)?;
             let original_h: Option<u32> = row.get(8)?;
             let frame = match (original_w, original_h) {
@@ -305,10 +304,8 @@ mod tests {
         assert!(cached.is_exif_date);
         assert_eq!(cached.embedding, vec![1.0, 2.0]);
         assert_eq!(cached.thumbnail, None);
-        // The columns did not exist when this row was written, so it has no
-        // frame size to offer. The scan backfills one from the file's header;
-        // what matters here is that the reader reports the absence rather than
-        // inventing a size from the thumbnail.
+        // A legacy row has no frame size. What matters here is that the reader
+        // reports the absence rather than inventing one from the thumbnail.
         assert_eq!(cached.frame, None);
 
         let _ = std::fs::remove_file(&db_path);
@@ -316,8 +313,8 @@ mod tests {
 
     #[test]
     fn test_db_frame_size_survives_a_rescan() {
-        // The reason the frame columns exist: the rescan has to read the same
-        // resolution the first scan decided on, out of the cache alone.
+        // The rescan has to read the same resolution the first scan decided on,
+        // out of the cache alone.
         let db = Database::init(":memory:").expect("init in-memory db");
         let hash = "frame_hash";
         db.insert_cache(
@@ -348,8 +345,8 @@ mod tests {
 
     #[test]
     fn test_db_zero_frame_dimensions_read_as_unknown() {
-        // A corrupt row must not claim a 0x0 frame: the ratio rules would
-        // divide by it, and the scan would treat it as needing a backfill.
+        // A corrupt row must not claim a 0x0 frame: the ratio rules would divide
+        // by it, and the scan would treat it as needing a backfill.
         let db = Database::init(":memory:").expect("init in-memory db");
         db.conn
             .execute(
@@ -428,9 +425,8 @@ mod tests {
 
     #[test]
     fn test_db_backfilling_a_frame_size_into_a_legacy_row() {
-        // What a rescan of a pre-frame-size cache does: the row comes back
-        // without a frame, and writing the size the file reports puts it there
-        // without disturbing anything else on the row.
+        // What a rescan of a pre-frame-size cache does: the row comes back without
+        // a frame, and writing the size the file reports fills it in.
         let db = Database::init(":memory:").expect("init in-memory db");
         let hash = "backfill_hash";
         db.insert_cache(

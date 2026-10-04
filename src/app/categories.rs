@@ -28,10 +28,9 @@ impl super::PhotoOrganizerApp {
                 visual_count += 1;
             }
             // The same write a scan's `Update` makes, so a manual pick is
-            // preserved here exactly as it is there. The facts come off the
-            // staged item, which carries the frame size the scan read — not the
-            // thumbnail's, which is what used to rule a screenshot back out of
-            // Screenshots the moment the user hit this button.
+            // preserved here exactly as it is there. The facts come off the staged
+            // item, which carries the frame size the scan read rather than the
+            // thumbnail's.
             item.apply_classification(&self.profiles, &facts, classification);
         }
 
