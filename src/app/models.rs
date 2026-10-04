@@ -1,12 +1,10 @@
 //! Plain data the UI renders, plus the one method that writes a classification
 //! onto a photo.
 //!
-//! The records here flow between the scanner, the profile store and the widgets.
-//! The write method is behaviour, and lives here because this is the record it
-//! writes to: it is the only place a photo's category, confidence, source and
-//! custom flag are ever changed by the pipeline, which is what keeps a scan's
-//! `Update` and **Re-classify All** from disagreeing about what a manual pick
-//! means.
+//! [`StagedItem::apply_classification`] is the only place a photo's category,
+//! confidence, source and custom flag are changed by the pipeline, which is what
+//! keeps a scan's `Update` and **Re-classify All** from disagreeing about what a
+//! manual pick means.
 
 use crate::classification::{
     Classification, ClassificationSource, FrameSize, PhotoDate, PhotoFacts, CLASSIFYING_LABEL,
@@ -23,17 +21,14 @@ pub struct StagedItem {
     pub is_exif: bool,
     /// The photo's true frame size, carried from the scan that read the file.
     ///
-    /// The grid only ever decodes a ≤200x140 thumbnail, and the rules key off
-    /// resolution, so this is the field that stopped a re-classification being
-    /// fed the thumbnail's dimensions instead.
+    /// The grid only ever decodes a ≤200x140 thumbnail and the rules key off
+    /// resolution, so a re-classification needs this rather than `texture.size()`.
     pub frame: Option<FrameSize>,
     pub category: String,
     pub confidence: f32,
     pub source: ClassificationSource,
-    /// True while the photo is staged but not yet classified.
-    ///
-    /// Nothing preserves a pending photo: its category is a placeholder rather
-    /// than a decision, so whatever the scan decides next replaces it.
+    /// True while the photo is staged but not yet classified. Nothing preserves a
+    /// pending photo: its category is a placeholder, not a decision.
     pub pending: bool,
     pub embedding: Vec<f32>,
     pub texture: egui::TextureHandle,
@@ -68,26 +63,19 @@ impl StagedItem {
         item
     }
 
-    /// Writes a classification onto this photo.
+    /// Writes a classification onto this photo, shared by a scan's `Update` and by
+    /// **Re-classify All**. Three rules:
     ///
-    /// The single write path a classification takes, shared by a scan's
-    /// `Update` and by **Re-classify All**. It enforces three rules:
-    ///
-    /// - A **pending** photo is never preserved. Its category is a placeholder
-    ///   shown while the model works, so the decision that follows always lands
-    ///   — even if the user has already clicked over to the custom path, which
-    ///   is what used to leave a photo filed as "Classifying..." for good.
-    /// - A **manual** photo is never re-decided. The name is the user's call, so
-    ///   a later classification leaves the category, confidence and source
-    ///   alone. `is_custom` is still re-derived against the live profiles: a
-    ///   profile can be deleted while the category stands, and the name then
-    ///   has to become editable again or it could never be corrected.
-    /// - The **facts** always refresh, manual or not. A photo is staged before
-    ///   the model has touched it, so the embedding it was staged with is empty
-    ///   and arrives with the decision; without this a photo the user
-    ///   categorised mid-scan would train the next profile on nothing.
-    ///   **Re-classify All** is the degenerate case — it hands back the facts it
-    ///   just read off this item, so the write is a no-op.
+    /// - A **pending** photo is never preserved: its category is a placeholder, so
+    ///   the decision that follows always lands — even if the user has already
+    ///   clicked over to the custom path.
+    /// - A **manual** photo is never re-decided: category, confidence and source
+    ///   are the user's call. `is_custom` is still re-derived against the live
+    ///   profiles, since a profile can be deleted while the category stands.
+    /// - The **facts** always refresh, manual or not. A photo is staged before the
+    ///   model has touched it, so the embedding it was staged with is empty and
+    ///   arrives with the decision; without this, a photo the user categorised
+    ///   mid-scan would train the next profile on nothing.
     pub(super) fn apply_classification(
         &mut self,
         profiles: &ProfileStore,
@@ -103,16 +91,12 @@ impl StagedItem {
         self.apply_decision(profiles, classification);
     }
 
-    /// Writes just the decision, leaving the facts as they are.
-    ///
-    /// The half of `apply_classification` that staging a photo needs: a photo
-    /// that has just arrived already carries its own facts, so only the
-    /// classification is missing.
+    /// Writes just the decision, leaving the facts as they are. Staging a photo
+    /// needs only this: it has just arrived carrying its own facts.
     fn apply_decision(&mut self, profiles: &ProfileStore, classification: Classification) {
         let Classification::Decided(decision) = classification else {
-            // A pending photo shows a label and nothing else: `is_custom` is
-            // false, so the custom name input does not render and there is
-            // nothing on screen for a keystroke to turn into a manual category.
+            // `is_custom` false means the custom name input does not render, so
+            // there is nothing on screen for a keystroke to claim.
             self.category = CLASSIFYING_LABEL.to_string();
             self.confidence = 0.0;
             self.source = ClassificationSource::UnsortedFallback;
@@ -135,25 +119,18 @@ impl StagedItem {
 
     /// Marks this photo's category as the user's own call.
     ///
-    /// The counterpart to `apply_classification`: the one write a photo gets
-    /// that the pipeline does not make, so the Manual flag is set in one place
-    /// rather than at each of the three widgets that can trigger it.
+    /// The counterpart to `apply_classification`: the one write the pipeline does not
+    /// make, so the Manual flag is set in one place rather than at each of the three
+    /// widgets that can trigger it.
     ///
-    /// It deliberately does not touch `pending`. A photo still waiting on the
-    /// model has no category to have claimed — its `category` is a label — so a
-    /// click that arrives in that window does not become a manual claim over
-    /// one. What the model decides a moment later wins, which is the only way
-    /// a photo can be sure not to end up filed as "Classifying...".
+    /// Deliberately does not touch `pending` — a photo still waiting on the model has
+    /// no category to have claimed, so the model's answer wins.
     pub(super) fn mark_manual(&mut self) {
         self.source = ClassificationSource::Manual;
     }
 
-    /// The facts the classifier reads for this photo.
-    ///
-    /// Read back out of the fields the widgets already render rather than
-    /// stored twice. The frame size is carried across the rescan by the scanner
-    /// and by the cache, so a photo classified again is read from the same
-    /// numbers as the scan that read the file.
+    /// The facts the classifier reads for this photo, read back out of the
+    /// fields the widgets already render rather than stored twice.
     pub(super) fn facts(&self) -> PhotoFacts {
         PhotoFacts {
             path: self.source_path.clone(),
@@ -247,8 +224,6 @@ mod tests {
         assert_eq!(item.category, CLASSIFYING_LABEL);
         assert_eq!(item.confidence, 0.0);
         assert_eq!(item.source, ClassificationSource::UnsortedFallback);
-        // The custom name input renders only on the custom path, so a
-        // placeholder that is not on it cannot be typed into.
         assert!(
             !item.is_custom,
             "the placeholder must not be editable as a category name"
@@ -276,10 +251,9 @@ mod tests {
 
     #[test]
     fn the_embedding_catches_up_even_for_a_manual_pick() {
-        // The scan stages a photo before the model has touched it, so the
-        // embedding arrives with the decision. A photo the user categorised in
-        // between has to get it anyway: keeping the empty one would train the
-        // next profile on nothing.
+        // A photo the user categorised between staging and the decision has to
+        // get the embedding anyway: keeping the empty one would train the next
+        // profile on nothing.
         let profiles = ProfileStore::default();
         let mut item = item(&profiles);
         assert!(item.embedding.is_empty(), "staged with nothing to train on");
@@ -311,12 +285,10 @@ mod tests {
 
     #[test]
     fn clicking_other_on_a_pending_photo_claims_nothing() {
-        // The direction the combo actually takes, and the one the fix turns on.
         // Clicking "Other" on a photo the model is still working on puts it on
         // the custom path with the placeholder as its name. That is not a
         // category the user chose, so it must not become a claim that outlives
-        // the real answer — which is how a photo used to end up filed as
-        // "Classifying..." for good.
+        // the real answer.
         let profiles = ProfileStore::default();
         let mut item = item(&profiles);
 
@@ -338,9 +310,8 @@ mod tests {
     #[test]
     fn a_pending_placeholder_is_never_preserved() {
         // The rule in one assertion, whatever route the Manual flag was set by.
-        // Before `Pending` existed the placeholder was a real category with a
-        // text input bound to it, so one keystroke locked it in and the scan's
-        // real answer was skipped for good.
+        // Before `Pending` existed the placeholder was a real category with a text
+        // input bound to it, so one keystroke locked it in for good.
         let profiles = ProfileStore::default();
         let mut item = item(&profiles);
         assert_eq!(item.category, CLASSIFYING_LABEL);
@@ -391,8 +362,8 @@ mod tests {
 
     #[test]
     fn a_manual_category_becomes_editable_when_its_profile_is_deleted() {
-        // Deleting a profile re-classifies, and a preserved manual name has to
-        // follow it onto the custom path or it could never be corrected.
+        // A preserved manual name has to follow the deletion onto the custom
+        // path, or it could never be corrected.
         let mut profiles = ProfileStore::default();
         profiles.add_exemplar("Sunsets", &[1.0, 0.0, 0.0]);
 
@@ -423,7 +394,7 @@ mod tests {
     #[test]
     fn facts_round_trip_the_frame_size_a_rescan_read() {
         // **Re-classify All** rebuilds its facts from the staged item, so the
-        // resolution the rules see has to be the photo's, not the thumbnail's.
+        // resolution the rules see has to be the photo's.
         let profiles = ProfileStore::default();
         let item = item(&profiles);
         assert_eq!(item.facts().frame, Some(FrameSize::new(1920, 1080)));
@@ -438,8 +409,7 @@ mod tests {
     fn a_photo_with_no_recorded_frame_size_says_so() {
         let profiles = ProfileStore::default();
         let ctx = egui::Context::default();
-        // A cache row written before the frame columns existed: the rescan has
-        // no size to offer, and says so rather than inventing one.
+        // A cache row written before the frame columns existed.
         let unknown = PhotoFacts {
             path: PathBuf::from("/photos/legacy.png"),
             date: PhotoDate::new(2020, 1),

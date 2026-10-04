@@ -1,40 +1,27 @@
-//! What a photo is, and what was decided about it.
+//! What a photo is ([`PhotoFacts`]) and what was decided about it
+//! ([`Classification`]).
 //!
-//! These are the two halves of a classification, and they used to be one pile
-//! of loosely typed fields: a path, an `is_exif` flag, a width, a height, an
-//! embedding, a category, a confidence and a source, assembled at three call
-//! sites that disagreed about what `width` and `height` meant. The scanner
-//! passed the photo's true frame size; a cached rescan and **Re-classify All**
-//! passed the ≤200x140 thumbnail's, because that is all a staged item carried.
-//! The screenshot rule needs `width >= 800`, so a 1920x1080 PNG was
-//! **Screenshots** on the scan that read the file and **Unsorted** on every scan
-//! after, with nothing the user did to cause it.
+//! These were one pile of loosely typed fields, assembled at three call sites
+//! that disagreed about what `width` and `height` meant: the scanner passed the
+//! photo's true frame size, while a cached rescan and **Re-classify All** passed
+//! the ≤200x140 thumbnail's. The screenshot rule needs `width >= 800`, so a
+//! 1920x1080 PNG was **Screenshots** on the scan that read the file and
+//! **Unsorted** on every scan after.
 //!
-//! [`PhotoFacts`] is what the photo *is*, and the true frame size is one of its
-//! fields, so there is nothing left to reconstruct it from. [`Classification`]
-//! is what was *decided* about those facts, and it has a
-//! [`Pending`](Classification::Pending) state so that "not classified yet" is a
-//! variant rather than the string `"Classifying..."` stored as a real category.
-//!
-//! The decision itself is made in exactly one place,
-//! [`ProfileStore::classify`](crate::profile_store::ProfileStore::classify), and
-//! written to a staged photo in exactly one place,
-//! [`StagedItem::apply_classification`](crate::app::models::StagedItem::apply_classification).
+//! A decision is made in one place, [`ProfileStore::classify`], and written to a
+//! staged photo in one place, [`StagedItem::apply_classification`].
 
 use crate::category_name::CategoryName;
 use std::path::PathBuf;
 
-/// What a photo is called before the pipeline has decided.
-///
-/// A label rather than a category: nothing may be edited into it, and nothing may
-/// be filed under it. See [`Classification::Pending`] for what happened when it
-/// used to be a category name.
+/// What a photo is called before the pipeline has decided: a label, not a
+/// category, so nothing may be edited into it or filed under it.
 pub const CLASSIFYING_LABEL: &str = "Classifying...";
 
 /// Which tier produced a category, which is also what the grid's badge reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClassificationSource {
-    /// A trained centroid matched, above `CONFIDENCE_THRESHOLD`.
+    /// A trained centroid matched, above the user's confidence threshold.
     VisualModel,
     /// A filename, resolution or EXIF rule matched.
     Heuristic,
@@ -55,13 +42,9 @@ impl std::fmt::Display for ClassificationSource {
     }
 }
 
-/// A photo's true pixel dimensions.
-///
-/// The rule tier keys off resolution — a 1920x1080 PNG is a screenshot, a
-/// 200x140 one is not — so this is a fact about the file, not about whatever
-/// size happened to be decoded for the grid. It travels in [`PhotoFacts`] and is
-/// cached next to the thumbnail, so every classification of a photo sees the
-/// same numbers.
+/// A photo's true pixel dimensions: a fact about the file, not about whatever size
+/// happened to be decoded for the grid. Cached next to the thumbnail so every
+/// classification of a photo sees the same numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameSize {
     pub width: u32,
@@ -73,10 +56,8 @@ impl FrameSize {
         Self { width, height }
     }
 
-    /// Width over height.
-    ///
-    /// A frame with no rows reads as square rather than infinite: the ratio
-    /// rules look for screen shapes, and `width / 0` matches none of them.
+    /// Width over height. A frame with no rows reads as square rather than
+    /// infinite, since the ratio rules look for screen shapes.
     pub fn aspect_ratio(self) -> f32 {
         if self.height == 0 {
             1.0
@@ -87,7 +68,7 @@ impl FrameSize {
 }
 
 /// The year and month a photo is filed under: from EXIF when it carries a date,
-/// and from the filesystem when it does not (`media::extract_date`).
+/// from the filesystem otherwise (`media::extract_date`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhotoDate {
     pub year: u32,
@@ -100,24 +81,20 @@ impl PhotoDate {
     }
 }
 
-/// Everything the classifier is allowed to read about a photo.
-///
-/// One argument rather than five, so a caller cannot assemble a photo's facts
-/// from the wrong pieces — which is what let half of them feed the rules a
-/// thumbnail's dimensions.
+/// Everything the classifier is allowed to read about a photo. One argument
+/// rather than five, so a caller cannot assemble a photo's facts from the wrong
+/// pieces.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PhotoFacts {
     pub path: PathBuf,
     pub date: PhotoDate,
-    /// `None` only for a photo cached by a version that did not record its
+    /// `None` only for a photo cached by a build that did not record its
     /// dimensions. The rule tier skips its resolution rules in that case rather
-    /// than substituting the thumbnail, which is the guess that misfiled
-    /// screenshots as Unsorted on every rescan.
+    /// than substituting the thumbnail.
     pub frame: Option<FrameSize>,
     pub is_exif: bool,
     /// Empty when the CLIP model is missing, or while a scan is still working on
-    /// this photo. Both mean "no visual tier", not "no embedding" — the rules
-    /// still apply.
+    /// this photo. Both mean "no visual tier", not "no embedding".
     pub embedding: Vec<f32>,
 }
 
@@ -127,11 +104,10 @@ pub enum Classification {
     /// Staged and on screen, but no category has been decided yet.
     ///
     /// This used to be the string `"Classifying..."` stored as a real category,
-    /// which read as a custom name: the grid rendered a text box bound to it,
-    /// and one keystroke marked the photo manual. The decision that arrived
-    /// moments later was then skipped, leaving a photo filed under
-    /// "Classifying..." for good. A pending photo has no category, so there is
-    /// nothing for a keystroke to claim.
+    /// which read as a custom name: the grid rendered a text box bound to it, and
+    /// one keystroke marked the photo manual, so the real decision arriving
+    /// moments later was skipped and the photo stayed filed under
+    /// "Classifying..." for good.
     Pending,
     /// A category was decided.
     Decided(Decision),
@@ -140,10 +116,9 @@ pub enum Classification {
 /// A decided classification.
 ///
 /// `is_custom` — whether the name matches no trained profile, and so belongs on
-/// the free-text path — is derived once, by
-/// [`ProfileStore::classify`](crate::profile_store::ProfileStore::classify),
-/// from the profiles that were in force when the decision was made. It is a
-/// property of the decision, not something each reader re-asks.
+/// the free-text path — is settled once, by [`ProfileStore::classify`], against
+/// the profiles that were in force at the time. It is a property of the
+/// decision, not something each reader re-asks.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Decision {
     pub category: CategoryName,
@@ -153,11 +128,8 @@ pub struct Decision {
 }
 
 impl Classification {
-    /// The decision, or `None` while pending.
-    ///
-    /// Callers that need to tell the two states apart read this rather than the
-    /// variant, so a scan can count what it decided without also having to know
-    /// what it did to a staged photo.
+    /// The decision, or `None` while pending. Readers that only need to tell the
+    /// two states apart use this rather than the variant.
     pub fn decided(&self) -> Option<&Decision> {
         match self {
             Self::Pending => None,
@@ -197,9 +169,8 @@ mod tests {
     #[test]
     fn an_unrecorded_frame_size_cannot_satisfy_the_resolution_rule() {
         // What a cache row written before the dimensions were persisted looks
-        // like. `frame` is an `Option` precisely so this state is expressible
-        // and the rules can decline to guess rather than reading a size off the
-        // thumbnail.
+        // like. `frame` is an `Option` so the rules can decline to guess rather
+        // than reading a size off the thumbnail.
         let facts = PhotoFacts {
             path: PathBuf::from("/photos/plain.png"),
             date: PhotoDate::new(2026, 3),

@@ -13,8 +13,8 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-/// A photo as the scan has it so far: its facts, whatever has been decided about
-/// them, and the thumbnail to show while the rest is still working.
+/// A photo as the scan has it so far: its facts, whatever has been decided, and
+/// the thumbnail to show while the rest is still working.
 pub struct ProcessedPayload {
     pub facts: PhotoFacts,
     pub classification: Classification,
@@ -25,12 +25,10 @@ pub struct ProcessedPayload {
 pub enum ScanMessage {
     /// A photo to stage now, with its thumbnail.
     Item(ProcessedPayload),
-    /// A decision about a photo already staged, carrying the facts the scan
-    /// holds for it alongside it.
-    ///
-    /// Two records rather than the eight fields this used to declare and the
-    /// app then destructured into eight bindings to pass to an eight-argument
-    /// function: the same eight values, spelled once.
+    /// A decision about a photo already staged, carrying the facts the scan holds
+    /// for it alongside it — two records rather than the eight fields this used to
+    /// declare, destructure into eight bindings and pass to an eight-argument
+    /// function.
     Update {
         facts: PhotoFacts,
         classification: Classification,
@@ -41,11 +39,11 @@ pub enum ScanMessage {
 
 /// A message together with the scan it came from.
 ///
-/// `start_scan` clears the staged items but cannot un-send what a superseded
-/// scan already put on the shared channel, and a late `Update` from that scan
-/// was decided against the profile store as it was at the time — it would
-/// otherwise overwrite a decision the current scan is still working towards. So
-/// the receiver drops anything but the newest scan's.
+/// `start_scan` clears the staged items but cannot un-send what a superseded scan
+/// already put on the shared channel, and a late `Update` from that scan was
+/// decided against the profile store as it was then — it would otherwise overwrite
+/// a decision the current scan is still working towards. The receiver drops
+/// anything but the newest scan's.
 pub struct ScanEvent {
     pub scan_id: u64,
     pub message: ScanMessage,
@@ -115,10 +113,8 @@ pub struct ScanConfig {
     pub model_path: Option<PathBuf>,
 }
 
-/// Sends a message tagged with the scan it belongs to.
-///
-/// The tag is stamped here rather than at each call site so that a message
-/// cannot be sent without one.
+/// Stamps the scan tag here rather than at each call site, so a message cannot be
+/// sent without one.
 fn send(tx: &Sender<ScanEvent>, scan_id: u64, message: ScanMessage) {
     let _ = tx.send(ScanEvent { scan_id, message });
 }
@@ -208,10 +204,9 @@ pub fn scan_folder_with_db(
 
                 if let Some(mut c) = cached {
                     // A row written before the cache stored the frame size has
-                    // none, and the rules key off resolution: re-read the file's
-                    // header once and fill it in, so this photo is decided the
-                    // same way on every later scan as it was on the one that
-                    // cached it. Costs one header read per legacy row, once.
+                    // none, and the rules key off resolution: re-read the header
+                    // once and fill it in, so this photo is decided the same way on
+                    // every later scan. Costs one header read per legacy row.
                     if c.frame.is_none() {
                         if let Ok(preview) = load_scan_preview(path) {
                             c.frame = Some(FrameSize::new(
@@ -302,10 +297,9 @@ pub fn scan_folder_with_db(
                     embedding: Vec::new(),
                 };
 
-                // Immediately send thumbnail to UI so user sees the photo right
-                // away! `Pending` rather than a "Classifying..." category: there
-                // is no category yet, so there is nothing there for the user to
-                // edit into one.
+                // Thumbnail first, so the photo is on screen while the model
+                // works. `Pending` rather than a "Classifying..." category: there
+                // is no category yet, so there is nothing to edit into one.
                 send(
                     &tx,
                     scan_id,
@@ -324,9 +318,8 @@ pub fn scan_folder_with_db(
                     Vec::new()
                 };
 
-                // `facts.frame` already carries the source dimensions rather than
-                // the preview's, which is what the resolution rule needs: a
-                // 1920x1080 PNG is a screenshot and a 240x135 one is not.
+                // `facts.frame` carries the source dimensions rather than the
+                // preview's, which is what the resolution rule reads.
                 let classification = profiles.classify(&facts, threshold);
 
                 // 4. Save to cache with thumbnail and frame size, so the next
@@ -390,8 +383,8 @@ mod tests {
     /// photo was staged with, and whether it was still pending.
     type ScanResult = std::collections::HashMap<String, (String, bool)>;
 
-    /// Runs a scan to completion over `folder`, returning what it staged and what
-    /// it later updated.
+    /// Runs a scan to completion, returning what it staged and what it later
+    /// updated.
     fn scan_once(folder: &Path, db_path: &Path) -> (ScanResult, ScanResult) {
         let (tx, rx) = std::sync::mpsc::channel();
         scan_folder_with_db(
@@ -510,8 +503,8 @@ mod tests {
         fs::create_dir_all(&temp_dir).unwrap();
         let test_db_path = temp_dir.join("isolated_cache.db");
 
-        // Two PNGs with no screenshot keyword in their names: only the frame size
-        // can make them screenshots, which is what makes them the test.
+        // No screenshot keyword in either name, so only the frame size can make
+        // them a screenshot.
         png_of_size(
             &temp_dir.join("holiday_pic.png"),
             1920,
@@ -521,8 +514,7 @@ mod tests {
         png_of_size(&temp_dir.join("small_pic.png"), 640, 360, [50, 100, 150]);
         fs::write(temp_dir.join("readme.txt"), b"not a photo").unwrap();
 
-        // 1st scan: uncached. The thumbnail appears immediately as Pending, and
-        // the decision lands in an Update.
+        // 1st scan: uncached. Staged as Pending, decided in an Update.
         let (items, updates) = scan_once(&temp_dir, &test_db_path);
         assert_eq!(items.len(), 2);
         assert_eq!(updates.len(), 2);
@@ -530,16 +522,16 @@ mod tests {
             items.values().all(|(_, pending)| *pending),
             "every freshly decoded photo is staged before it is classified: {items:?}"
         );
-        // The screenshot rule needs width >= 800 and a 16:9 frame; only the
-        // photo read at its true size passes both.
+        // The rule needs width >= 800 and a 16:9 frame; only the photo read at its
+        // true size passes both.
         assert_eq!(
             updates["holiday_pic.png"].0, "Screenshots",
             "a 1920x1080 PNG is a screenshot: {updates:?}"
         );
         assert_eq!(updates["small_pic.png"].0, "Unsorted", "{updates:?}");
 
-        // 2nd scan: served from the cache, and it must reach the same answer —
-        // out of the cached frame size rather than the 200x140 thumbnail.
+        // 2nd scan: from the cache, and it must reach the same answer — out of the
+        // cached frame size rather than the 200x140 thumbnail.
         let (cached_items, cached_updates) = scan_once(&temp_dir, &test_db_path);
         assert_eq!(cached_items.len(), 2);
         assert!(cached_updates.is_empty(), "a cached photo needs no update");

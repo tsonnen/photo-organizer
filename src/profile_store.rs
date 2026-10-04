@@ -5,14 +5,11 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 
-// Re-exported for callers that think of the source enum as part of the store:
-// it labels the store's output and was declared here for most of the app's life.
+// Re-exported for callers that think of the source enum as part of the store.
 pub use crate::classification::ClassificationSource;
 
-/// Narrowest frame the resolution rule will call a screenshot.
-///
-/// Below this a 16:9 PNG is a saved thumbnail of a screen or a small graphic,
-/// which is not what the rule is for.
+/// Narrowest frame the resolution rule will call a screenshot. Below this a 16:9
+/// PNG is a saved thumbnail of a screen or a small graphic.
 const SCREENSHOT_MIN_WIDTH: u32 = 800;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -129,20 +126,15 @@ impl ProfileStore {
     /// The one entry point for deciding what a photo is: the visual tier, then
     /// the rules, then `Unsorted`.
     ///
-    /// Takes the photo's facts rather than a loose `&[f32]` plus a path, an
-    /// EXIF flag and two dimensions, because the rules key off resolution and
-    /// the frame size is the input callers used to get wrong. Two of the three
-    /// callers passed the ≤200x140 thumbnail's dimensions — a cached rescan,
-    /// because the cache stored nothing else, and **Re-classify All**, because
-    /// a staged item carried nothing else — which ruled a 1920x1080 PNG out of
-    /// Screenshots on every scan after the one that read the file.
+    /// Takes the photo's facts rather than a loose `&[f32]` plus a path, an EXIF
+    /// flag and two dimensions, because the frame size is the input callers used
+    /// to get wrong.
     ///
-    /// `threshold` is the user's bar from
-    /// [`crate::settings::Settings::confidence_threshold`], passed in rather than
-    /// read from the store: profiles are learned data, the bar is a setting, and
-    /// keeping them apart means a `profiles.json` never carries a stale copy of a
-    /// knob the UI owns. The gate cannot be dropped, whatever it is set to — it is
-    /// the only path from the visual tier into the rules.
+    /// `threshold` is the user's bar, passed in rather than read from the store:
+    /// profiles are learned data, the bar is a setting, and keeping them apart
+    /// means a `profiles.json` never carries a stale copy of a knob the UI owns.
+    /// The gate cannot be dropped, whatever it is set to — it is the only path
+    /// from the visual tier into the rules.
     pub fn classify(&self, facts: &PhotoFacts, threshold: f32) -> Classification {
         let best_match = self.best_centroid_match(&facts.embedding);
         let best_similarity = best_match.as_ref().map(|(_, similarity)| *similarity);
@@ -154,8 +146,7 @@ impl ProfileStore {
         }
 
         // Too weak to believe, but still the closest thing there is. The rules
-        // outrank a low-confidence centroid match, which is the whole reason the
-        // threshold gate exists at all.
+        // outrank a low-confidence centroid match, which is what the gate is for.
         if let Some((category, confidence)) = classify_by_rules(facts) {
             return self.decide(category, confidence, ClassificationSource::Heuristic);
         }
@@ -261,11 +252,6 @@ impl ProfileStore {
 
 /// The rule tier: filename, resolution and metadata patterns for photos no
 /// centroid could claim.
-///
-/// Takes the whole [`PhotoFacts`] rather than four arguments because the rules
-/// are only ever about what the photo is — and because `width`/`height` in
-/// particular is the input that two of the three callers used to fill with the
-/// thumbnail's size.
 fn classify_by_rules(facts: &PhotoFacts) -> Option<(CategoryName, f32)> {
     let filename = facts
         .path
@@ -298,11 +284,9 @@ fn classify_by_rules(facts: &PhotoFacts) -> Option<(CategoryName, f32)> {
         return Some((CategoryName::screenshots(), 0.95));
     }
 
-    // The ratio rule needs the photo's true frame size, and a photo whose size
-    // was never recorded — a cache row written before the dimensions were
-    // persisted — has nothing to key off. Skipping the rule is the honest
-    // answer; substituting the thumbnail is what ruled real screenshots out of
-    // Screenshots on every rescan.
+    // A photo whose size was never recorded has nothing to key off. Skipping the
+    // rule is the honest answer; substituting the thumbnail is what ruled real
+    // screenshots out of Screenshots on every rescan.
     if let Some(frame) = facts.frame {
         // Check standard screen aspect ratios: 16:9 (~1.777), 16:10 (1.6), 19.5:9 (~2.166), 20:9 (~2.222), 21:9 (~2.333) and portrait inverses
         let aspect_ratio = frame.aspect_ratio();
@@ -728,10 +712,8 @@ mod tests {
 
     #[test]
     fn the_resolution_rule_reads_the_frame_size_it_is_given() {
-        // The rule that made the divergence a bug: a 16:9 PNG at 1920x1080 is a
-        // screenshot, and the same photo's 200x140 thumbnail is not. Since
-        // `frame` is a field of the facts rather than a loose argument, the two
-        // callers that used to pass the thumbnail's size have no way to.
+        // A 16:9 PNG at 1920x1080 is a screenshot and the same photo's 200x140
+        // thumbnail is not, so this is the rule the divergence turned on.
         let store = ProfileStore::default();
 
         let full = store.classify(
@@ -754,8 +736,7 @@ mod tests {
             ClassificationSource::UnsortedFallback,
         );
 
-        // And with no frame size recorded at all, the rule declines rather than
-        // guessing from whatever is to hand.
+        // With no frame size recorded, the rule declines rather than guessing.
         let unrecorded = store.classify(
             &facts_with("/p/plain.png", false, None),
             DEFAULT_CONFIDENCE_THRESHOLD,
