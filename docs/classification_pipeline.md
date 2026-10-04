@@ -128,3 +128,51 @@ on the way out.
 
 Raising or lowering the threshold does not change any of this: it decides *whether* a
 centroid wins, never *what the name may contain*.
+## Transfer Journal
+
+Once a category has been decided, `src/transfer/` owns everything that touches the
+filesystem: where a photo lands, that it gets there, that it can be recognised
+afterwards, and that the whole batch can be reversed.
+
+**One layout, one module.** `plan_batch` → `execute_batch` → `TransferJournal` →
+`undo` all agree on `<output>/<Category>/<YYYY>/<MM>/<name>`, a `_1`/`_2` suffix for a
+name that is taken, and `.xmp`/`.aae` beside the photo. They used to be two modules,
+with the reverse direction re-deriving that layout by hand, and the two drifted in ways
+that cost files: the journal recorded no `TransferMode`, so undo assumed every batch was
+a move and deleting a batch of twenty *copies* deleted twenty copies; the forward
+direction checked a copy's length before removing the source and the reverse direction
+did not; and a sidecar's direction lived in a trailing comment next to a
+`(PathBuf, PathBuf)`, so a swap compiled. `Sidecar { source, destination }` puts that
+direction in the type.
+
+**One mutation rule.** Both directions go through `place(from, to, mode)`: the forward
+direction as `place(source, destination, mode)`, undo as
+`place(destination, source, mode)`. It refuses to overwrite whatever is at `to` — which
+is also what stops a source folder chosen as its own output folder from truncating a
+photo onto itself — and it never removes `from` until the copy at `to` is verified
+complete, using the byte count `fs::copy` returns. A copy that stops early is deleted
+rather than left behind, which is safe in either direction precisely because `to` did
+not exist when the call started.
+
+**What undo does depends on the recorded mode.** A move is undone with another move. A
+copy is undone by deleting the copies, because nothing left the source folder and
+leaving them behind would make the button a lie. Either way undo checks before it
+destroys anything: it will not overwrite a path that is occupied again, and it will not
+move or delete a file whose `Fingerprint` — length plus modification time, the pair
+git's index caches — no longer matches the journal's. A photo edited in the output
+folder is left alone and reported. Emptied category folders are pruned, bounded by the
+`output_dir` the journal records and by emptiness; the output folder itself never is.
+
+**Failures are reported, not swallowed.** `execute_batch` keeps every failure in
+`failed_ops` at file granularity — a sidecar that could not travel is its own entry,
+because the photo beside it has already moved and must still be undoable. The app puts
+the failures in the status line and keeps the failed photos in the grid. The journal
+itself is written to a staging file and renamed into place, so it is either complete or
+absent; if it cannot be written, the stale journal from the previous batch is removed,
+because a journal Undo reads as "the last batch" while describing an older one is worse
+than a visible "this batch cannot be undone".
+
+`transfer::tests::test_undo_is_the_inverse_of_execute_for_both_modes` is the property
+that ties the two directions together: for each mode, `undo(execute(inputs, mode))`
+leaves the filesystem exactly as it started, sidecars included.
+
