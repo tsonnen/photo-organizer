@@ -763,6 +763,890 @@ fn the_profile_modal_lists_every_profile_under_a_count() {
     );
 }
 
+/// A staged photo with `selected` set, for the bulk move's selection handling.
+fn staged_item_selected(ctx: &egui::Context, selected: bool, year: u32, month: u32) -> StagedItem {
+    StagedItem {
+        year,
+        month,
+        selected,
+        ..staged_item(ctx)
+    }
+}
+
+/// A scratch directory that cleans itself up, named for the test that made it.
+///
+/// Suffixed with the pid because cargo runs tests on parallel threads and the
+/// other filesystem tests in this crate use the same `temp_dir()` root.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(name: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!("bulk_move_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("could not create the scratch directory");
+        Scratch(dir)
+    }
+
+    fn join(&self, rest: &str) -> PathBuf {
+        self.0.join(rest)
+    }
+
+    /// Writes a file, creating its parent directories, so a test can assert on a
+    /// layout that only exists if the engine made the directories.
+    fn write(&self, rest: &str, contents: &str) -> PathBuf {
+        let path = self.join(rest);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, contents).unwrap();
+        path
+    }
+
+    fn exists(&self, rest: &str) -> bool {
+        self.join(rest).exists()
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The bulk move card on a real app holding one selected photo per `months`
+/// entry, already run one frame.
+///
+/// The app is the harness state so a test can hover a disabled button and read
+/// its tooltip, or press one and see what happened. The settings are pinned
+/// rather than read: `PhotoOrganizerApp::new` loads whatever `settings.json` is
+/// in the crate root, and an output folder left over from a manual run would
+/// decide whether the destination row warns.
+fn bulk_move_harness(
+    screen: egui::Vec2,
+    settings: crate::settings::Settings,
+    name: &str,
+    months: &'static [(u32, u32)],
+) -> Harness<'static, PhotoOrganizerApp> {
+    let staged = months
+        .iter()
+        .enumerate()
+        .map(|(i, (year, month))| {
+            (
+                PathBuf::from(format!("/photos/sample{i}.jpg")),
+                *year,
+                *month,
+            )
+        })
+        .collect();
+    bulk_move_harness_with(screen, settings, name, staged)
+}
+
+/// [`bulk_move_harness`] with real source paths, for the tests that move files.
+fn bulk_move_harness_with(
+    screen: egui::Vec2,
+    settings: crate::settings::Settings,
+    name: &str,
+    staged: Vec<(PathBuf, u32, u32)>,
+) -> Harness<'static, PhotoOrganizerApp> {
+    let mut app = PhotoOrganizerApp::new();
+    app.settings = settings;
+    app.show_bulk_move_modal = true;
+    app.bulk_move_name = name.to_string();
+    // The undo journal's slot is a field precisely so this can point a real
+    // transfer at a scratch directory. Left on its default it would overwrite the
+    // journal in the crate root — the one the running app's Undo reads — every
+    // time the suite ran.
+    app.journal_path = std::env::temp_dir()
+        .join(format!("bulk_move_journal_{}", std::process::id()))
+        .join("last_execution_manifest.json");
+
+    // Staged exactly once, and deliberately not on `items.is_empty()`: both a move
+    // and a copy empty the grid once their photos land, so that condition would
+    // put the photos straight back and hide whether they were dropped at all.
+    // `Cell` because the harness closure is `Fn` and re-staging has to be
+    // observable from inside it.
+    let staged_once = std::cell::Cell::new(false);
+    let mut harness = Harness::new_ui_state(
+        move |ui, app: &mut PhotoOrganizerApp| {
+            if !staged_once.get() {
+                staged_once.set(true);
+                app.items = staged
+                    .iter()
+                    .map(|(path, year, month)| StagedItem {
+                        source_path: path.clone(),
+                        year: *year,
+                        month: *month,
+                        selected: true,
+                        // Deliberately *not* the name being bulk-filed: the
+                        // point of the feature is that the per-photo category is
+                        // irrelevant once a name is typed over the selection.
+                        category: "Unsorted".into(),
+                        ..staged_item(ui.ctx())
+                    })
+                    .collect();
+            }
+            app.render_bulk_move_modal(ui.ctx());
+        },
+        app,
+    );
+    harness.set_size(screen);
+    harness.run();
+    harness
+}
+
+/// The widgets the bulk move card placed, filtered to what is inside the card.
+///
+/// The backdrop covers the whole screen, so an unfiltered read is mostly
+/// backdrop — the same filter `open_settings_modal` applies, plus `ComboBox`,
+/// which is the role egui gives the closed recalled-names list.
+fn bulk_move_widgets(
+    screen: egui::Vec2,
+    harness: &Harness<'_, PhotoOrganizerApp>,
+) -> Vec<WidgetRect> {
+    let card = layout::bulk_move_modal_size(screen);
+    let card_rect = egui::Rect::from_center_size(screen.to_pos2() / 2.0, card);
+
+    placed_widgets(harness)
+        .into_iter()
+        .filter(|r| {
+            matches!(
+                r.role.as_str(),
+                "Label" | "Button" | "Slider" | "TextInput" | "ComboBox"
+            )
+        })
+        .filter(|r| {
+            f64::from(card_rect.min.x) - 0.5 <= r.x0
+                && r.x1 <= f64::from(card_rect.max.x) + 0.5
+                && f64::from(card_rect.min.y) - 0.5 <= r.y0
+                && r.y1 <= f64::from(card_rect.max.y) + 0.5
+        })
+        .collect()
+}
+
+/// Opens the bulk move card at `screen` and returns the widgets inside it.
+fn open_bulk_move_modal(
+    screen: egui::Vec2,
+    settings: crate::settings::Settings,
+    name: &str,
+    months: &'static [(u32, u32)],
+) -> (Vec<WidgetRect>, egui::Vec2) {
+    let harness = bulk_move_harness(screen, settings, name, months);
+    let card = layout::bulk_move_modal_size(screen);
+    (bulk_move_widgets(screen, &harness), card)
+}
+
+#[test]
+fn the_bulk_move_modal_offers_a_name_a_destination_and_three_ways_out() {
+    // The whole feature in one assertion: a name field to type into, somewhere to
+    // put the result, and the three actions. Lose any of them and the feature
+    // has no route through the UI at all.
+    let screen = egui::vec2(1240.0, 900.0);
+    let settings = crate::settings::Settings {
+        output_folder: Some(std::path::PathBuf::from("/photos/sorted")),
+        custom_categories: vec!["Ski 2024".to_string()],
+        ..Default::default()
+    };
+    let (rects, _) = open_bulk_move_modal(screen, settings, "Beach Trip", &[(2024, 7)]);
+
+    assert!(
+        !rects.is_empty(),
+        "expected the modal to render its contents, got nothing"
+    );
+    assert!(
+        rects.iter().any(|r| r.role.contains("TextInput")),
+        "the name has to be typeable, got {rects:#?}"
+    );
+    assert!(
+        rects.iter().any(|r| r.label.contains("/photos/sorted")),
+        "the destination has to be on screen before anything is filed, got {rects:#?}"
+    );
+
+    for action in ["Assign", "Move Selected", "Copy Selected"] {
+        assert!(
+            rects.iter().any(|r| r.label.contains(action)),
+            "expected a {action:?} action, got {rects:#?}"
+        );
+    }
+
+    // The recall list is what makes a second batch of the same kind cheap
+    // rather than a retype, so a settings list that never reached the card would
+    // quietly remove the feature's main convenience. Asserted by role, because
+    // a closed egui combo exposes no label — which list is in it is asserted
+    // properly in `picking_a_recalled_name_fills_the_field`.
+    assert!(
+        rects.iter().any(|r| r.role == "ComboBox"),
+        "the recalled names should be offered as a list, got {rects:#?}"
+    );
+}
+
+#[test]
+fn picking_a_recalled_name_fills_the_field() {
+    // The recall list has to actually recall: clicking an entry fills the name
+    // field, which is the whole point of remembering names rather than
+    // retyping them. Also the reason the names are stored already sanitised —
+    // what the list offers is exactly what will be used as a folder.
+    let screen = egui::vec2(1240.0, 900.0);
+    let settings = crate::settings::Settings {
+        output_folder: Some(std::path::PathBuf::from("/photos/sorted")),
+        custom_categories: vec!["Ski 2024".to_string(), "Beach Trip 2023".to_string()],
+        ..Default::default()
+    };
+    let mut harness = bulk_move_harness(screen, settings, "", &[(2024, 7)]);
+
+    // By role rather than label, for the same reason `placed_widgets` stringifies
+    // roles: `accesskit` is not a dependency of this crate, and a closed combo
+    // exposes no label to search for anyway.
+    harness
+        .kittest_state()
+        .query_all(by().recursive(true))
+        .find(|node| format!("{:?}", node.role()) == "ComboBox")
+        .expect("expected the recalled-names combo")
+        .click();
+    harness.run();
+
+    let recalled: Vec<String> = harness
+        .query_all_by_label_contains("Ski 2024")
+        .map(|n| n.label().unwrap_or_default())
+        .collect();
+    assert!(
+        !recalled.is_empty(),
+        "the names from settings should be in the opened list"
+    );
+
+    harness
+        .query_all_by_label_contains("Beach Trip 2023")
+        .next()
+        .expect("expected the older name in the list too")
+        .click();
+    harness.run();
+
+    assert_eq!(
+        harness.state().bulk_move_name,
+        "Beach Trip 2023",
+        "choosing a recalled name has to fill the field it is typed into"
+    );
+}
+
+#[test]
+fn the_bulk_move_preview_says_exactly_where_the_photos_land() {
+    // The promise the rest of the app makes, checked before anything moves: one
+    // folder, `<Category>/<YYYY>/<MM>/`, under the base the user was shown.
+    let screen = egui::vec2(1240.0, 900.0);
+    let settings = crate::settings::Settings {
+        output_folder: Some(std::path::PathBuf::from("/photos/sorted")),
+        ..Default::default()
+    };
+    let (rects, _) = open_bulk_move_modal(screen, settings, "Beach Trip", &[(2024, 7), (2024, 7)]);
+
+    let preview: Vec<&WidgetRect> = rects.iter().filter(|r| r.label.contains("→")).collect();
+    assert_eq!(
+        preview.len(),
+        1,
+        "expected one preview line, got {rects:#?}"
+    );
+    assert!(
+        preview[0].label.contains("2 photo(s)")
+            && preview[0]
+                .label
+                .contains("/photos/sorted/Beach Trip/2024/07"),
+        "two photos from one month are one folder, got {:?}",
+        preview[0].label
+    );
+}
+
+#[test]
+fn a_bulk_move_spanning_months_says_how_many_folders_it_will_make() {
+    // A trip crossing a month boundary files into more than one folder, and the
+    // count alone would not say which. Saying so is what makes this a preview
+    // rather than a surprise.
+    let screen = egui::vec2(1240.0, 900.0);
+    let settings = crate::settings::Settings {
+        output_folder: Some(std::path::PathBuf::from("/photos/sorted")),
+        ..Default::default()
+    };
+    let (rects, _) = open_bulk_move_modal(
+        screen,
+        settings,
+        "Beach Trip",
+        &[(2023, 12), (2024, 1), (2024, 7)],
+    );
+
+    let preview = rects
+        .iter()
+        .find(|r| r.label.contains("folders"))
+        .unwrap_or_else(|| panic!("expected a multi-folder preview, got {rects:#?}"));
+    assert!(
+        preview.label.contains("3 folders"),
+        "three distinct months are three folders, got {:?}",
+        preview.label
+    );
+    assert!(
+        preview.label.contains("2023/12") && preview.label.contains("2024/07"),
+        "the preview should name them, got {:?}",
+        preview.label
+    );
+}
+
+#[test]
+fn the_bulk_move_buttons_wait_for_a_name_and_a_destination() {
+    // Both are needed, and each is said where it is missing rather than left to a
+    // greyed button that explains nothing.
+    let screen = egui::vec2(1240.0, 900.0);
+
+    // No name typed, with the destination already set: the name is what is
+    // missing, and that is what the disabled Move has to say.
+    let mut nameless = bulk_move_harness(
+        screen,
+        crate::settings::Settings {
+            output_folder: Some(std::path::PathBuf::from("/photos/sorted")),
+            ..Default::default()
+        },
+        "   ",
+        &[(2024, 7)],
+    );
+    let move_button = nameless
+        .query_all_by_label_contains("Move Selected")
+        .next()
+        .expect("expected a Move Selected button");
+    assert!(move_button.is_disabled(), "a blank name can move nothing");
+    move_button.hover();
+    nameless.run();
+    assert!(
+        placed_widgets(&nameless)
+            .iter()
+            .any(|r| r.label.contains("Type a category name first")),
+        "the missing name should be named where the button is pressed"
+    );
+
+    // A name but nowhere to put it. The card has to offer its own picker rather
+    // than only greying everything and leaving the user stuck.
+    let mut homeless = bulk_move_harness(
+        screen,
+        crate::settings::Settings::default(),
+        "Beach Trip",
+        &[(2024, 7)],
+    );
+    assert!(
+        placed_widgets(&homeless)
+            .iter()
+            .any(|r| r.label.contains("Choose Folder")),
+        "the card must be able to pick its own destination"
+    );
+    let move_button = homeless
+        .query_all_by_label_contains("Move Selected")
+        .next()
+        .expect("expected a Move Selected button");
+    assert!(
+        move_button.is_disabled(),
+        "with no destination there is nowhere to move to"
+    );
+    move_button.hover();
+    homeless.run();
+    assert!(
+        placed_widgets(&homeless)
+            .iter()
+            .any(|r| r.label.contains("Choose a destination folder first")),
+        "the missing destination should be named where the button is pressed"
+    );
+
+    // Assign Only is the odd one out and deliberately so: labelling a selection
+    // is not a transfer, so a missing folder must not block it.
+    let assign = homeless
+        .query_all_by_label_contains("Assign Only")
+        .next()
+        .expect("expected an Assign Only button");
+    assert!(
+        !assign.is_disabled(),
+        "assigning a name needs no destination — nothing is being filed"
+    );
+}
+
+#[test]
+fn assigning_a_name_labels_the_selection_and_leaves_it_staged() {
+    // The half of the feature that touches no disk. Manual is the whole point:
+    // it is the one source `apply_classification` will not overwrite, so these
+    // photos keep this name through a re-classification and a threshold move.
+    // If it came out as `VisualModel` the label would evaporate on the next
+    // scan, which is the failure this asserts against.
+    let screen = egui::vec2(1240.0, 900.0);
+    let settings = crate::settings::Settings {
+        output_folder: Some(std::path::PathBuf::from("/photos/sorted")),
+        ..Default::default()
+    };
+    let mut harness = bulk_move_harness(screen, settings, "Beach Trip", &[(2024, 7)]);
+
+    harness
+        .query_all_by_label_contains("Assign Only")
+        .next()
+        .expect("expected an Assign Only button")
+        .click();
+    harness.run();
+
+    let app = harness.state();
+    assert!(
+        !app.show_bulk_move_modal,
+        "the card closes once the label is on the photos"
+    );
+    assert_eq!(
+        app.items.len(),
+        1,
+        "assigning files nothing, so no photo leaves the grid"
+    );
+    assert_eq!(app.items[0].category, "Beach Trip");
+    assert_eq!(
+        app.items[0].source,
+        ClassificationSource::Manual,
+        "a manual pick survives re-classification; anything else does not"
+    );
+    assert!(
+        app.items[0].is_custom,
+        "'Beach Trip' is not a trained profile, so the cell must offer to edit it"
+    );
+    // Assign is not a transfer, so it must not consume the selection the way a
+    // move does: the user is labelling these, and is very likely to review or
+    // re-file them next.
+    assert!(
+        app.items[0].selected,
+        "labelling a photo does not deselect it"
+    );
+    assert!(
+        app.settings
+            .custom_categories
+            .iter()
+            .any(|n| n == "Beach Trip"),
+        "a name used once has to be offered again, got {:?}",
+        app.settings.custom_categories
+    );
+}
+
+#[test]
+fn assigning_a_name_over_a_scan_in_progress_claims_the_photos_it_has_not_reached() {
+    // Bulk Move is reachable the moment the grid has rows in it, which during a
+    // scan means some of those rows are `Classifying...`. Those photos must come
+    // out carrying the typed name like every other one: `mark_manual` alone leaves
+    // `pending` set, so `keep_manual` stays false and the scan's answer lands on
+    // top of the name — silently, after the status line has already counted them.
+    let screen = egui::vec2(1240.0, 900.0);
+    let settings = crate::settings::Settings {
+        output_folder: Some(std::path::PathBuf::from("/photos/sorted")),
+        ..Default::default()
+    };
+    let mut harness = bulk_move_harness_with(
+        screen,
+        settings,
+        "Beach Trip",
+        vec![
+            (PathBuf::from("/photos/decided.jpg"), 2024, 7),
+            (PathBuf::from("/photos/still_going.jpg"), 2024, 7),
+        ],
+    );
+
+    // The one photo the model has not reached: a placeholder, not a decision.
+    let pending = &mut harness.state_mut().items[1];
+    pending.pending = true;
+    pending.category = crate::classification::CLASSIFYING_LABEL.into();
+    pending.source = ClassificationSource::UnsortedFallback;
+    pending.is_custom = false;
+
+    harness
+        .query_all_by_label_contains("Assign Only")
+        .next()
+        .expect("expected an Assign Only button")
+        .click();
+    harness.run();
+
+    let app = harness.state();
+    for (i, item) in app.items.iter().enumerate() {
+        assert_eq!(
+            item.category, "Beach Trip",
+            "photo {i} was selected, so it carries the typed name"
+        );
+        assert_eq!(
+            item.source,
+            ClassificationSource::Manual,
+            "photo {i} keeps the name only if the pick is the user's"
+        );
+        assert!(
+            !item.pending,
+            "photo {i} holds a name now, so it is no longer pending — this is what \
+             stops the scan's answer overwriting it"
+        );
+        assert!(
+            item.is_filable(),
+            "photo {i} is filable, or Move and Copy would hold it back for a retry \
+             against a name the user already gave it"
+        );
+    }
+
+    // And the number reported is the number that really do: both photos were
+    // selected, so both are counted — the pending one included, not quietly
+    // dropped from the tally.
+    let assigned = &app
+        .status_message
+        .as_ref()
+        .expect("expected a status line")
+        .0;
+    assert!(
+        assigned.contains("2"),
+        "both selected photos were assigned, so the count says 2: {assigned:?}"
+    );
+}
+
+#[test]
+fn bulk_move_puts_the_whole_selection_under_the_typed_name() {
+    // The end-to-end claim, checked against the filesystem rather than the
+    // status line: every selected photo lands under the one name typed, in the
+    // `<Category>/<YYYY>/<MM>/` layout the rest of the app promises, no matter
+    // what category each photo carried before. Two different months, because a
+    // batch that spans a month boundary has to still honour the layout.
+    let scratch = Scratch::new("files_under_typed_name");
+    let july = scratch.write("incoming/july.jpg", "july bytes");
+    let december = scratch.write("incoming/december.jpg", "december bytes");
+
+    let screen = egui::vec2(1240.0, 900.0);
+    let settings = crate::settings::Settings {
+        output_folder: Some(scratch.join("sorted")),
+        ..Default::default()
+    };
+    let mut harness = bulk_move_harness_with(
+        screen,
+        settings,
+        "Beach Trip",
+        vec![(july, 2024, 7), (december, 2023, 12)],
+    );
+
+    harness
+        .query_all_by_label_contains("Move Selected")
+        .next()
+        .expect("expected a Move Selected button")
+        .click();
+    harness.run();
+
+    assert!(
+        scratch.exists("sorted/Beach Trip/2024/07/july.jpg"),
+        "the July photo belongs in its own month folder"
+    );
+    assert!(
+        scratch.exists("sorted/Beach Trip/2023/12/december.jpg"),
+        "and the December one in its own, both under the typed name"
+    );
+    assert!(
+        !scratch.exists("incoming/july.jpg"),
+        "a move takes the original, unlike a copy"
+    );
+    assert!(
+        harness.state().items.is_empty(),
+        "moved photos leave the grid, as the toolbar's Move already does"
+    );
+    assert!(
+        !harness.state().show_bulk_move_modal,
+        "a batch that landed something closes the card, the same as the other \
+         two ways out"
+    );
+}
+
+#[test]
+fn a_bulk_move_that_files_nothing_keeps_the_card_and_what_was_typed() {
+    // The other half of the close rule. The destination here cannot exist — it
+    // sits under a regular file, so `create_dir_all` fails with ENOTDIR for every
+    // photo in the batch — which is the ordinary way a bulk move lands nothing:
+    // a folder that was deleted, a drive that is not mounted, a path that is
+    // pointing at the wrong thing. Closing the card there would throw away the
+    // name and the folder the user had already answered, so the retry would be
+    // reopening the card and answering both questions again.
+    let scratch = Scratch::new("nothing_lands");
+    let photo = scratch.write("incoming/july.jpg", "july bytes");
+    scratch.write("blocker", "not a directory");
+
+    let screen = egui::vec2(1240.0, 900.0);
+    let settings = crate::settings::Settings {
+        output_folder: Some(scratch.join("blocker/under")),
+        ..Default::default()
+    };
+    let mut harness =
+        bulk_move_harness_with(screen, settings, "Beach Trip", vec![(photo, 2024, 7)]);
+
+    harness
+        .query_all_by_label_contains("Move Selected")
+        .next()
+        .expect("expected a Move Selected button")
+        .click();
+    harness.run();
+
+    assert!(
+        !scratch.exists("blocker/under/Beach Trip"),
+        "the batch should have filed nothing at all"
+    );
+    // Confirm the batch actually ran and failed, rather than never starting — an
+    // assertion about the card staying open would otherwise also pass if the
+    // button had done nothing at all.
+    let reported = &harness
+        .state()
+        .status_message
+        .as_ref()
+        .expect("a failed batch still says so in the status line")
+        .0;
+    assert!(
+        reported.contains("Nothing was transferred"),
+        "the status line should report the failure, got {reported:?}"
+    );
+    assert!(
+        harness.state().show_bulk_move_modal,
+        "nothing landed, so the card stays up — its name and folder are part of \
+         the retry"
+    );
+    assert_eq!(
+        harness.state().bulk_move_name,
+        "Beach Trip",
+        "the typed name survives the failed attempt"
+    );
+    let items = &harness.state().items;
+    assert_eq!(items.len(), 1, "the photo is still staged");
+    assert!(
+        items[0].selected,
+        "and still selected, so the retry is the same press of the same button"
+    );
+}
+
+#[test]
+fn bulk_copy_leaves_the_originals_and_clears_the_grid() {
+    // The same batch as a copy: the files are duplicated under the typed name and
+    // the originals stay where they were, which is the whole difference between
+    // the two modes. The grid clears either way — a copy is a completed filing,
+    // so leaving the row behind would offer the same photo again, still selected
+    // and looking untouched, and a second press would file it a second time.
+    let scratch = Scratch::new("copy_keeps_originals");
+    let july = scratch.write("incoming/july.jpg", "july bytes");
+
+    let screen = egui::vec2(1240.0, 900.0);
+    let settings = crate::settings::Settings {
+        output_folder: Some(scratch.join("sorted")),
+        ..Default::default()
+    };
+    let mut harness = bulk_move_harness_with(
+        screen,
+        settings,
+        "Beach Trip",
+        vec![(july.clone(), 2024, 7)],
+    );
+
+    harness
+        .query_all_by_label_contains("Copy Selected")
+        .next()
+        .expect("expected a Copy Selected button")
+        .click();
+    harness.run();
+
+    assert!(
+        scratch.exists("incoming/july.jpg"),
+        "a copy leaves the original"
+    );
+    assert!(scratch.exists("sorted/Beach Trip/2024/07/july.jpg"));
+    assert!(
+        harness.state().items.is_empty(),
+        "a copied photo leaves the grid like a moved one, so the same photo \
+         cannot be filed a second time by pressing the button again"
+    );
+}
+
+#[test]
+fn a_name_typed_with_separators_cannot_create_a_directory_level() {
+    // The traversal guard, at the point the feature makes it reachable. Filing
+    // is free text over a whole selection here, so a name typed as `A/B` would
+    // otherwise add a level and `..` would leave the output folder. This leans
+    // on `CategoryName` doing its one job; the point of the assertion is that
+    // the bulk move routes through it rather than joining the raw string.
+    //
+    // `../../escaped` has exactly one sanitised outcome: each `/` becomes a `-`,
+    // and the result is neither `.` nor `..`, so it stays a legal single
+    // component. Asserting that one path rather than accepting either of two is
+    // what would catch the sanitiser changing underneath this feature.
+    let scratch = Scratch::new("name_is_one_component");
+    let photo = scratch.write("incoming/a.jpg", "bytes");
+
+    let screen = egui::vec2(1240.0, 900.0);
+    let settings = crate::settings::Settings {
+        output_folder: Some(scratch.join("sorted")),
+        ..Default::default()
+    };
+    let mut harness =
+        bulk_move_harness_with(screen, settings, "../../escaped", vec![(photo, 2024, 7)]);
+
+    harness
+        .query_all_by_label_contains("Move Selected")
+        .next()
+        .expect("expected a Move Selected button")
+        .click();
+    harness.run();
+
+    // Two levels above the scratch directory is where an unsanitised `../../escaped`
+    // would land, so that is the path to check rather than one inside the scratch
+    // — a `..` that worked would never have produced a directory here to find.
+    let escaped = scratch.join("../../escaped");
+    assert!(
+        !escaped.exists(),
+        "a traversal attempt must not resolve outside the output folder, \
+         found {escaped:?}"
+    );
+    assert!(
+        scratch.exists("sorted/..-..-escaped/2024/07/a.jpg"),
+        "the photo still has to be filed somewhere, under the one component the \
+         sanitiser produced"
+    );
+}
+
+#[test]
+fn a_bulk_move_with_nothing_selected_says_so() {
+    // Reachable through the toolbar button being disabled, but the card also has
+    // to cope: "nothing selected" is the one state where the preview cannot say
+    // anything at all.
+    let screen = egui::vec2(1240.0, 900.0);
+    let settings = crate::settings::Settings {
+        output_folder: Some(std::path::PathBuf::from("/photos/sorted")),
+        ..Default::default()
+    };
+
+    let mut app = PhotoOrganizerApp::new();
+    app.settings = settings;
+    app.show_bulk_move_modal = true;
+    app.bulk_move_name = "Beach Trip".to_string();
+
+    let mut harness = Harness::new_ui_state(
+        move |ui, app: &mut PhotoOrganizerApp| {
+            if app.items.is_empty() {
+                app.items = vec![staged_item_selected(ui.ctx(), false, 2024, 7)];
+            }
+            app.render_bulk_move_modal(ui.ctx());
+        },
+        app,
+    );
+    harness.set_size(screen);
+    harness.run();
+
+    let card = layout::bulk_move_modal_size(screen);
+    let card_rect = egui::Rect::from_center_size(screen.to_pos2() / 2.0, card);
+    let warned = placed_widgets(&harness).into_iter().any(|r| {
+        r.label.contains("Nothing is selected")
+            && r.x0 >= f64::from(card_rect.min.x) - 0.5
+            && r.x1 <= f64::from(card_rect.max.x) + 0.5
+    });
+    assert!(
+        warned,
+        "an empty selection must be stated rather than previewing nothing"
+    );
+}
+
+#[test]
+fn the_bulk_move_modal_fits_its_card() {
+    // The same guard the other two cards get. This one is the widest, so it is
+    // the one where a long category name and a long destination path would push
+    // past the edge.
+    for screen in [egui::vec2(1240.0, 900.0), egui::vec2(1920.0, 1080.0)] {
+        let settings = crate::settings::Settings {
+            output_folder: Some(std::path::PathBuf::from(
+                "/home/tobye/Pictures/2026/family holiday/raw scans",
+            )),
+            custom_categories: vec![
+                "Beach Trip".to_string(),
+                "Ski 2024".to_string(),
+                "Category Number 07 With An Unusually Long Name".to_string(),
+            ],
+            ..Default::default()
+        };
+        let (rects, card) = open_bulk_move_modal(screen, settings, "Beach Trip 2024", &[(2024, 7)]);
+
+        assert!(
+            !rects.is_empty(),
+            "expected the modal to render its contents at {screen:?}, got nothing"
+        );
+
+        let card_rect = egui::Rect::from_center_size(screen.to_pos2() / 2.0, card);
+        for r in &rects {
+            assert!(
+                r.x0 >= f64::from(card_rect.min.x) - 0.5
+                    && r.x1 <= f64::from(card_rect.max.x) + 0.5,
+                "widget {:?} ({}) escapes the {card:?} card at {screen:?}\nrect: {r:?}",
+                r.role,
+                r.label,
+            );
+            assert!(
+                r.y0 >= f64::from(card_rect.min.y) - 0.5
+                    && r.y1 <= f64::from(card_rect.max.y) + 0.5,
+                "widget {:?} ({}) escapes the {card:?} card vertically at {screen:?}\nrect: {r:?}",
+                r.role,
+                r.label,
+            );
+        }
+    }
+}
+
+/// The toolbar with `selected` photos staged and no output folder configured,
+/// already run one frame. The app is the harness state so a test can press the
+/// button and look at what it opened.
+fn toolbar_with_selection(selected: bool) -> Harness<'static, PhotoOrganizerApp> {
+    let mut app = PhotoOrganizerApp::new();
+    app.settings = crate::settings::Settings::default();
+
+    let mut harness = Harness::new_ui_state(
+        move |ui, app: &mut PhotoOrganizerApp| {
+            if app.items.is_empty() {
+                app.items = vec![staged_item_selected(ui.ctx(), selected, 2024, 7)];
+            }
+            app.render_toolbar(ui.ctx());
+        },
+        app,
+    );
+    harness.set_size(egui::vec2(1240.0, 900.0));
+    harness.run();
+    harness
+}
+
+#[test]
+fn bulk_move_is_disabled_until_something_is_selected() {
+    // The toolbar gates it on the selection rather than the destination, which
+    // is the opposite of Move and Copy: the card picks its own folder, so an
+    // unconfigured output folder must not disable it. Both halves are asserted
+    // because the button would still come out live by accident if only one of
+    // them held.
+    let mut empty = toolbar_with_selection(false);
+    let button = empty
+        .query_all_by_label_contains("Bulk Move")
+        .next()
+        .expect("expected a Bulk Move button");
+    assert!(
+        button.is_disabled(),
+        "with nothing selected there is nothing for the bulk move to act on"
+    );
+    button.hover();
+    empty.run();
+    let tooltips: Vec<String> = placed_widgets(&empty)
+        .into_iter()
+        .map(|r| r.label)
+        .filter(|t| t.contains("Select at least one"))
+        .collect();
+    assert!(
+        !tooltips.is_empty(),
+        "a disabled Bulk Move must say what would enable it, got {tooltips:#?}"
+    );
+
+    // A selection is enough: no output folder is configured here either, and
+    // the card picks its own destination.
+    let mut staged = toolbar_with_selection(true);
+    let button = staged
+        .query_all_by_label_contains("Bulk Move")
+        .next()
+        .expect("expected a Bulk Move button");
+    assert!(
+        !button.is_disabled(),
+        "a selection is enough — the card picks its own destination folder"
+    );
+
+    button.click();
+    staged.run();
+    assert!(
+        staged.state().show_bulk_move_modal,
+        "the button's whole job is to open the card"
+    );
+}
+
 /// Opens the settings modal on a real app and returns the widgets egui placed.
 fn open_settings_modal(
     screen: egui::Vec2,

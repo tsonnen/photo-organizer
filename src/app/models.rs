@@ -145,8 +145,45 @@ impl StagedItem {
     ///
     /// Deliberately does not touch `pending` — a photo still waiting on the model has
     /// no category to have claimed, so the model's answer wins.
+    ///
+    /// Zeroes the confidence with the source. A manual pick is the user's call, so
+    /// there is no decision behind it and the number the grid prints beside the
+    /// badge would be describing the answer this one replaced.
     pub(super) fn mark_manual(&mut self) {
         self.source = ClassificationSource::Manual;
+        self.confidence = 0.0;
+    }
+
+    /// Claims a photo the model has not reached yet, on the strength of a name the
+    /// user typed over a whole selection.
+    ///
+    /// [`Self::mark_manual`] is right for the per-photo "Other" path and wrong for
+    /// this one, and the difference is what there is to claim. That path puts a
+    /// text box on a photo whose category is still the `CLASSIFYING_LABEL`
+    /// placeholder, so setting Manual there would preserve a placeholder; leaving
+    /// `pending` alone is what keeps the model's answer winning. A bulk move
+    /// arrives with a name — a category the user chose, applied to a selection they
+    /// picked — so this also clears `pending`, which is the one thing that lets
+    /// `apply_decision`'s `keep_manual` hold.
+    ///
+    /// Split into its own method rather than a flag on `mark_manual` so that
+    /// authority stays narrow and greppable: clearing `pending` from anywhere else
+    /// would bypass the rule `reclassify_all` and `is_filable` both step around, and
+    /// the test that pins the "Other" path shut is the proof it has not moved.
+    ///
+    /// The scan's decision for this photo is now skipped, but its *facts* are not:
+    /// `apply_classification` refreshes those before it decides anything, so the
+    /// embedding still arrives. That is what keeps a photo claimed mid-scan from
+    /// training the next profile on the empty embedding it was staged with.
+    ///
+    /// Zeroes the confidence for the same reason [`Self::mark_manual`] does, and the
+    /// caller writes the category before calling either — so the two agree on what
+    /// a manual pick looks like on the grid rather than one of them leaving a stale
+    /// number next to the badge.
+    pub(super) fn mark_manual_over_pending(&mut self) {
+        self.source = ClassificationSource::Manual;
+        self.confidence = 0.0;
+        self.pending = false;
     }
 
     /// The facts the classifier reads for this photo, read back out of the
@@ -329,6 +366,41 @@ mod tests {
     }
 
     #[test]
+    fn a_manual_pick_does_not_keep_the_confidence_of_the_answer_it_replaced() {
+        // The badge prints `confidence` next to `source`, so a manual pick that
+        // keeps the old number reports "the user chose this, 90% sure" — a
+        // confidence for a decision nobody made. Both mark methods zero it, which
+        // is why this asserts the pair rather than one of them.
+        let profiles = ProfileStore::default();
+        let mut item = item(&profiles);
+        update(
+            &mut item,
+            &profiles,
+            &facts(),
+            decided("Screenshots", ClassificationSource::Heuristic),
+        );
+        assert!(
+            (item.confidence - 0.9).abs() < 1e-6,
+            "the model was sure, so there is a number to be stale"
+        );
+
+        item.category = "Receipts".to_string();
+        item.mark_manual();
+        assert_eq!(item.source, ClassificationSource::Manual);
+        assert_eq!(
+            item.confidence, 0.0,
+            "there is no decision behind a manual pick to be confident about"
+        );
+
+        item.confidence = 0.9;
+        item.mark_manual_over_pending();
+        assert_eq!(
+            item.confidence, 0.0,
+            "and the bulk move's route, which is the same claim, agrees"
+        );
+    }
+
+    #[test]
     fn a_pending_placeholder_is_never_preserved() {
         // The rule in one assertion, whatever route the Manual flag was set by.
         // Before `Pending` existed the placeholder was a real category with a text
@@ -352,6 +424,56 @@ mod tests {
             "nothing has been decided yet, so a later decision must land"
         );
         assert!(!item.pending);
+    }
+
+    #[test]
+    fn a_name_typed_over_a_pending_photo_claims_it() {
+        // The one route that clears `pending`, and the reason it is safe where
+        // `mark_manual` is not: there is a real category to preserve, not the
+        // placeholder. Without the claim the scan's answer lands on top of the name
+        // the bulk move already reported as assigned.
+        let profiles = ProfileStore::default();
+        let mut item = item(&profiles);
+        assert_eq!(item.category, CLASSIFYING_LABEL);
+
+        item.category = "Beach Trip".to_string();
+        item.is_custom = true;
+        // A photo the model has already answered carries that answer's
+        // confidence, and the grid's badge prints the number beside the source.
+        // Set before the mark so the assertion below has something to fail on.
+        item.confidence = 0.87;
+        item.mark_manual_over_pending();
+
+        assert!(!item.pending, "the photo now carries a decision");
+        assert!(
+            item.is_filable(),
+            "and may therefore be filed under that name"
+        );
+        assert_eq!(
+            item.confidence, 0.0,
+            "a manual pick has no decision behind it, so the grid must not print \
+             the confidence of the answer it replaced"
+        );
+
+        let mut later = facts();
+        later.embedding = vec![0.7, 0.2, 0.1];
+        update(
+            &mut item,
+            &profiles,
+            &later,
+            decided("Screenshots", ClassificationSource::Heuristic),
+        );
+
+        assert_eq!(
+            item.category, "Beach Trip",
+            "the user's name outlives the answer it raced"
+        );
+        assert_eq!(
+            item.embedding,
+            vec![0.7, 0.2, 0.1],
+            "claiming the decision must not freeze the facts: the embedding still \
+             has to arrive, or the next profile trains on nothing"
+        );
     }
 
     #[test]

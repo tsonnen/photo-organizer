@@ -8,9 +8,7 @@
 
 use super::PhotoOrganizerApp;
 use crate::category_name::CategoryName;
-use crate::transfer::{
-    ExecutionEngine, RawPhotoInput, TransferJournal, TransferMode, UndoStatus, LAST_JOURNAL,
-};
+use crate::transfer::{ExecutionEngine, RawPhotoInput, TransferJournal, TransferMode, UndoStatus};
 use eframe::egui;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -37,25 +35,36 @@ impl PhotoOrganizerApp {
             return;
         }
 
-        self.execute_transfer_to(mode, out_dir);
+        self.execute_transfer_to(mode, out_dir, None);
     }
 
-    /// The whole of a transfer, with its destination as an argument.
+    /// The shared body of every transfer: plan the selection, run it, journal it,
+    /// and report what happened.
     ///
-    /// Plan the selection, run it, journal it, report what happened. Split out
-    /// from [`Self::execute_transfer`] so that everything below the two backstops
-    /// is reachable with a destination the caller chose rather than the one in
-    /// the settings — the transfer is then a function of its arguments, and the
-    /// only question left for a caller is which folder to hand it.
+    /// `override_subject` is what makes the bulk move a two-line caller rather
+    /// than a second copy of all this: the bulk move has already assigned every
+    /// selected photo the one name the user typed, so passing it here plans the
+    /// batch against that name. `None` — the toolbar's Move and Copy — uses each
+    /// photo's own category, which is what those buttons mean.
     ///
-    /// A pure extraction: the destination the toolbar passes is the one this read
-    /// out of the settings a moment earlier, so the behaviour is unchanged.
-    pub(super) fn execute_transfer_to(&mut self, mode: TransferMode, out_dir: PathBuf) {
+    /// Returns how many photos landed, which is what lets a caller tell a batch
+    /// that filed something from one that filed nothing and report it differently.
+    pub(super) fn execute_transfer_to(
+        &mut self,
+        mode: TransferMode,
+        out_dir: PathBuf,
+        override_subject: Option<CategoryName>,
+    ) -> usize {
         // A photo the model has not reached yet holds `CLASSIFYING_LABEL` where
         // its category goes, and `is_filable` is false for exactly that reason: see
         // `StagedItem::is_filable`. Move and Copy are not gated on the scan
         // finishing, so this is reachable by pressing either one mid-scan. What is
         // held stays in the grid, still selected, for the retry.
+        //
+        // Counted in here rather than in the wrapper above because the bulk move
+        // arrives through this same door and filters on `is_filable` for the same
+        // reason: a selection that is entirely mid-scan has to say the same thing
+        // whichever button asked.
         let held = self
             .items
             .iter()
@@ -70,7 +79,9 @@ impl PhotoOrganizerApp {
                 // The item's category is a free-text display string the user can
                 // retype per photo, so it is sanitised here rather than trusted:
                 // this is the last point before it becomes a directory name.
-                subject: CategoryName::from_user_input(&i.category),
+                subject: override_subject
+                    .clone()
+                    .unwrap_or_else(|| CategoryName::from_user_input(&i.category)),
                 year: i.year,
                 month: i.month,
             })
@@ -81,7 +92,7 @@ impl PhotoOrganizerApp {
                 "⚠ Every selected photo is still being classified. Wait for the scan to finish, \
                  then press again.",
             );
-            return;
+            return 0;
         }
 
         let engine = ExecutionEngine::new(out_dir.clone(), mode);
@@ -90,8 +101,14 @@ impl PhotoOrganizerApp {
             println!("Transferring {curr}/{total}");
         });
 
-        // Only photos that landed leave the grid. A failed one stays selected in
-        // place, so the reason is on screen and the retry is one click away.
+        // Only the photos that actually landed leave the grid, whichever mode
+        // took them: a copy is a completed filing, and leaving its row behind
+        // would offer the user the same photo again — still selected, looking
+        // untouched — so a second press of the same button files it a second
+        // time under a `_1` suffix.
+        //
+        // A photo that *failed* stays selected in place, so the reason is on
+        // screen and the retry is one click away.
         let landed: HashSet<&Path> = journal
             .completed_ops
             .iter()
@@ -128,11 +145,13 @@ impl PhotoOrganizerApp {
         } else {
             self.set_warning(message);
         }
+
+        journal.completed_ops.len()
     }
 
     /// Rolls back the last transfer, if there is a journal to read.
     pub(super) fn undo_last_transfer(&mut self) {
-        let path = Path::new(LAST_JOURNAL);
+        let path = &self.journal_path;
         if !path.exists() {
             self.set_warning("Nothing to undo: no transfer has been recorded yet.");
             return;
@@ -369,7 +388,7 @@ mod tests {
         let journal = dir.join("journal.json");
 
         let mut app = app_with_one_selected(&source, &journal);
-        app.execute_transfer_to(TransferMode::Move, out_dir.clone());
+        app.execute_transfer_to(TransferMode::Move, out_dir.clone(), None);
 
         assert!(
             out_dir.join("Sunsets/2024/07/incoming.jpg").exists(),

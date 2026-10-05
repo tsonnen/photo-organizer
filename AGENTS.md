@@ -77,7 +77,7 @@ CI (`.github/workflows/build-and-test.yaml`) runs these in order, so match it lo
 cargo fmt --check
 cargo clippy -- -D warnings     # warnings are errors; the tree is currently clean
 cargo build
-cargo test                      # 174 tests, ~5s once built
+cargo test                      # 195 tests, ~5s once built
 ```
 
 - One test / one area: `cargo test media::tests::test_scan_preview_jpeg_scales_down_and_keeps_original_size`,
@@ -188,6 +188,21 @@ puts its Browse buttons on section headers for that reason.
   `discover_sidecars` claims sidecar files batch-wide — `photo.jpg` and `photo.jpeg`
   both want `photo.xmp` at the same destination, and the second attempt failing used to
   report a sidecar as broken when it had in fact travelled.
+- **Bulk move** (`src/app/bulk_move_modal.rs`): the fourth route to a category, and the only one that
+  trains nothing — a name typed over a selection becomes a `Manual` pick, which is exactly what makes it
+  survive re-classification. `assign_selected_to_category` labels the items, then `execute_transfer_to`
+  runs the *same* plan → execute → journal → report sequence the toolbar's Move and Copy use, with the
+  typed name passed as `override_subject` so nothing about the bulk move re-implements a transfer. Its
+  toolbar button is gated on the *selection*, not the destination, which is the opposite of Move and
+  Copy: the card carries its own folder picker, so an unconfigured output folder must not disable it.
+  The names it remembers live in `Settings::custom_categories`, deliberately *not* in `profiles.json` —
+  a name with no centroid is a label the user chose not to retype, and folding it in as learned data
+  would put a profile in the file for an event that has none. `remember_custom_category` is the only
+  writer and it keeps `Unsorted` out: the fallback bucket is a directory every unmatched photo already
+  lands in, so offering it back would file photos where they were headed anyway while looking like a
+  choice. The card closes only on a batch that *landed* something, since `execute_transfer_to` returns
+  that count — a batch that filed nothing keeps the card up with its name and folder, which is what
+  makes the retry the same press.
 
 ### Classification types
 
@@ -217,6 +232,22 @@ puts its Browse buttons on section headers for that reason.
   name — without the guard a scan's earliest photos land in `<output>/Classifying.../<YYYY>/<MM>/`, out of
   reach of every later re-classification. Held photos stay in the grid, selected, for the retry.
 
+The one write that clears `pending` is `StagedItem::mark_manual_over_pending`, used solely by
+the bulk move. `mark_manual` stays non-claiming because the per-photo "Other" text box is offered
+the placeholder, not a category the user chose; the bulk move arrives with a name they typed over
+a selection they picked, so it claims the photo and its name survives the answer it raced. Keep
+this to that one call site — the authority to clear the flag is the whole reason the other two
+bullets can hold, and `clicking_other_on_a_pending_photo_claims_nothing` is what pins the "Other"
+path shut.
+
+Both mark methods also zero `confidence`, so the grid's badge cannot print the number belonging to
+the answer a manual pick replaced. Callers write the category *before* calling either, and
+`apply_classification` stays reserved for decisions the pipeline makes.
+
+Copy clears the grid exactly as Move does. A copy is a completed filing, so keeping its row would
+leave the photo offered again — still selected, looking untouched — and a second press of the same
+button would file it again under a `_1` suffix. What a copy leaves behind is the *original*, on disk.
+
 `ProfileStore::classify` / `classify_with_heuristics` / `classify_heuristics` were collapsed into the one
 entry point — which is also where `classify_with_heuristics`'s `threshold` parameter went, so the
 `CONFIDENCE_THRESHOLD` constant is gone rather than reintroduced here. `ClassificationSource` is
@@ -228,6 +259,8 @@ re-exported from `profile_store` so existing `use` paths and the grid's badge ke
   renderers. The grid cell deliberately stacks the custom-category input *below* the combo while the modal
   puts it *inline* — both directions are asserted. Don't "unify" those layouts. Modal tests filter
   `placed_widgets` down to what lies inside the card rect, because the backdrop covers the whole screen.
+  The bulk move's harness stages its photos on a `Cell<bool>` rather than on `items.is_empty()`: a move
+  empties the grid, so that condition would put the photos straight back and hide whether they were dropped.
 - The same file drives the settings modal with **real** pointer and key events, which has two traps: egui
   only hands a widget an `interact_pointer_pos` while a button is held or was released *that* frame, so a
   press and a release queued into one frame cancel out (hence `press_at`/`drag_to`/`release_at`, one event
@@ -238,10 +271,18 @@ re-exported from `profile_store` so existing `use` paths and the grid's badge ke
   the file: a test reading `settings.json` would race the other tests' writes.
 - `categories.rs` has a source-text test (`include_str!`) requiring exactly two call sites of
   `render_custom_category_input` (grid + modal). Adding a third call site fails the build.
+- A closed egui `ComboBox` puts **no label** in the accesskit tree, so a kittest assertion has to find it
+  by role — and `accesskit::Role` is not a dependency, so stringify it the way `placed_widgets` does. To
+  assert what is *in* the list, open it (click the combo, run a frame) and query by label instead.
 - `scanner.rs` mutates the process-global `PHOTO_ORGANIZER_SCAN_THREADS` in exactly one test on purpose
   (cargo runs tests on parallel threads). Don't split it or add another env-mutating test.
 - Tests create temp files as `temp_dir()/name_<pid>.<ext>`, and `src/transfer/` builds a whole
   temp tree per test (`temp_dir()/transfer_<name>_<pid>`). No fixtures directory exists.
+- Anything that runs a *real* transfer must point `app.journal_path` at a temp directory. It is a
+  field rather than a constant for exactly that: `LAST_JOURNAL` is a relative path, so the default
+  would overwrite the journal in the crate root — the slot the running app's **Undo** reads — every
+  time the suite ran. Nothing else in the repo clobbers it; the settings tests rewrite
+  `settings.json` and that has been accepted as a quirk.
 - `transfer::tests::test_undo_is_the_inverse_of_execute_for_both_modes` asserts that
   `undo(execute(inputs, mode))` puts the filesystem back exactly as it started, for both
   modes, sidecars included. It is the reason the two directions share a module — keep it
