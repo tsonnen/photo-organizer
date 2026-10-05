@@ -9,6 +9,11 @@ use eframe::egui;
 impl PhotoOrganizerApp {
     /// The central panel: a column-aware grid of photo cells, then any modal
     /// or training request the cells raised this frame.
+    ///
+    /// Draws [`view::visible_indices`] rather than every staged photo, so the
+    /// filters and the sort apply here without either reaching into the grid's
+    /// layout. An index into that list is still an index into `self.items`,
+    /// which is what the modal and the training request downstream need.
     pub(super) fn render_grid(&mut self, ctx: &egui::Context) {
         let panel_frame = egui::Frame::central_panel(&ctx.style()).inner_margin(egui::Margin {
             left: 8.0,
@@ -19,9 +24,20 @@ impl PhotoOrganizerApp {
         egui::CentralPanel::default()
             .frame(panel_frame)
             .show(ctx, |ui| {
+                let visible = self.visible_indices();
+                // Declared out here because it is read after the scroll area
+                // closes, which is the only point at which the whole grid has been
+                // drawn and "somewhere a cell is being typed into" is settled.
+                let mut editing_this_frame = false;
+
                 egui::ScrollArea::vertical()
                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
                     .show(ui, |ui| {
+                        if visible.is_empty() {
+                            self.render_empty_grid(ui);
+                            return;
+                        }
+
                         let mut train_request = None;
                         let mut open_modal_idx = None;
                         let (columns, item_width) =
@@ -31,26 +47,60 @@ impl PhotoOrganizerApp {
                             .num_columns(columns)
                             .spacing([layout::SPACING, layout::SPACING])
                             .show(ui, |ui| {
-                                for (idx, item) in self.items.iter_mut().enumerate() {
+                                // `position`, not the index into `items`: the row
+                                // ends every `columns` *drawn* cells, and an
+                                // index into the underlying vector counts the
+                                // filtered-out photos too. Using it would leave
+                                // the last row of a filtered grid short and wrap
+                                // early.
+                                for (position, &idx) in visible.iter().enumerate() {
                                     ui.vertical(|ui| {
-                                        if render_photo_cell(ui, item, item_width) {
-                                            open_modal_idx = Some(idx);
-                                        }
-                                        if let Some(category) = Self::render_grid_cell_controls(
-                                            &self.profiles,
-                                            ui,
-                                            item,
-                                            item_width,
-                                            ui.make_persistent_id((
-                                                "cat_combo",
-                                                idx,
-                                                &item.source_path,
-                                            )),
-                                        ) {
-                                            train_request = Some((idx, category));
-                                        }
+                                        let item = &mut self.items[idx];
+                                        // Every widget in the cell identifies itself against this
+                                        // photo rather than against the slot it happens to
+                                        // occupy.
+                                        //
+                                        // Without it egui falls back to
+                                        // `next_auto_id`, a count of how many widgets
+                                        // this frame has created, so a cell's ids are
+                                        // positional. That is invisible until the grid
+                                        // reorders, and then it is not cosmetic:
+                                        // sorting by Category reorders the grid on the
+                                        // very keystroke that edits a category, so the
+                                        // focused text field silently becomes a
+                                        // different photo's field and the characters
+                                        // land in it, at that photo's old caret. The
+                                        // checkbox and the hover card drift the same way.
+                                        //
+                                        // Keyed on the index rather than the path, which
+                                        // would have to be cloned to be read alongside
+                                        // the mutable borrow of the item. An index into
+                                        // `items` identifies a photo just as well and is
+                                        // stable for as long as that photo is staged: the
+                                        // sort permutes `visible_indices`, never the
+                                        // vector itself.
+                                        ui.push_id(idx, |ui| {
+                                            if render_photo_cell(ui, item, item_width) {
+                                                open_modal_idx = Some(idx);
+                                            }
+                                            let (train, editing) = Self::render_grid_cell_controls(
+                                                &self.profiles,
+                                                ui,
+                                                item,
+                                                item_width,
+                                                ui.make_persistent_id((
+                                                    "cat_combo",
+                                                    idx,
+                                                    &item.source_path,
+                                                )),
+                                            );
+                                            if let Some(category) = train {
+                                                train_request = Some((idx, category));
+                                            }
+                                            editing_this_frame |= editing;
+                                        });
                                     });
-                                    if (idx + 1) % columns == 0 {
+                                    if (position + 1) % columns == 0 {
                                         ui.end_row();
                                     }
                                 }
@@ -64,7 +114,41 @@ impl PhotoOrganizerApp {
                             self.train_single_item(idx, &category);
                         }
                     });
+
+                // Recorded after the cells are drawn, because that is the only
+                // point where "is a cell being typed into" is known. Read back at
+                // the top of the next frame by `resolve_order_hold`, one frame
+                // later than the keystroke — by which point the editor has had a
+                // frame to take focus, which it could not have done sooner.
+                self.editing_cell = editing_this_frame;
+                self.order_sort = (self.sort_by, self.sort_direction);
             });
+    }
+
+    /// What the grid says when it has no cells to draw.
+    ///
+    /// The two empty states need different words. Nothing staged means the user
+    /// has not picked a folder yet, and "no photos match your filters" would send
+    /// them looking for a filter they never set. Photos staged but none in view
+    /// means the filters are doing exactly what was asked, so the way out is
+    /// named rather than left for them to infer.
+    fn render_empty_grid(&self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(40.0);
+            if self.items.is_empty() {
+                ui.label(egui::RichText::new("No photos staged").weak());
+                ui.label("Pick a 📁 Source Folder to scan one.");
+                return;
+            }
+            ui.label(
+                egui::RichText::new(format!(
+                    "None of the {} staged photos match the filters",
+                    self.items.len()
+                ))
+                .weak(),
+            );
+            ui.label("Widen the 🔍 Filters to see the rest.");
+        });
     }
 }
 

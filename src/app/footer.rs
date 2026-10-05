@@ -6,6 +6,10 @@
 //! toolbar was already carrying more buttons than it could hold in one row —
 //! the picker moving to the settings modal left the user with no way to see
 //! where their photos were about to go.
+//!
+//! Every count here is over the photos currently in view, not over everything
+//! staged, so that the number above the Move button describes the same set of
+//! photos the grid is showing and the transfer is about to act on.
 
 use super::PhotoOrganizerApp;
 use eframe::egui;
@@ -62,14 +66,32 @@ fn shorten_path(path: &std::path::Path) -> String {
 impl PhotoOrganizerApp {
     /// The bottom panel: selection count on the left, transfer destination on
     /// the right.
+    ///
+    /// Rendered before the grid, because egui hands `CentralPanel` whatever the
+    /// top and bottom panels leave it.
     pub(super) fn render_footer(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::bottom("footer").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                let (selected, total) = self.selection_counts();
-                ui.label(if total == 0 {
-                    "No photos staged".to_string()
-                } else {
-                    format!("{selected} of {total} selected")
+                // Counted over what the grid is showing, not over everything
+                // staged. A footer reading "3 of 400 selected" under a grid of
+                // eight photos is a statement about photos the user cannot see,
+                // and it invites them to read the transfer that follows as
+                // covering all 400 — which, since the transfer is scoped the
+                // same way, it does not.
+                let visible = self.visible_indices();
+                let staged = self.items.len();
+                let selected = visible.iter().filter(|&&i| self.items[i].selected).count();
+
+                ui.label(match (staged, visible.len()) {
+                    (0, _) => "No photos staged".to_string(),
+                    // Photos staged, none in view: the filters are the whole
+                    // story, so say that rather than reporting a selection count
+                    // of zero over an empty grid as though nothing were wrong.
+                    (_, 0) => format!("No photos match the filters · {staged} staged"),
+                    (_, shown) if shown < staged => {
+                        format!("{selected} of {shown} selected · {staged} staged")
+                    }
+                    (_, shown) => format!("{selected} of {shown} selected"),
                 });
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -99,13 +121,6 @@ impl PhotoOrganizerApp {
                 });
             });
         });
-    }
-
-    /// How many staged photos are selected, and how many there are.
-    pub(super) fn selection_counts(&self) -> (usize, usize) {
-        let total = self.items.len();
-        let selected = self.items.iter().filter(|i| i.selected).count();
-        (selected, total)
     }
 }
 

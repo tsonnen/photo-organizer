@@ -24,6 +24,15 @@ impl PhotoOrganizerApp {
         self.items.clear();
         self.status_message = None;
         self.is_processing = true;
+
+        // The filters go, the sort stays. A filter was chosen against the photos
+        // that were on screen, and there are none now: carried over, "only 2020
+        // receipts above 80% confidence" would silently hide an entire new folder
+        // behind a question the user answered about a different one, with nothing
+        // on screen to say why. The sort is a standing preference about how to
+        // read a grid rather than a statement about its contents, so it survives.
+
+        self.filters = crate::app::models::Filters::default();
         // This scan classifies against the threshold in force now, so the grid
         // starts out agreeing with the slider. That also discharges whatever a
         // held re-classification was owed: it was owed for the photos just

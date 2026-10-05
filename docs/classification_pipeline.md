@@ -120,6 +120,109 @@ shared channel, and a late `Update` from it was decided against the profile
 store as it was at the time — it would otherwise overwrite the current scan's
 photo.
 
+## Ordering and narrowing the grid
+
+`src/app/view.rs` is the one place that answers "is this photo in view". The grid
+draws it, the footer counts it, **All**/**None** tick it, the training routes read
+it, the transfer batches it and the inspection modal pages through it. Four copies
+of that predicate would be four chances for the count in the footer to disagree
+with the rows above it.
+
+It runs over `Row`, a borrowing view of the five fields that decide visibility —
+date, category, confidence, source — rather than over `StagedItem`. Nothing there
+looks at a thumbnail or an embedding, which keeps the ordering rules assertable
+without a live egui context.
+
+The view is recomputed on demand rather than cached in a field. Items change
+underneath it: a scan `Update` lands a category, a combo box renames one, the
+threshold re-classifies the lot. A cache would need invalidating in each of those
+places and would be stale in whichever one was missed.
+
+### Confidence is ranked, not read
+
+`rank_confidence` is not `item.confidence`, and the difference is the whole
+point. A rule-assigned category carries a high number that measures how sure the
+*rule* is, not how sure the model is — 0.85 for a screenshot caught by its
+filename, 0.9 for a receipt by a keyword. Ranked as-is it files a confidently
+mis-filed screenshot above a genuine match, which is backwards: the rules only ran
+at all because the best centroid fell short of the user's threshold.
+
+So a rule's number is scaled into the band *below* that threshold, which keeps
+two things true at once — every rule-assigned photo sorts under every accepted
+match, and two of them still order by how sure their own rule was. Pinning them
+all to one value would satisfy the first and throw the second away, leaving every
+screenshot tied with every receipt.
+
+Unsorted photos keep their own number. It is a real centroid similarity, just a
+low one, and a low one is what should sink them.
+
+The confidence *filter* reads the same ranking as the confidence *sort*.
+Filtering on one number and sorting on another would let the grid show a set its
+own ordering does not reflect.
+
+### `Unsorted` is not a category
+
+`category_sort_key` files the two ways a photo can end up with no category — the
+`Unsorted` fallback and a custom name cleared back to empty — under a single key
+that sorts after every real name, so everything still unclassified gathers at one
+end instead of filing between `Travel` and `Vacation` as though the user had
+chosen it. Real keys are lower-cased, so the sentinel is too: `ZZZZ` as written
+sorts *before* every one of them, since `Z` is `0x5A` and `a` is `0x61`.
+
+The unsorted name itself is read from `CategoryName::unsorted()` rather than
+copied, so the key cannot drift from the name a `Decision` actually carries.
+
+### The grid does not reorder under the caret
+
+Editing a category is exactly what changes the Category sort key. A grid that
+re-sorts on every keystroke therefore moves the row being edited out from under
+the caret — and egui identifies a cell's widgets by the *position* they occupy
+(`make_persistent_id` is `ui.id.with(salt)`, and a `Grid` cell's `ui.id` is
+positional), so the field under the caret silently becomes the next photo's
+field. The characters land in that photo, at that photo's old caret, and the
+rows behind it appear to scramble.
+
+Both halves are one cause, and both are fixed by `holding_order`: while a cell's
+editor holds focus the grid keeps the order it has. Filtering still applies — the
+two are independent, and a filter narrowing the grid under the user's hands is
+expected rather than alarming.
+
+The hold is released by the sort changing, not only by focus leaving. Clicking
+the direction button does not move keyboard focus in egui 0.30, so an editor the
+user clicked into keeps it, and a plain "editing, therefore frozen" rule would
+swallow the click. `order_sort` records the sort the current order was produced
+under, and a mismatch releases the hold on the next frame.
+
+Each grid cell is additionally wrapped in `ui.push_id(idx, …)`. That cannot make
+the ids absolute — the push is still relative to the positional cell id — but it
+does key them to the photo rather than to the counter of widgets created so far,
+so a photo that does move does not have its neighbours' fields pointed at it.
+
+### Ties keep their order in both directions
+
+Descending inverts the *key* (`Reverse`), never the run. `sort_by_cached_key`
+breaks ties by the position a row arrived in, so inverting the key leaves that
+tie-break untouched: rows that tie — two files from one month, two at the same
+confidence — stay put while the groups between them move. Reversing the slice
+would shuffle them every time the user checked the other end of the order.
+
+### A filter narrows what the actions act on
+
+The filters scope every selection-consuming operation, not just what the grid
+draws. A photo the filters exclude is not counted in the footer, not ticked by
+**All**, not trained from, and not in the transfer batch.
+
+The transfer is where this matters most, because the removal keys off what the
+journal recorded as *landed*, and a photo outside the filters was never offered to
+the engine — so it cannot be dropped from the grid having never been transferred.
+Before this, the grid removed every ticked photo after a transfer regardless,
+which under a filter silently discarded photos that had not moved anywhere.
+
+Starting a scan clears the filters and keeps the sort. A filter was chosen
+against the photos that were on screen and there are none now; carried over,
+"only 2020 receipts above 80% confidence" would hide an entire new folder behind
+a question the user answered about a different one.
+
 ## Managing Profiles
 
 Trained profiles are listed in the profile modal, opened from **Manage Profiles** in
