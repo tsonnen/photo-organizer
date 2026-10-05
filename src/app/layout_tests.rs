@@ -11,10 +11,10 @@ use super::layout::{self, MIN_CONTROL_WIDTH};
 use super::models::{SortBy, SortDirection, StagedItem};
 use super::profiles_modal::DeletePrompt;
 use super::PhotoOrganizerApp;
-use crate::classification::{ClassificationSource, FrameSize};
+use crate::classification::{ClassificationSource, FrameSize, PhotoDate};
 use crate::profile_store::{CategoryProfile, ProfileStore};
 use eframe::egui;
-use egui_kittest::kittest::{by, Queryable};
+use egui_kittest::kittest::{by, Node, Queryable};
 use egui_kittest::Harness;
 use std::fs;
 use std::path::PathBuf;
@@ -54,8 +54,7 @@ impl WidgetRect {
 fn staged_item(ctx: &egui::Context) -> StagedItem {
     StagedItem {
         source_path: PathBuf::from("/photos/sample.jpg"),
-        year: 2024,
-        month: 5,
+        date: PhotoDate::new(2024, 5, Some(5)),
         is_exif: true,
         frame: Some(FrameSize::new(3000, 2000)),
         category: "Beach Trip".into(),
@@ -1480,16 +1479,20 @@ fn the_file_menu_does_not_duplicate_the_source_picker() {
 /// a `StagedItem` cannot be built without one for its thumbnail.
 struct Photo {
     name: &'static str,
-    year: u32,
-    month: u32,
+    date: PhotoDate,
     category: &'static str,
 }
 
+/// A photo dated to the 1st of its month, which is enough to order a grid by
+/// month and leaves the day free for the tests that care about it.
 fn photo(name: &'static str, year: u32, month: u32, category: &'static str) -> Photo {
+    photo_on(name, PhotoDate::new(year, month, Some(1)), category)
+}
+
+fn photo_on(name: &'static str, date: PhotoDate, category: &'static str) -> Photo {
     Photo {
         name,
-        year,
-        month,
+        date,
         category,
     }
 }
@@ -1516,8 +1519,7 @@ fn app_with(
                     .iter()
                     .map(|p| StagedItem {
                         source_path: PathBuf::from(format!("/photos/{}.jpg", p.name)),
-                        year: p.year,
-                        month: p.month,
+                        date: p.date,
                         category: p.category.to_string(),
                         selected: true,
                         ..staged_item(ui.ctx())
@@ -1662,7 +1664,7 @@ fn the_footer_says_so_when_a_filter_leaves_nothing_to_show() {
         ],
         |app| {
             app.filters.category = Some("Documents".to_string());
-            app.filters.date_from = Some((2030, 1));
+            app.filters.date_from = Some(PhotoDate::new(2030, 1, Some(1)));
         },
     );
     harness.run();
@@ -1780,8 +1782,7 @@ fn a_transfer_moves_only_what_is_in_view() {
                     .map(|name| StagedItem {
                         // The real file, so a transfer has something to act on.
                         source_path: staged_from.join(format!("{name}.jpg")),
-                        year: 2021,
-                        month: 5,
+                        date: PhotoDate::new(2021, 5, Some(12)),
                         category: if name == "receipt" {
                             "Documents".into()
                         } else {
@@ -2025,5 +2026,224 @@ fn changing_the_sort_while_typing_still_takes_effect() {
         drawn_photo_order(&harness),
         vec!["bbb.jpg", "aaa.jpg"],
         "the reversed sort should apply immediately"
+    );
+}
+
+/// The filter panel open, with the date picker showing.
+///
+/// Rendered through the real toolbar, so the calendar is reached the way a user
+/// reaches it: press **Filters**, then press the calendar button.
+fn with_filter_panel() -> Harness<'static, PhotoOrganizerApp> {
+    let mut harness = app_with(
+        vec![
+            photo("jan", 2021, 1, "Beach Trip"),
+            photo("mar", 2021, 3, "Beach Trip"),
+            photo("jun", 2021, 6, "Beach Trip"),
+        ],
+        |app| {
+            app.show_filter_panel = true;
+        },
+    );
+    harness.run();
+    harness
+}
+
+/// A widget's text, wherever egui put it.
+///
+/// `label().or_else(value())`, the same fallback `placed_widgets` uses: a plain
+/// label lands in `value` and only an input's contents land in `label`, so
+/// reading one field alone misses half the widgets on screen.
+fn node_text(node: &Node) -> String {
+    node.label().or_else(|| node.value()).unwrap_or_default()
+}
+
+/// Clicks the button whose text contains `text`.
+///
+/// A full `run` rather than a `step`: a click is a press *and* a release, and one
+/// step can catch only half of it — the same trap the settings-modal tests
+/// document.
+fn click_button(harness: &mut Harness<'static, PhotoOrganizerApp>, text: &str) {
+    harness
+        .kittest_state()
+        .query_all(by().recursive(true))
+        .find(|node| {
+            format!("{:?}", node.role()).contains("Button") && node_text(node).contains(text)
+        })
+        .unwrap_or_else(|| panic!("no button labelled {text:?}"))
+        .click();
+    harness.run();
+}
+
+/// Clicks a day cell in the calendar.
+///
+/// Matched exactly rather than by substring, because the day labels run 1..=31
+/// against a toolbar full of other numbers: a substring search for "1" finds the
+/// confidence slider's "1.00" first and drags it instead of picking a day.
+fn click_day(harness: &mut Harness<'static, PhotoOrganizerApp>, day: u32) {
+    let wanted = day.to_string();
+    harness
+        .kittest_state()
+        .query_all(by().recursive(true))
+        .find(|node| format!("{:?}", node.role()).contains("Button") && node_text(node) == wanted)
+        .unwrap_or_else(|| panic!("no day cell labelled {day}"))
+        .click();
+    harness.run();
+}
+
+/// Whether a widget of the given role is on screen with that text.
+fn find_label(harness: &Harness<'static, PhotoOrganizerApp>, role_part: &str, text: &str) -> bool {
+    harness
+        .kittest_state()
+        .query_all(by().recursive(true))
+        .any(|node| {
+            format!("{:?}", node.role()).contains(role_part) && node_text(&node).contains(text)
+        })
+}
+
+#[test]
+fn the_calendar_picks_a_range_of_days() {
+    // Driven with real clicks through the real toolbar, because the parts that
+    // matter are all wiring: the button that opens the picker, the day cells it
+    // draws, and the filter the click lands in.
+    let mut harness = with_filter_panel();
+    assert!(
+        find_label(&harness, "Label", "Any"),
+        "the date row should read as unbounded to begin with"
+    );
+
+    click_button(&mut harness, "📅");
+    // June 2021, where `newest_date` leaves the picker for this folder.
+    assert!(
+        find_label(&harness, "Label", "06/2021"),
+        "the picker should open on the newest month in the folder"
+    );
+
+    // The 7th, then the 9th: a three-day range.
+    click_day(&mut harness, 7);
+    click_day(&mut harness, 9);
+
+    assert_eq!(
+        harness.state().filters.date_from,
+        Some(PhotoDate::new(2021, 6, Some(7))),
+        "the first click should open the range"
+    );
+    assert_eq!(
+        harness.state().filters.date_to,
+        Some(PhotoDate::new(2021, 6, Some(9))),
+        "the second click should close it"
+    );
+    assert!(
+        find_label(&harness, "Label", "2021-06-07 → 2021-06-09"),
+        "the filter row should spell out the range it now holds"
+    );
+}
+
+#[test]
+fn picking_backwards_through_the_calendar_still_gives_a_usable_range() {
+    // Clicking the dates in the order a person thinks of them — the 20th, then
+    // the 10th — has to leave a range. Storing it inverted reads as empty and
+    // silently filters the whole folder away.
+    let mut harness = with_filter_panel();
+    click_button(&mut harness, "📅");
+    click_day(&mut harness, 20);
+    click_day(&mut harness, 10);
+
+    let (from, to) = (
+        harness.state().filters.date_from.unwrap(),
+        harness.state().filters.date_to.unwrap(),
+    );
+    assert!(
+        from.start() <= to.end(),
+        "the range should come out ordered, got {from:?}..{to:?}"
+    );
+}
+
+#[test]
+fn the_calendar_only_keeps_the_photos_it_names() {
+    // The end-to-end claim: a date filter drawn from the calendar narrows the grid,
+    // and everything scoped to the view follows from it.
+    let mut harness = with_filter_panel();
+    click_button(&mut harness, "📅");
+    click_day(&mut harness, 1); // 1 June
+    click_day(&mut harness, 30); // 30 June
+
+    harness.run();
+    assert_eq!(
+        drawn_photo_order(&harness),
+        vec!["jun.jpg"],
+        "only June should be left in view"
+    );
+    assert!(
+        find_label(&harness, "Label", "1 of 1 selected") || find_label(&harness, "Label", "1 of 1"),
+        "the footer should count the visible photo, not the staged three"
+    );
+}
+
+#[test]
+fn paging_the_calendar_reaches_other_months_and_years() {
+    // The arrows are the only way to reach a date the folder does not contain, so
+    // a folder of one month still has to be filterable by any month.
+    let mut harness = with_filter_panel();
+    click_button(&mut harness, "📅");
+    assert!(find_label(&harness, "Label", "06/2021"));
+
+    click_button(&mut harness, "◀");
+    assert!(find_label(&harness, "Label", "05/2021"), "back one month");
+
+    click_button(&mut harness, "▶");
+    click_button(&mut harness, "▶");
+    assert!(
+        find_label(&harness, "Label", "07/2021"),
+        "forward two months"
+    );
+
+    click_button(&mut harness, "»");
+    assert!(find_label(&harness, "Label", "07/2022"), "forward a year");
+
+    click_button(&mut harness, "«");
+    assert!(find_label(&harness, "Label", "07/2021"), "back a year");
+}
+
+#[test]
+fn the_calendar_days_line_up_in_one_set_of_columns() {
+    // The weekday initials and the days are rows of a *single* grid. They used to
+    // be two grids, and nothing made their columns agree — the pitch turned out to
+    // be `DAY_SIZE + spacing + a further 14pt` that neither grid controlled, so
+    // every header sat to the right of the day it named. One grid cannot drift.
+    //
+    // Checked structurally: every column's left edge is the same distance from the
+    // first column's, for both rows.
+    use egui_kittest::Harness;
+    let mut harness = Harness::new_ui_state(
+        |ui, _: &mut ()| {
+            let mut from = None;
+            let mut to = None;
+            // 1 June 2021 was a Tuesday, so "1" leads column 1 and column 0 is a
+            // spacer.
+            let mut cal = super::calendar::Calendar::new((2021, 6));
+            cal.show(ui, &mut from, &mut to);
+        },
+        (),
+    );
+    harness.set_size(egui::vec2(1240.0, 900.0));
+    harness.run();
+
+    let left_of = |label: &str| {
+        harness
+            .kittest_state()
+            .query_all(by().recursive(true))
+            .find(|node| node.label().or_else(|| node.value()).as_deref() == Some(label))
+            .and_then(|node| node.raw_bounds())
+            .map(|b| b.x0)
+    };
+
+    let mut pitches = Vec::new();
+    for (a, b) in [("2", "3"), ("3", "4"), ("9", "10")] {
+        let (a, b) = (left_of(a).unwrap(), left_of(b).unwrap());
+        pitches.push(b - a);
+    }
+    assert!(
+        pitches.windows(2).all(|w| (w[0] - w[1]).abs() < 0.01),
+        "columns should be evenly pitched, got {pitches:?}"
     );
 }

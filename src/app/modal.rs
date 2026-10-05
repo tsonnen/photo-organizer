@@ -4,7 +4,7 @@
 use super::chrome;
 use super::layout;
 use super::PhotoOrganizerApp;
-use crate::app::models::ModalPreview;
+use crate::app::models::{format_date, ModalPreview};
 use eframe::egui;
 
 impl PhotoOrganizerApp {
@@ -169,7 +169,7 @@ impl PhotoOrganizerApp {
                     ui.separator();
                     ui.label(egui::RichText::new(&filename).strong());
                     ui.separator();
-                    ui.label(format!("Date: {}/{:02}", item.year, item.month));
+                    ui.label(format!("Date: {}", format_date(&item.date)));
                     if is_loading {
                         ui.separator();
                         ui.spinner();

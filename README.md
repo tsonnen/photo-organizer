@@ -59,9 +59,8 @@ finished.
 
 The row under the toolbar orders the grid, and **🔍 Filters** narrows it.
 
-**Sort** offers three orders, each with a button to flip it: **Date Taken** (a year and
-a month is as fine as the app stores — `extract_date` reduces both EXIF timestamps and
-file times to that pair), **Confidence**, and **Category**. Photos that tie on the sort
+**Sort** offers three orders, each with a button to flip it: **Date Taken**, **Confidence**,
+and **Category**. Photos that tie on the sort
 key keep a fixed order, so flipping the direction moves the groups between them and
 leaves the ties where they are.
 
@@ -84,6 +83,10 @@ settles in when you click away — or the moment you change the sort.
 **Filters** has three narrowing controls that combine: a **date range**, a **confidence
 range**, and a **category**. All three have to hold for a photo to stay, so you can ask
 for "receipts, from 2021, that the model was sure about" in one go.
+
+The date range is picked from a calendar: press 📅, click a day to start the range and
+another to close it. Clicking the dates the other way round works too — pick the 20th then
+the 10th and you get the 10th to the 20th, not an empty range.
 
 A filter narrows what you're looking at *and* what the actions act on. Photos outside it
 aren't counted in the footer, aren't ticked by **All**, aren't trained from, and aren't

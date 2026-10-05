@@ -7,11 +7,17 @@ use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::Path;
 
+use crate::classification::PhotoDate;
 use crate::db::CachedThumbnail;
 
-/// Extracts year, month, and whether the date was extracted from EXIF metadata.
-/// Falls back to file creation/modification time if EXIF is missing or unparseable.
-pub fn extract_date(path: &Path) -> (u32, u32, bool) {
+/// Extracts the day, month and year a photo was taken, and whether the date came
+/// from EXIF metadata. Falls back to file creation/modification time if EXIF is
+/// missing or unparseable.
+///
+/// The day used to be parsed and dropped, which left "taken" meaning "taken in the
+/// same month as" — close enough to file photos by and useless for ordering a
+/// folder of photos from one trip. It is in both sources, so it is read from both.
+pub fn extract_date(path: &Path) -> (PhotoDate, bool) {
     if let Ok(file) = File::open(path) {
         let mut buf = BufReader::new(file);
         if let Ok(exif_data) = Reader::new().read_from_container(&mut buf) {
@@ -20,7 +26,10 @@ pub fn extract_date(path: &Path) -> (u32, u32, bool) {
                     if let Some(bytes) = v.first() {
                         if let Ok(s) = std::str::from_utf8(bytes) {
                             if let Ok(dt) = NaiveDateTime::parse_from_str(s, "%Y:%m:%d %H:%M:%S") {
-                                return (dt.year() as u32, dt.month(), true);
+                                return (
+                                    PhotoDate::new(dt.year() as u32, dt.month(), Some(dt.day())),
+                                    true,
+                                );
                             }
                         }
                     }
@@ -32,7 +41,10 @@ pub fn extract_date(path: &Path) -> (u32, u32, bool) {
         .and_then(|m| m.created().or_else(|_| m.modified()))
         .unwrap_or(std::time::SystemTime::now())
         .into();
-    (dt.year() as u32, dt.month(), false)
+    (
+        PhotoDate::new(dt.year() as u32, dt.month(), Some(dt.day())),
+        false,
+    )
 }
 
 /// Loads an image from disk. Supports standard image formats as well as various
@@ -229,13 +241,17 @@ mod tests {
             f.write_all(b"not an image").expect("write bytes");
         }
 
-        let (year, month, is_exif) = extract_date(&test_file);
+        let (date, is_exif) = extract_date(&test_file);
         let _ = fs::remove_file(&test_file);
 
         let now = Utc::now();
         assert!(!is_exif);
-        assert_eq!(year, now.year() as u32);
-        assert_eq!(month, now.month());
+        assert_eq!(date.year, now.year() as u32);
+        assert_eq!(date.month, now.month());
+        // The fallback is a filesystem timestamp, which carries a day just as the
+        // EXIF one does. It used to be dropped here, which is what left photos
+        // from the same month indistinguishable.
+        assert_eq!(date.day, Some(now.day()));
     }
 
     #[test]

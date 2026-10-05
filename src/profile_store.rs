@@ -405,7 +405,7 @@ mod tests {
     fn plain_facts(embedding: Vec<f32>) -> PhotoFacts {
         PhotoFacts {
             path: PathBuf::from("/photos/unremarkable_file.xyz"),
-            date: PhotoDate::new(2026, 1),
+            date: PhotoDate::new(2026, 1, Some(1)),
             frame: None,
             is_exif: false,
             embedding,
@@ -415,7 +415,7 @@ mod tests {
     fn facts_with(path: &str, is_exif: bool, frame: Option<(u32, u32)>) -> PhotoFacts {
         PhotoFacts {
             path: PathBuf::from(path),
-            date: PhotoDate::new(2026, 1),
+            date: PhotoDate::new(2026, 1, Some(1)),
             frame: frame.map(|(w, h)| FrameSize::new(w, h)),
             is_exif,
             embedding: Vec::new(),

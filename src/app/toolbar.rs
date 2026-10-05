@@ -1,7 +1,8 @@
 //! The top toolbar: folder pickers, selection, transfer actions, the sort and
 //! filter controls, and the collapsible AI & categories panel.
 
-use super::models::{Filters, SortBy};
+use super::calendar;
+use super::models::{format_date, Filters, SortBy};
 use super::view;
 use super::PhotoOrganizerApp;
 use crate::transfer::TransferMode;
@@ -10,18 +11,27 @@ use eframe::egui;
 /// Width of the sort combo, in points. Sized to its widest option, "Date Taken".
 const SORT_COMBO_WIDTH: f32 = 110.0;
 
-/// Width of a date picker in the filter panel, in points. A year is four digits
-/// and a month is two, so both fit well inside this.
-const DATE_PICKER_WIDTH: f32 = 64.0;
-
 /// Width of the category combo in the filter panel, in points. Category names are
 /// the longest labels the app renders anywhere, so this is the one picker that
 /// gets extra room; it clips rather than widening the toolbar past the window.
 const CATEGORY_PICKER_WIDTH: f32 = 160.0;
 
-/// The pickers' "no bound" and "no filter" entries.
-const ANY: &str = "Any";
+/// The category picker's "no filter" entry.
 const ALL: &str = "All categories";
+
+/// What an open-ended date bound reads as in the filter row.
+const OPEN_END: &str = "…";
+
+/// Whether the date picker is open, and which month it is showing.
+///
+/// One struct rather than two fields, because the two are the same piece of state:
+/// the month is only meaningful while the picker is open, and closing it should
+/// forget the month so the next visit opens on the bound being edited.
+#[derive(Default)]
+pub(super) struct CalendarControl {
+    pub(super) open: bool,
+    pub(super) month: Option<(u32, u32)>,
+}
 
 impl PhotoOrganizerApp {
     pub(super) fn render_toolbar(&mut self, ctx: &egui::Context) {
@@ -225,25 +235,24 @@ impl PhotoOrganizerApp {
 
     /// The three narrowing controls, behind a toggle.
     ///
-    /// Collapsed by default where the sort is not, because three pickers, two
-    /// sliders and a clear button is a wall of controls for something a user sets
-    /// once and then mostly leaves alone — but unlike the sort, nothing here is
-    /// worth reading at a glance, so there is nothing to keep on screen.
+    /// Collapsed by default where the sort is not, because two sliders, a picker
+    /// and a calendar is a wall of controls for something a user sets once and then
+    /// mostly leaves alone — but unlike the sort, nothing here is worth reading at a
+    /// glance, so there is nothing to keep on screen.
     fn render_filter_panel(&mut self, ui: &mut egui::Ui) {
         ui.separator();
 
-        // Read the folder's shape before the row is drawn: both pickers are
+        // Read the folder's shape before the row is drawn: the category picker is
         // populated from the staged photos, and borrowing `self.items` while the
         // row mutates `self.filters` would be two borrows of one struct.
         let rows: Vec<view::Row<'_>> = self.items.iter().map(view::Row::from).collect();
-        let years = view::year_choices(rows.iter().copied());
         let categories = view::category_choices(rows.iter().copied());
+        let newest = view::newest_date(rows.iter().copied());
 
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Filter").strong());
 
-            Self::render_date_bound(ui, "From", &years, &mut self.filters.date_from, "from");
-            Self::render_date_bound(ui, "to", &years, &mut self.filters.date_to, "to");
+            Self::render_date_filter_row(ui, &mut self.filters, &mut self.calendar, newest);
 
             ui.separator();
             Self::render_confidence_bounds(ui, &mut self.filters);
@@ -258,8 +267,21 @@ impl PhotoOrganizerApp {
                 .clicked()
             {
                 self.filters = Filters::default();
+                self.calendar = CalendarControl::default();
             }
         });
+
+        // Below the row rather than in a popup: a popup is another layer to get
+        // right, and it would cover the very rows the filter is about. Inline also
+        // means the grid below stays visible while a range is dragged out.
+        if self.calendar.open {
+            ui.add_space(4.0);
+            let mut picker = calendar::Calendar::new(self.calendar.month.unwrap_or(
+                calendar::opening_month(self.filters.date_from, self.filters.date_to, newest),
+            ));
+            picker.show(ui, &mut self.filters.date_from, &mut self.filters.date_to);
+            self.calendar.month = Some(picker.month());
+        }
 
         ui.small(
             "Filters combine, and apply to what you can see: photos outside them \
@@ -267,63 +289,59 @@ impl PhotoOrganizerApp {
         );
     }
 
-    /// One end of the date range: a year, and once there is one, a month.
+    /// The date control: the range as it stands, and a button that opens the
+    /// calendar to change it.
     ///
-    /// Two pickers rather than one free-text date because the app has no day to
-    /// offer — `extract_date` reduces every timestamp to a year and a month — so
-    /// a date field asking for more precision than it can store would be a lie.
-    fn render_date_bound(
+    /// The range is spelled out even when it is open-ended — "… → 2021-08-31" —
+    /// because a half-set filter reads as no filter at all right up until it
+    /// quietly hides half the folder.
+    fn render_date_filter_row(
         ui: &mut egui::Ui,
-        label: &str,
-        years: &[u32],
-        bound: &mut Option<(u32, u32)>,
-        id: &str,
+        filters: &mut Filters,
+        calendar: &mut CalendarControl,
+        newest: (u32, u32),
     ) {
-        // Year 0 stands in for "no bound": no photo is dated year 0, so it cannot
-        // collide with a real one, and it keeps the pickers free of `Option`
-        // handling in the click paths below.
-        let (year, month) = bound.unwrap_or((0, 0));
+        ui.label("Dates");
+        ui.label(match (filters.date_from, filters.date_to) {
+            (None, None) => "Any".to_string(),
+            (from, to) => format!(
+                "{} → {}",
+                from.map_or_else(|| OPEN_END.to_string(), |d| format_date(&d)),
+                to.map_or_else(|| OPEN_END.to_string(), |d| format_date(&d)),
+            ),
+        });
 
-        ui.label(label);
-        egui::ComboBox::from_id_salt((id, "year"))
-            .width(DATE_PICKER_WIDTH)
-            .selected_text(match year {
-                0 => ANY.to_string(),
-                year => year.to_string(),
-            })
-            .show_ui(ui, |ui| {
-                if ui.selectable_label(year == 0, ANY).clicked() {
-                    *bound = None;
-                }
-                for &candidate in years {
-                    if ui
-                        .selectable_label(year == candidate, candidate.to_string())
-                        .clicked()
-                    {
-                        // Keeps whichever month was already chosen: only the
-                        // year is being changed. The placeholder month resolves
-                        // to January, since any month in any year beats none.
-                        *bound = Some((candidate, if month == 0 { 1 } else { month }));
-                    }
-                }
-            });
-
-        if year == 0 {
-            return;
+        let arrow = if calendar.open { "▲" } else { "▼" };
+        if ui
+            .button(format!("📅 {arrow}"))
+            .on_hover_text("Choose a date range")
+            .clicked()
+        {
+            calendar.open = !calendar.open;
+            if calendar.open {
+                // Reopening lands on the bound being edited rather than on
+                // wherever the user last paged to.
+                calendar.month = Some(calendar::opening_month(
+                    filters.date_from,
+                    filters.date_to,
+                    newest,
+                ));
+            }
         }
-        egui::ComboBox::from_id_salt((id, "month"))
-            .width(DATE_PICKER_WIDTH)
-            .selected_text(format!("{month:02}"))
-            .show_ui(ui, |ui| {
-                for candidate in 1..=12 {
-                    if ui
-                        .selectable_label(month == candidate, format!("{candidate:02}"))
-                        .clicked()
-                    {
-                        *bound = Some((year, candidate));
-                    }
-                }
-            });
+
+        // Offered once there is a range to undo. Clearing the two bounds
+        // separately is not offered, because a one-sided range is not a state a
+        // user means to leave the picker in — but it is one they can reach by
+        // clicking a third day, which starts a fresh range instead.
+        if (filters.date_from.is_some() || filters.date_to.is_some())
+            && ui
+                .small_button("✖")
+                .on_hover_text("Clear the date range")
+                .clicked()
+        {
+            filters.date_from = None;
+            filters.date_to = None;
+        }
     }
 
     /// The confidence floor and ceiling, kept from crossing.

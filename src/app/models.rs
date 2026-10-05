@@ -16,8 +16,13 @@ use std::path::PathBuf;
 /// One scanned photo staged for review, with its classification and thumbnail.
 pub struct StagedItem {
     pub source_path: PathBuf,
-    pub year: u32,
-    pub month: u32,
+    /// When the photo was taken, as one value.
+    ///
+    /// Grouped rather than loose year/month/day fields: the three come from one
+    /// EXIF tag or one filesystem timestamp, and nothing should be able to set one
+    /// without the others. `PhotoFacts` and `CachedPhotoData` both carry it the same
+    /// way for the same reason.
+    pub date: PhotoDate,
     pub is_exif: bool,
     /// The photo's true frame size, carried from the scan that read the file.
     ///
@@ -46,8 +51,7 @@ impl StagedItem {
     ) -> Self {
         let mut item = Self {
             source_path: facts.path,
-            year: facts.date.year,
-            month: facts.date.month,
+            date: facts.date,
             is_exif: facts.is_exif,
             frame: facts.frame,
             category: String::new(),
@@ -84,8 +88,7 @@ impl StagedItem {
         facts: &PhotoFacts,
         classification: Classification,
     ) {
-        self.year = facts.date.year;
-        self.month = facts.date.month;
+        self.date = facts.date;
         self.is_exif = facts.is_exif;
         self.frame = facts.frame;
         self.embedding = facts.embedding.clone();
@@ -154,7 +157,7 @@ impl StagedItem {
     pub(super) fn facts(&self) -> PhotoFacts {
         PhotoFacts {
             path: self.source_path.clone(),
-            date: PhotoDate::new(self.year, self.month),
+            date: self.date,
             frame: self.frame,
             is_exif: self.is_exif,
             embedding: self.embedding.clone(),
@@ -206,6 +209,20 @@ pub enum SortDirection {
     Descending,
 }
 
+/// A date as the grid and the modal show it: `2021-03-14`, or `2021-03` when no
+/// day was recorded.
+///
+/// Zero-padded and ISO-ordered on purpose. The grid is sortable by date, and a
+/// user comparing two cells is reading them as dates, so the one ordering people
+/// already parse is the one to print. Trailing `-14` is dropped rather than shown
+/// as `-00`, which would read as a day that never happened.
+pub(crate) fn format_date(date: &PhotoDate) -> String {
+    match date.day {
+        Some(day) => format!("{:04}-{:02}-{:02}", date.year, date.month, day),
+        None => format!("{:04}-{:02}", date.year, date.month),
+    }
+}
+
 /// The filters narrowing the grid.
 ///
 /// The three axes are independent and combine with AND — see
@@ -217,15 +234,16 @@ pub enum SortDirection {
 /// is the floor that admits everything, and a control whose resting position
 /// already says what it does needs no second switch saying it again.
 ///
-/// A date bound is a whole `(year, month)` rather than a loose year on its own:
-/// a month with no year to put it in has no meaning, and a half-set bound is the
-/// kind of state that quietly filters everything out.
+/// A date bound is a whole [`PhotoDate`] rather than loose fields: a month with
+/// no year to put it in has no meaning, and a half-set bound is the kind of state
+/// that quietly filters everything out. `PhotoDate::day` is optional, so a bound
+/// can be a single day or a whole month.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Filters {
     /// Inclusive lower bound on the photo's date.
-    pub date_from: Option<(u32, u32)>,
+    pub date_from: Option<PhotoDate>,
     /// Inclusive upper bound on the photo's date.
-    pub date_to: Option<(u32, u32)>,
+    pub date_to: Option<PhotoDate>,
     /// Inclusive lower bound on confidence, in `0.0..=1.0`. Zero admits all.
     ///
     /// Read against [`crate::app::view::rank_confidence`], not against the number
@@ -279,7 +297,7 @@ mod tests {
     fn facts() -> PhotoFacts {
         PhotoFacts {
             path: PathBuf::from("/photos/img.png"),
-            date: PhotoDate::new(2026, 9),
+            date: PhotoDate::new(2026, 9, Some(14)),
             frame: Some(FrameSize::new(1920, 1080)),
             is_exif: false,
             embedding: vec![0.1, 0.2, 0.3],
@@ -571,7 +589,7 @@ mod tests {
         // A cache row written before the frame columns existed.
         let unknown = PhotoFacts {
             path: PathBuf::from("/photos/legacy.png"),
-            date: PhotoDate::new(2020, 1),
+            date: PhotoDate::new(2020, 1, Some(14)),
             frame: None,
             is_exif: false,
             embedding: vec![0.5],

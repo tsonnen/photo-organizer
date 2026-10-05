@@ -2,7 +2,7 @@
 
 use super::PhotoOrganizerApp;
 use crate::app::layout;
-use crate::app::models::StagedItem;
+use crate::app::models::{format_date, StagedItem};
 use crate::classification::ClassificationSource;
 use eframe::egui;
 
@@ -204,7 +204,7 @@ fn render_photo_cell(ui: &mut egui::Ui, item: &mut StagedItem, item_width: f32) 
     ui.checkbox(&mut item.selected, &filename);
 
     ui.horizontal(|ui| {
-        ui.label(format!("{}/{:02}", item.year, item.month));
+        ui.label(format_date(&item.date));
         ui.colored_label(
             source_badge_color(item.source),
             format!("{:.0}% [{}]", item.confidence * 100.0, item.source),

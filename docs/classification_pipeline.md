@@ -172,6 +172,72 @@ sorts *before* every one of them, since `Z` is `0x5A` and `a` is `0x61`.
 The unsorted name itself is read from `CategoryName::unsorted()` rather than
 copied, so the key cannot drift from the name a `Decision` actually carries.
 
+### A photo's date is a day, and sometimes not
+
+`PhotoDate` carries `day: Option<u32>`. `media::extract_date` parses EXIF
+`DateTimeOriginal` as `%Y:%m:%d %H:%M:%S` and **used to drop `dt.day()`**,
+returning `(year, month)` — so "taken" meant "taken in the same month as", and
+sorting a folder of photos from one trip by date sorted nothing at all: every
+photo tied, and a stable sort left them in folder-walk order.
+
+Both sources carry a day, so both are read from both. `photo_cache` gains a
+nullable `day` column, because a row written before it has none; the scan
+backfills one on the next rescan, and `Option` is what says "unknown" without
+inventing a day nobody recorded. Zero is filtered out on read for the same
+reason — day zero is a date that never happened.
+
+`StagedItem` holds a `PhotoDate` rather than loose `year`/`month`/`day` fields:
+the three come from one EXIF tag or one filesystem timestamp, and nothing should
+be able to set one without the others.
+
+A missing day sorts as 0, before every real day of the month. Arbitrary, but
+*stable* — two undated photos keep the order they arrived in rather than trading
+places each frame.
+
+### A date bound is a span, not a point
+
+`PhotoDate::span()` returns `(first, last)`: the day itself when one is
+recorded, the whole month when not. Range filtering is then interval overlap,
+which reads correctly at every precision —
+
+- "March 2021" keeps a photo taken on the 14th, because the bound is as coarse
+  as it was written rather than as coarse as it can be;
+- a month-wide range keeps a photo whose day was never recorded, which dropping
+  it would not. That photo is exactly the one a user filtering a folder scanned
+  by an older build might be looking for.
+
+### The calendar
+
+`src/app/calendar.rs`. egui 0.30 ships no date picker and the obvious crate
+alternative is either unmaintained or absent from this project's registry, so it
+is a month grid: weekday header, the days of one month, `◀`/`▶` for months and
+`«`/`»` for years.
+
+The month/year navigation is deliberately *not* wired to the month label. It was,
+first: a label that silently jumps a year when clicked is not something anyone
+tries, and it made the control's purpose undiscoverable.
+
+Two details that are not cosmetic:
+
+- **The weekday initials and the days are rows of one `Grid`, not two.** They
+  were two to begin with, and nothing made their columns agree: the pitch turned
+  out to be `DAY_SIZE + spacing + a further 14pt` that neither grid controls and
+  that moves with the surrounding style, so every header sat to the right of the
+  day it named. One grid cannot drift. The header row is *painted* rather than
+  laid out for a second reason — it is row 0, so a real label there would size
+  the columns to two letters instead of to the day buttons.
+- **Every month is padded to whole weeks.** Otherwise a 28-day February lays out
+  as four rows and a 31-day one as five, and the picker changes height as the
+  user pages.
+- **A click that closes a range before it opens swaps the two.** Clicking the
+  dates in the order a person thinks of them — end, then start — is the natural
+  gesture, and storing that inverted produces a range that reads as empty and
+  silently filters the whole folder away.
+
+`first_weekday` goes through `chrono` rather than a hand-rolled day count: an
+off-by-one there shifts a whole month by a column, and every wrong day then reads
+as a real date the user could pick.
+
 ### The grid does not reorder under the caret
 
 Editing a category is exactly what changes the Category sort key. A grid that

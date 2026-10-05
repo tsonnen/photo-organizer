@@ -67,17 +67,83 @@ impl FrameSize {
     }
 }
 
-/// The year and month a photo is filed under: from EXIF when it carries a date,
-/// from the filesystem otherwise (`media::extract_date`).
+/// The day, month and year a photo is filed under: from EXIF when it carries a
+/// date, from the filesystem otherwise (`media::extract_date`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhotoDate {
     pub year: u32,
     pub month: u32,
+    /// The day, or `None` when nothing recorded one.
+    ///
+    /// A fresh scan always has one — EXIF `DateTimeOriginal` carries it, and the
+    /// filesystem fallback carries it too. `None` is only for a photo whose row in
+    /// `photo_cache` predates the column, in which case the next rescan backfills
+    /// it. Optional for the same reason `PhotoFacts::frame` is: a cached row can
+    /// predate the field, and inventing a day would file the photo somewhere it was
+    /// never taken.
+    pub day: Option<u32>,
+}
+
+/// How many days a month has, for a 1-based month.
+///
+/// Hand-rolled rather than reached for: chrono 0.4 has no days-in-month helper
+/// on its public API, and this is the whole of what the calendar needs.
+pub(crate) fn days_in_month(year: u32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        // Not a month any real date can name; 31 keeps `end()` ordered rather
+        // than panicking, and no photo will ever carry it.
+        _ => 31,
+    }
+}
+
+/// The Gregorian leap rule: divisible by 4, except centuries not divisible by 400.
+fn is_leap_year(year: u32) -> bool {
+    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
 }
 
 impl PhotoDate {
-    pub const fn new(year: u32, month: u32) -> Self {
-        Self { year, month }
+    pub const fn new(year: u32, month: u32, day: Option<u32>) -> Self {
+        Self { year, month, day }
+    }
+
+    /// `(year, month, day)` as one comparable key, for sorting and ordering.
+    ///
+    /// A missing day sorts as 0, before every real day of the month. That is
+    /// arbitrary but *stable*: two photos with no recorded day keep the order they
+    /// arrived in rather than trading places on each frame.
+    pub fn sort_key(&self) -> (u32, u32, u32) {
+        (self.year, self.month, self.day.unwrap_or(0))
+    }
+
+    /// The first day this date can mean: itself, or the 1st when no day was
+    /// recorded.
+    pub fn start(&self) -> (u32, u32, u32) {
+        (self.year, self.month, self.day.unwrap_or(1))
+    }
+
+    /// The last day it can mean: itself, or the last of the month when none was
+    /// recorded.
+    pub fn end(&self) -> (u32, u32, u32) {
+        (
+            self.year,
+            self.month,
+            self.day
+                .unwrap_or_else(|| days_in_month(self.year, self.month)),
+        )
+    }
+
+    /// The days this date covers, as `(first, last)` — one point when it names a
+    /// day, the whole month when it does not.
+    ///
+    /// What makes an optional day workable at all: "March 2021" and "the 14th of
+    /// March" are both expressible, and a range test is interval overlap rather
+    /// than three-way comparison.
+    pub fn span(&self) -> ((u32, u32, u32), (u32, u32, u32)) {
+        (self.start(), self.end())
     }
 }
 
@@ -173,7 +239,7 @@ mod tests {
         // than reading a size off the thumbnail.
         let facts = PhotoFacts {
             path: PathBuf::from("/photos/plain.png"),
-            date: PhotoDate::new(2026, 3),
+            date: PhotoDate::new(2026, 3, Some(3)),
             frame: None,
             is_exif: false,
             embedding: Vec::new(),

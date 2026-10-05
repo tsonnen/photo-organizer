@@ -1,4 +1,4 @@
-use crate::classification::{Classification, FrameSize, PhotoDate, PhotoFacts};
+use crate::classification::{Classification, FrameSize, PhotoFacts};
 use crate::db::{CachedPhotoData, Database};
 use crate::inference::{extract_embedding, init_clip_session};
 use crate::media::{
@@ -277,15 +277,15 @@ pub fn scan_folder_with_db(
                 let (date_info, preview, cached_thumb, image) = match load_scan_preview(path) {
                     Ok(preview) => {
                         let (thumb, egui_img) = dynamic_to_cached_thumb(&preview.image);
-                        let date_info = extract_date(path);
-                        (date_info, preview, thumb, egui_img)
+                        let (date, is_exif_date) = extract_date(path);
+                        ((date, is_exif_date), preview, thumb, egui_img)
                     }
                     Err(_) => return,
                 };
 
                 let mut facts = PhotoFacts {
                     path: path.clone(),
-                    date: PhotoDate::new(date_info.0, date_info.1),
+                    date: date_info.0,
                     // The heuristics read real resolution (a 1920x1080 PNG is a
                     // screenshot), so the facts carry the source dimensions
                     // rather than the preview's.
@@ -293,7 +293,7 @@ pub fn scan_folder_with_db(
                         preview.original_width,
                         preview.original_height,
                     )),
-                    is_exif: date_info.2,
+                    is_exif: date_info.1,
                     embedding: Vec::new(),
                 };
 

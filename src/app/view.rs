@@ -28,7 +28,7 @@
 use super::models::{Filters, SortBy, SortDirection, StagedItem};
 use super::PhotoOrganizerApp;
 use crate::category_name::CategoryName;
-use crate::classification::ClassificationSource;
+use crate::classification::{ClassificationSource, PhotoDate};
 
 /// Sorts after every real category name, in an ascending sort.
 ///
@@ -44,8 +44,7 @@ const UNCLASSIFIED_SORT_KEY: &str = "zzzz";
 /// several times a frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Row<'a> {
-    year: u32,
-    month: u32,
+    date: PhotoDate,
     category: &'a str,
     confidence: f32,
     source: ClassificationSource,
@@ -54,8 +53,7 @@ pub(super) struct Row<'a> {
 impl<'a> From<&'a StagedItem> for Row<'a> {
     fn from(item: &'a StagedItem) -> Self {
         Self {
-            year: item.year,
-            month: item.month,
+            date: item.date,
             category: &item.category,
             confidence: item.confidence,
             source: item.source,
@@ -140,11 +138,19 @@ pub(super) fn admits(filters: &Filters, row: &Row<'_>, threshold: f32) -> bool {
         && admits_category(filters, row)
 }
 
-/// Inclusive on both ends, so a range set to one exact month keeps that month
-/// instead of needing a second bound to agree with it.
+/// Inclusive on both ends, so a range set to one exact day keeps that day.
+///
+/// Dates carry an *optional* day, so each covers a span rather than a point: a
+/// date with a day is that day, a date without one is its whole month. A photo is
+/// admitted when its span overlaps the range. That reads naturally at every
+/// precision — "March 2021" keeps a photo taken on the 14th, and a month-wide
+/// range keeps a photo whose day was never recorded, which dropping it would not.
 fn admits_date(filters: &Filters, row: &Row<'_>) -> bool {
-    let date = (row.year, row.month);
-    filters.date_from.is_none_or(|from| date >= from) && filters.date_to.is_none_or(|to| date <= to)
+    let (photo_first, photo_last) = row.date.span();
+    filters
+        .date_from
+        .is_none_or(|from| photo_last >= from.start())
+        && filters.date_to.is_none_or(|to| photo_first <= to.end())
 }
 
 /// Compares against [`rank_confidence`] rather than the displayed number, so the
@@ -174,7 +180,7 @@ pub(super) fn sort_rows(
     threshold: f32,
 ) {
     match sort {
-        SortBy::DateTaken => sort_ordered(rows, direction, |row| (row.year, row.month)),
+        SortBy::DateTaken => sort_ordered(rows, direction, |row| row.date.sort_key()),
         SortBy::Confidence => {
             // Not `sort_ordered`: `f32` is not `Ord`, so there is no key to
             // cache — and none worth caching either, since the key is a field
@@ -281,17 +287,21 @@ pub(super) fn category_choices<'a>(rows: impl IntoIterator<Item = Row<'a>>) -> V
     names
 }
 
-/// The years the staged photos are actually from, ascending.
+/// The newest `(year, month)` among the staged photos, or today's if nothing is
+/// staged.
 ///
-/// A picker listing every year from 1970 to next year is a list nobody scrolls;
-/// the years present in the folder are the only ones a filter can usefully name.
-/// Staged rather than every year a photo *could* carry, because a bound on a
-/// year nothing was taken in cannot narrow anything.
-pub(super) fn year_choices<'a>(rows: impl IntoIterator<Item = Row<'a>>) -> Vec<u32> {
-    let mut years: Vec<u32> = rows.into_iter().map(|row| row.year).collect();
-    years.sort_unstable();
-    years.dedup();
-    years
+/// Where the date picker opens by default. A photo library is read forwards from
+/// its most recent end far more often than backwards from 1970, so that is where
+/// the calendar starts.
+pub(super) fn newest_date<'a>(rows: impl IntoIterator<Item = Row<'a>>) -> (u32, u32) {
+    rows.into_iter()
+        .map(|row| (row.date.year, row.date.month))
+        .max()
+        .unwrap_or_else(|| {
+            let today = chrono::Local::now().date_naive();
+            use chrono::Datelike;
+            (today.year() as u32, today.month())
+        })
 }
 
 /// The direction button's text: which way the *current* sort runs, named in
@@ -342,13 +352,29 @@ mod tests {
 
     const THRESHOLD: f32 = 0.65;
 
+    /// A row on a given day of a month.
+    fn row(
+        year: u32,
+        month: u32,
+        day: u32,
+        category: &'static str,
+        confidence: f32,
+    ) -> Row<'static> {
+        row_on(PhotoDate::new(year, month, Some(day)), category, confidence)
+    }
+
+    /// A date with no day, the way a photo cached before the day column existed
+    /// reports itself.
+    fn month(year: u32, month: u32) -> PhotoDate {
+        PhotoDate::new(year, month, None)
+    }
+
     /// A row reduced to the fields the view logic reads. Dates, names,
     /// confidences and sources are the whole vocabulary here, which is why these
     /// tests need neither a texture nor a live `Context`.
-    fn row(year: u32, month: u32, category: &'static str, confidence: f32) -> Row<'static> {
+    fn row_on(date: PhotoDate, category: &'static str, confidence: f32) -> Row<'static> {
         Row {
-            year,
-            month,
+            date,
             category,
             confidence,
             source: ClassificationSource::VisualModel,
@@ -381,43 +407,43 @@ mod tests {
         let filters = Filters::default();
         assert!(admits(
             &filters,
-            &row(2019, 3, "Beach Trip", 0.5),
+            &row(2019, 3, 1, "Beach Trip", 0.5),
             THRESHOLD
         ));
-        assert!(admits(&filters, &row(2019, 3, UNSORTED, 0.0), THRESHOLD));
-        assert!(admits(&filters, &row(2019, 3, "", 0.0), THRESHOLD));
+        assert!(admits(&filters, &row(2019, 3, 1, UNSORTED, 0.0), THRESHOLD));
+        assert!(admits(&filters, &row(2019, 3, 1, "", 0.0), THRESHOLD));
     }
 
     #[test]
     fn a_date_range_keeps_only_what_is_inside_it() {
         let filters = Filters {
-            date_from: Some((2020, 6)),
-            date_to: Some((2021, 3)),
+            date_from: Some(month(2020, 6)),
+            date_to: Some(month(2021, 3)),
             ..Filters::default()
         };
 
         // Both ends inclusive, so the boundary months themselves survive.
-        assert!(admits(&filters, &row(2020, 6, "a", 0.5), THRESHOLD));
-        assert!(admits(&filters, &row(2021, 3, "a", 0.5), THRESHOLD));
-        assert!(!admits(&filters, &row(2020, 5, "a", 0.5), THRESHOLD));
-        assert!(!admits(&filters, &row(2021, 4, "a", 0.5), THRESHOLD));
+        assert!(admits(&filters, &row(2020, 6, 1, "a", 0.5), THRESHOLD));
+        assert!(admits(&filters, &row(2021, 3, 1, "a", 0.5), THRESHOLD));
+        assert!(!admits(&filters, &row(2020, 5, 1, "a", 0.5), THRESHOLD));
+        assert!(!admits(&filters, &row(2021, 4, 1, "a", 0.5), THRESHOLD));
     }
 
     #[test]
     fn an_open_ended_date_range_bounds_only_one_side() {
         let from = Filters {
-            date_from: Some((2020, 1)),
+            date_from: Some(month(2020, 1)),
             ..Filters::default()
         };
-        assert!(admits(&from, &row(2030, 12, "a", 0.5), THRESHOLD));
-        assert!(!admits(&from, &row(2019, 12, "a", 0.5), THRESHOLD));
+        assert!(admits(&from, &row(2030, 12, 1, "a", 0.5), THRESHOLD));
+        assert!(!admits(&from, &row(2019, 12, 1, "a", 0.5), THRESHOLD));
 
         let to = Filters {
-            date_to: Some((2020, 1)),
+            date_to: Some(month(2020, 1)),
             ..Filters::default()
         };
-        assert!(admits(&to, &row(1999, 1, "a", 0.5), THRESHOLD));
-        assert!(!admits(&to, &row(2020, 2, "a", 0.5), THRESHOLD));
+        assert!(admits(&to, &row(1999, 1, 1, "a", 0.5), THRESHOLD));
+        assert!(!admits(&to, &row(2020, 2, 1, "a", 0.5), THRESHOLD));
     }
 
     #[test]
@@ -428,10 +454,10 @@ mod tests {
             ..Filters::default()
         };
 
-        assert!(admits(&filters, &row(2024, 1, "a", 0.7), THRESHOLD));
-        assert!(admits(&filters, &row(2024, 1, "a", 0.9), THRESHOLD));
-        assert!(!admits(&filters, &row(2024, 1, "a", 0.69), THRESHOLD));
-        assert!(!admits(&filters, &row(2024, 1, "a", 0.91), THRESHOLD));
+        assert!(admits(&filters, &row(2024, 1, 1, "a", 0.7), THRESHOLD));
+        assert!(admits(&filters, &row(2024, 1, 1, "a", 0.9), THRESHOLD));
+        assert!(!admits(&filters, &row(2024, 1, 1, "a", 0.69), THRESHOLD));
+        assert!(!admits(&filters, &row(2024, 1, 1, "a", 0.91), THRESHOLD));
     }
 
     #[test]
@@ -446,12 +472,12 @@ mod tests {
 
         assert!(admits(
             &filters,
-            &row(2024, 1, "Beach Trip", 0.70),
+            &row(2024, 1, 1, "Beach Trip", 0.70),
             THRESHOLD
         ));
         assert!(!admits(
             &filters,
-            &by_rules(row(2024, 1, "Screenshots", 0.92)),
+            &by_rules(row(2024, 1, 1, "Screenshots", 0.92)),
             THRESHOLD
         ));
     }
@@ -466,13 +492,13 @@ mod tests {
 
         assert!(admits(
             &filters,
-            &by_rules(row(2024, 1, "Screenshots", 0.92)),
+            &by_rules(row(2024, 1, 1, "Screenshots", 0.92)),
             THRESHOLD
         ));
         // Including at a threshold of zero, where `next_down` goes negative.
         assert!(admits(
             &filters,
-            &by_rules(row(2024, 1, "Screenshots", 0.92)),
+            &by_rules(row(2024, 1, 1, "Screenshots", 0.92)),
             0.0
         ));
     }
@@ -493,7 +519,7 @@ mod tests {
         }
         .is_open());
         assert!(!Filters {
-            date_to: Some((2020, 1)),
+            date_to: Some(month(2020, 1)),
             ..Filters::default()
         }
         .is_open());
@@ -508,17 +534,17 @@ mod tests {
 
         assert!(admits(
             &filters,
-            &row(2024, 1, "Beach Trip", 0.5),
+            &row(2024, 1, 1, "Beach Trip", 0.5),
             THRESHOLD
         ));
         assert!(admits(
             &filters,
-            &row(2024, 1, "  beach trip  ", 0.5),
+            &row(2024, 1, 1, "  beach trip  ", 0.5),
             THRESHOLD
         ));
         assert!(!admits(
             &filters,
-            &row(2024, 1, "Documents", 0.5),
+            &row(2024, 1, 1, "Documents", 0.5),
             THRESHOLD
         ));
     }
@@ -529,8 +555,8 @@ mod tests {
         // one short-circuited to true, the filter panel would be three controls
         // all setting the same single filter.
         let filters = Filters {
-            date_from: Some((2020, 1)),
-            date_to: Some((2020, 12)),
+            date_from: Some(month(2020, 1)),
+            date_to: Some(month(2020, 12)),
             confidence_from: 0.8,
             confidence_to: 0.95,
             category: Some("Beach Trip".to_string()),
@@ -539,25 +565,25 @@ mod tests {
         // Right date, right category, but not confident enough.
         assert!(!admits(
             &filters,
-            &row(2020, 6, "Beach Trip", 0.5),
+            &row(2020, 6, 1, "Beach Trip", 0.5),
             THRESHOLD
         ));
         // Confident enough and right category, but the wrong year.
         assert!(!admits(
             &filters,
-            &row(2019, 6, "Beach Trip", 0.9),
+            &row(2019, 6, 1, "Beach Trip", 0.9),
             THRESHOLD
         ));
         // In range and confident, but a different category.
         assert!(!admits(
             &filters,
-            &row(2020, 6, "Documents", 0.9),
+            &row(2020, 6, 1, "Documents", 0.9),
             THRESHOLD
         ));
         // All three at once.
         assert!(admits(
             &filters,
-            &row(2020, 6, "Beach Trip", 0.9),
+            &row(2020, 6, 1, "Beach Trip", 0.9),
             THRESHOLD
         ));
     }
@@ -567,8 +593,8 @@ mod tests {
         // The rules only ran because the best centroid fell short of the
         // threshold, so a rule's 90% is certainty about the *rule*. Ranking it
         // against a real 70% CLIP match would put the screenshot on top.
-        let rules = by_rules(row(2024, 1, "Screenshots", 0.90));
-        let model = row(2024, 1, "Beach Trip", 0.70);
+        let rules = by_rules(row(2024, 1, 1, "Screenshots", 0.90));
+        let model = row(2024, 1, 1, "Beach Trip", 0.70);
 
         assert!(rank_confidence(&rules, THRESHOLD) < THRESHOLD);
         assert!(rank_confidence(&model, THRESHOLD) > THRESHOLD);
@@ -583,8 +609,8 @@ mod tests {
         // Pinning every rule-assigned row to the same value would leave them in
         // whatever order the folder was walked, discarding the only signal the
         // rules actually produce.
-        let sure = by_rules(row(2024, 1, "Documents", 0.95));
-        let unsure = by_rules(row(2024, 1, "Screenshots", 0.70));
+        let sure = by_rules(row(2024, 1, 1, "Documents", 0.95));
+        let unsure = by_rules(row(2024, 1, 1, "Screenshots", 0.70));
 
         assert!(rank_confidence(&sure, THRESHOLD) > rank_confidence(&unsure, THRESHOLD));
     }
@@ -593,7 +619,7 @@ mod tests {
     fn the_rank_follows_the_threshold_the_user_set() {
         // The bar is a setting, so a rules-assigned photo tracks wherever the
         // slider is rather than sitting at a hardcoded number.
-        let rules = by_rules(row(2024, 1, "Screenshots", 0.90));
+        let rules = by_rules(row(2024, 1, 1, "Screenshots", 0.90));
 
         assert!(rank_confidence(&rules, 0.30) < 0.30);
         assert!(rank_confidence(&rules, 0.95) < 0.95);
@@ -604,7 +630,7 @@ mod tests {
         // Its number is a real centroid similarity, just a low one, and a low one
         // is what should sink it. Pinning it to the threshold too would float it
         // above the rule-assigned rows that beat it.
-        let row = unsorted(row(2024, 1, UNSORTED, 0.42));
+        let row = unsorted(row(2024, 1, 1, UNSORTED, 0.42));
 
         assert_eq!(rank_confidence(&row, THRESHOLD), 0.42);
     }
@@ -613,7 +639,7 @@ mod tests {
     fn a_manual_pick_keeps_its_own_number() {
         // The user chose this one; its confidence is whatever centroid it was
         // picked from, and nothing about it should be second-guessed here.
-        let row = manual(row(2024, 1, "Beach Trip", 0.88));
+        let row = manual(row(2024, 1, 1, "Beach Trip", 0.88));
 
         assert_eq!(rank_confidence(&row, THRESHOLD), 0.88);
     }
@@ -663,9 +689,9 @@ mod tests {
     #[test]
     fn dates_sort_oldest_first_and_newest_first() {
         let rows = vec![
-            row(2021, 5, "c", 0.5),
-            row(2019, 12, "a", 0.5),
-            row(2020, 1, "b", 0.5),
+            row(2021, 5, 1, "c", 0.5),
+            row(2019, 12, 1, "a", 0.5),
+            row(2020, 1, 1, "b", 0.5),
         ];
 
         assert_eq!(
@@ -682,7 +708,7 @@ mod tests {
     fn a_month_sorts_inside_its_year() {
         // Year-then-month as one comparison rather than the two fields compared
         // independently, which is what the tuple key buys.
-        let rows = vec![row(2020, 11, "late", 0.5), row(2020, 2, "early", 0.5)];
+        let rows = vec![row(2020, 11, 1, "late", 0.5), row(2020, 2, 1, "early", 0.5)];
 
         assert_eq!(
             sorted_names(rows, SortBy::DateTaken, SortDirection::Ascending),
@@ -696,9 +722,9 @@ mod tests {
         // the direction must not reshuffle them, or the grid jumps about every
         // time the user checks the other end.
         let rows = vec![
-            row(2020, 6, "first", 0.5),
-            row(2020, 6, "second", 0.5),
-            row(2020, 6, "third", 0.5),
+            row(2020, 6, 1, "first", 0.5),
+            row(2020, 6, 1, "second", 0.5),
+            row(2020, 6, 1, "third", 0.5),
         ];
 
         assert_eq!(
@@ -718,9 +744,9 @@ mod tests {
     #[test]
     fn confidence_sorts_model_matches_above_rule_assigned_photos() {
         let rows = vec![
-            by_rules(row(2024, 1, "rule", 0.92)),
-            row(2024, 1, "weak match", 0.70),
-            row(2024, 1, "strong match", 0.88),
+            by_rules(row(2024, 1, 1, "rule", 0.92)),
+            row(2024, 1, 1, "weak match", 0.70),
+            row(2024, 1, 1, "strong match", 0.88),
         ];
 
         assert_eq!(
@@ -732,8 +758,8 @@ mod tests {
     #[test]
     fn confidence_sorts_the_weakest_way_round_too() {
         let rows = vec![
-            by_rules(row(2024, 1, "rule", 0.92)),
-            row(2024, 1, "strong match", 0.88),
+            by_rules(row(2024, 1, 1, "rule", 0.92)),
+            row(2024, 1, 1, "strong match", 0.88),
         ];
 
         assert_eq!(
@@ -745,11 +771,11 @@ mod tests {
     #[test]
     fn categories_sort_alphabetically_with_the_unclassified_last() {
         let rows = vec![
-            row(2024, 1, "Travel", 0.5),
-            row(2024, 1, UNSORTED, 0.5),
-            row(2024, 1, "apples", 0.5),
-            row(2024, 1, "Beaches", 0.5),
-            row(2024, 1, "", 0.5),
+            row(2024, 1, 1, "Travel", 0.5),
+            row(2024, 1, 1, UNSORTED, 0.5),
+            row(2024, 1, 1, "apples", 0.5),
+            row(2024, 1, 1, "Beaches", 0.5),
+            row(2024, 1, 1, "", 0.5),
         ];
 
         // Case-blind, so "apples" and "Beaches" interleave instead of filing all
@@ -768,10 +794,116 @@ mod tests {
     }
 
     #[test]
+    fn dates_sort_by_day_not_just_by_month() {
+        // The reason this exists at all: three photos from one month used to be
+        // indistinguishable, so a "Date Taken" sort silently fell back to whatever
+        // order the folder was walked in.
+        let rows = vec![
+            row(2021, 3, 20, "late", 0.5),
+            row(2021, 3, 4, "early", 0.5),
+            row(2021, 3, 11, "middle", 0.5),
+        ];
+
+        assert_eq!(
+            sorted_names(rows.clone(), SortBy::DateTaken, SortDirection::Ascending),
+            vec!["early", "middle", "late"]
+        );
+        assert_eq!(
+            sorted_names(rows, SortBy::DateTaken, SortDirection::Descending),
+            vec!["late", "middle", "early"]
+        );
+    }
+
+    #[test]
+    fn a_day_orders_against_its_neighbouring_months() {
+        // The day has to take part in the comparison, not merely break ties
+        // within a month: 1 March is after any February and before any April.
+        let rows = vec![
+            row(2021, 4, 1, "april", 0.5),
+            row(2021, 2, 28, "february", 0.5),
+            row(2021, 3, 31, "march", 0.5),
+        ];
+
+        assert_eq!(
+            sorted_names(rows, SortBy::DateTaken, SortDirection::Ascending),
+            vec!["february", "march", "april"]
+        );
+    }
+
+    #[test]
+    fn photos_with_no_recorded_day_sort_before_the_rest_of_their_month() {
+        // A row cached before the day column existed has none. It sorts first in
+        // its month — arbitrary, but stable, so two undated photos do not trade
+        // places on every frame.
+        let rows = vec![
+            row(2021, 3, 4, "known", 0.5),
+            row_on(month(2021, 3), "undated", 0.5),
+        ];
+
+        assert_eq!(
+            sorted_names(rows, SortBy::DateTaken, SortDirection::Ascending),
+            vec!["undated", "known"]
+        );
+    }
+
+    #[test]
+    fn a_date_range_can_be_narrowed_to_a_single_day() {
+        let filters = Filters {
+            date_from: Some(PhotoDate::new(2021, 3, Some(4))),
+            date_to: Some(PhotoDate::new(2021, 3, Some(6))),
+            ..Filters::default()
+        };
+
+        assert!(admits(&filters, &row(2021, 3, 4, "a", 0.5), THRESHOLD));
+        assert!(admits(&filters, &row(2021, 3, 6, "a", 0.5), THRESHOLD));
+        assert!(!admits(&filters, &row(2021, 3, 3, "a", 0.5), THRESHOLD));
+        assert!(!admits(&filters, &row(2021, 3, 7, "a", 0.5), THRESHOLD));
+    }
+
+    #[test]
+    fn a_month_wide_bound_covers_a_photo_dated_to_the_day() {
+        // "March 2021" must keep a photo taken on the 14th — the bound is as coarse
+        // as it was written, not as coarse as it can be.
+        let filters = Filters {
+            date_from: Some(month(2021, 3)),
+            date_to: Some(month(2021, 3)),
+            ..Filters::default()
+        };
+
+        assert!(admits(&filters, &row(2021, 3, 1, "a", 0.5), THRESHOLD));
+        assert!(admits(&filters, &row(2021, 3, 31, "a", 0.5), THRESHOLD));
+        assert!(!admits(&filters, &row(2021, 2, 28, "a", 0.5), THRESHOLD));
+        assert!(!admits(&filters, &row(2021, 4, 1, "a", 0.5), THRESHOLD));
+    }
+
+    #[test]
+    fn a_photo_with_no_recorded_day_survives_a_month_wide_range() {
+        // Dropping undated photos from any date-filtered view would hide them
+        // silently, and a photo from a folder scanned before the day column existed
+        // is exactly the one a user might be looking for.
+        let filters = Filters {
+            date_from: Some(month(2021, 3)),
+            date_to: Some(month(2021, 3)),
+            ..Filters::default()
+        };
+
+        assert!(admits(
+            &filters,
+            &row_on(month(2021, 3), "undated", 0.5),
+            THRESHOLD
+        ));
+        assert!(!admits(
+            &filters,
+            &row_on(month(2021, 4), "elsewhere", 0.5),
+            THRESHOLD
+        ));
+    }
+
+    #[test]
     fn every_sort_survives_an_empty_and_a_single_photo_grid() {
         assert!(sorted_names(Vec::new(), SortBy::Category, SortDirection::Descending).is_empty());
 
-        let one = vec![row(2020, 1, "only", 0.5)];
+        let one = vec![row(2020, 1, 1, "only", 0.5)];
         for sort in [SortBy::DateTaken, SortBy::Confidence, SortBy::Category] {
             for direction in [SortDirection::Ascending, SortDirection::Descending] {
                 assert_eq!(sorted_names(one.clone(), sort, direction), vec!["only"]);
@@ -785,7 +917,7 @@ mod tests {
         // two spellings of one category must not offer them as two choices.
         let rows: Vec<Row<'_>> = ["Beach Trip", "beach trip", "Documents", "  ", ""]
             .into_iter()
-            .map(|category| row(2024, 1, category, 0.5))
+            .map(|category| row(2024, 1, 1, category, 0.5))
             .collect();
 
         assert_eq!(category_choices(rows), vec!["beach trip", "documents"]);

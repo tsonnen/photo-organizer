@@ -77,11 +77,12 @@ CI (`.github/workflows/build-and-test.yaml`) runs these in order, so match it lo
 cargo fmt --check
 cargo clippy -- -D warnings     # warnings are errors; the tree is currently clean
 cargo build
-cargo test                      # 174 tests, ~5s once built
+cargo test                      # 229 tests, ~5s once built
 ```
 
 - One test / one area: `cargo test media::tests::test_scan_preview_jpeg_scales_down_and_keeps_original_size`,
-  `cargo test app::layout_tests`, `cargo test scanner`, `cargo test transfer`, `cargo test app::models::tests`.
+  `cargo test app::layout_tests`, `cargo test scanner`, `cargo test transfer`, `cargo test app::models::tests`,
+  `cargo test app::calendar`, `cargo test app::view`.
 - `cargo test -- --nocapture inference::tests::test_init_clip_session_real_file` to watch the real
   CLIP load + forward pass. It **silently returns** if the model file is under 1024 bytes (an LFS pointer).
 - Linux build deps: `libgtk-3-dev libxkbcommon-dev` (the release workflow installs these).
@@ -266,6 +267,25 @@ re-exported from `profile_store` so existing `use` paths and the grid's badge ke
   failed, and `category_sort_key` files the unsorted bucket last. Descending inverts the key, never the run,
   so ties keep their order. Adding a second copy of the "is it in view" predicate anywhere else is the bug
   this module exists to prevent.
+- `src/app/calendar.rs` is the month-grid date picker the date filter is set from — egui 0.30 has no date
+  picker and the crate alternatives are unusable here, so it is hand-rolled. Two invariants: every month is
+  padded to **whole weeks** (`month_grid`), or the picker changes height as the user pages between a 28-day
+  February and a 31-day May; and a click that closes a range *before* it opens **swaps** the two bounds
+  (`range_after_click`), because clicking end-then-start is the natural gesture and an inverted range reads
+  as empty. `first_weekday` goes through `chrono` — a hand-rolled day count that is off by one shifts a whole
+  month by a column, and every wrong day then reads as a real date the user could pick. The weekday
+  initials and the days are rows of **one** grid, not two: two grids means two independent column sets, and
+  the real pitch is `DAY_SIZE + spacing + a further 14pt` that neither grid controls — which left every header
+  sitting to the right of the day it named. Month and year navigation is `◀`/`▶`/`«`/`»`, deliberately *not*
+  wired to the month label.
+- `PhotoDate.day` is `Option<u32>` and `photo_cache.day` is nullable. A row written before the column has
+  none, and `Option` says "unknown" without inventing a day nobody recorded; `StagedItem` carries a whole
+  `PhotoDate` rather than loose year/month/day so the three cannot drift. Range filtering is interval
+  overlap over `PhotoDate::span()`, not tuple comparison — that is what lets "March 2021" keep a photo taken
+  on the 14th, and a month-wide range keep a photo with no recorded day. Don't "simplify" it to `Ord`.
+- A photo's day used to be parsed and then dropped by `extract_date`, which made every photo in a month tie
+  under a date sort. If a day is ever added to `RawPhotoInput`, note that the output layout
+  `<Category>/<YYYY>/<MM>/` is month-granular **by contract** and does not take one.
 - **The grid must not reorder while a cell's category editor holds focus** — `PhotoOrganizerApp::holding_order`.
   Editing a category is what changes the Category sort key, and egui identifies a cell's widgets by the
   position they occupy, so a reordering frame makes the focused field the *next* photo's: the characters land

@@ -11,12 +11,14 @@
 //! - [`chrome`] the backdrop and card every modal shares
 //! - [`categories`] classification, training and the category widgets
 //! - [`view`] which staged photos are in view: the filters, and their order
+//! - [`calendar`] the month-grid date picker the date filter is set from
 //! - [`toolbar`] the top panel and its menu bar
 //! - [`footer`] the bottom panel: selection count and transfer destination
 //! - [`transfer`] move/copy and undo
 //! - [`layout`] grid, control and modal sizing arithmetic
 //! - [`models`] the staged-item record and the single write path onto it
 
+mod calendar;
 mod categories;
 mod chrome;
 mod footer;
@@ -88,6 +90,10 @@ pub struct PhotoOrganizerApp {
     /// the footer counts photos the user cannot see and Move files photos they
     /// never looked at.
     filters: Filters,
+    /// Whether the date picker in the filter panel is open, and which month it is
+    /// showing. Kept here rather than in the renderer so closing and reopening the
+    /// panel does not lose the month the user paged to.
+    calendar: toolbar::CalendarControl,
     show_filter_panel: bool,
     /// Whether a grid cell's category editor held focus when the grid was last
     /// drawn.
@@ -155,6 +161,7 @@ impl PhotoOrganizerApp {
             sort_by: SortBy::default(),
             sort_direction: SortDirection::default(),
             filters: Filters::default(),
+            calendar: Default::default(),
             show_filter_panel: false,
             editing_cell: false,
             order_sort: (SortBy::default(), SortDirection::default()),

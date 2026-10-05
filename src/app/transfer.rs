@@ -63,8 +63,10 @@ impl PhotoOrganizerApp {
                 // retype per photo, so it is sanitised here rather than trusted:
                 // this is the last point before it becomes a directory name.
                 subject: CategoryName::from_user_input(&self.items[i].category),
-                year: self.items[i].year,
-                month: self.items[i].month,
+                // The output layout is month-granular by contract, so the day is
+                // not part of where a photo lands.
+                year: self.items[i].date.year,
+                month: self.items[i].date.month,
             })
             .collect();
 
