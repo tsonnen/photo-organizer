@@ -66,10 +66,13 @@ train a whole batch at once from the selected photos.
 **🏷 Bulk Move** files a whole selection under one name you type, without training
 anything. Select the photos, type a name, and either **Assign Only** — which labels them
 and leaves them staged — or **Move**/**Copy** them into `<Category>/<YYYY>/<MM>/` under
-your output folder. It previews the exact folders before anything is filed, and says
-"N folders" when the selection spans more than one month. **Choose Folder…** points one
-batch somewhere else without changing where your other transfers go, which is what you
-want for an event that straddles a year boundary.
+your output folder and drop them from the grid. It previews the exact folders before
+anything is filed, and says "N folders" when the selection spans more than one month.
+**Choose Folder…** files one batch under a different base without changing where your
+other transfers go, which is what you want for an event collected somewhere else; the
+`<Category>/<YYYY>/<MM>/` layout under it is the same either way. If a batch files
+nothing, the card stays open with what you typed and where you pointed it, so the retry
+is the same press.
 
 Names you've used are offered again next time, so a second batch is a click rather than
 a retype. They are just names: no profile is trained and no centroid is built, so this

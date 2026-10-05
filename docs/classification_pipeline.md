@@ -242,11 +242,10 @@ profile name — all either learn something or edit one photo at a time. Neither
 training a category for a single event leaves a profile in `profiles.json` that
 describes nothing reusable.
 
-So the bulk move's name is *only* a name. It is written to the staged items through the
-same single write path as any other decision, as `source: Manual`, which is precisely
-what makes it stick: `apply_classification` will not overwrite a manual pick, so a batch
-labelled this way survives **Re-classify All**, a threshold move, and a scan still
-running.
+So the bulk move's name is *only* a name. It reaches the staged items as
+`source: Manual`, which is precisely what makes it stick:
+`apply_classification` will not overwrite a manual pick, so a batch labelled this way
+survives **Re-classify All**, a threshold move, and a scan still running.
 
 A scan still running includes photos it has not reached yet, and those need a second
 write. `mark_manual` deliberately refuses to claim a `pending` photo, because at that
@@ -264,6 +263,14 @@ before it decides anything, so a photo claimed mid-scan picks up its embedding a
 not train the next profile on the empty one it was staged with. Only the decision is
 skipped.
 
+Two fields are written directly rather than through `apply_classification`, which is
+reserved for decisions the pipeline makes: the name itself, and `confidence`. The
+confidence is zeroed because a manual pick has no decision behind it — left alone, the
+grid's badge would print the confidence of the answer this name replaced, next to a
+source saying the user chose it. `is_custom` is still asked of the live profile store
+on every write, exactly as `apply_decision` does, so a profile deleted while a name
+stands still moves that photo onto the editable path.
+
 **Names are remembered, not learned.** `Settings::custom_categories` holds the newest
 `MAX_REMEMBERED_CATEGORIES` names the user has used, and nothing else: no centroid, no
 embedding, nothing ever matched against. This is why they live in `settings.json` and
@@ -271,20 +278,38 @@ not `profiles.json` — the split between learned data and knobs is what stops a
 name from becoming a profile, which is the whole distinction the feature rests on. The
 list is trimmed, de-duplicated case-insensitively and capped on load as well as on
 write, for the same reason the threshold is clamped on load: the file is editable by
-hand.
+hand. One name is refused outright: `Unsorted` is the fallback `from_user_input` returns
+for anything that cannot be a directory, so it is a bucket every unmatched photo already
+lands in rather than a name anyone chose. Offering it back would put a row in the recall
+list that files photos where they were headed anyway, while looking like a remembered
+choice. The guard is in `remember_custom_category` rather than at the bulk modal's call
+site, because the invariant is about what the dropdown may offer — and the dropdown offers
+that list to the per-photo input too, which reaches the same bucket.
 
 **The path is previewed before it is taken.** The card shows the exact
 `<base>/<Category>/<YYYY>/<MM>/` a batch will use, and "N folders" when the selection
 spans months, because a trip crossing a month boundary genuinely does file into two
 folders and saying so is what makes it a preview rather than a surprise. `base` is the
 output folder unless the card was given a folder of its own, which overrides it for
-that batch alone.
+that batch alone. The override replaces the *base* only: the three levels below it are
+the same whichever base is in play, so picking a folder somewhere else changes where a
+batch goes without changing how it is laid out.
 
 Everything then goes through the one transfer path:
 `assign_selected_to_category` labels the selection, and `execute_transfer_to` runs the
 same plan → execute → journal → report sequence the toolbar's Move and Copy use, with
 the typed name passed as an override so the batch is planned against it. Nothing about
-the bulk move re-implements a transfer.
+the bulk move re-implements a transfer. The one thing the bulk move decides for itself is
+when to close: `execute_transfer_to` returns how many photos landed, and the card closes
+only on a count above zero. A batch that filed nothing keeps the card up with the name
+typed and the folder picked, because both are part of the retry — reopening the card to
+answer two questions the user already answered is the cost of closing it.
+
+A copy empties the grid exactly as a move does, which is not a bulk-move decision at all
+but the shared seam's. Keeping a copied row would leave the photo on offer again — still
+selected, looking untouched — and `resolve_destination` suffixes a second copy `_1` rather
+than refusing it, so the repeat would file it again silently. What a copy leaves behind is
+the original, on disk.
 
 ## Transfer Journal
 

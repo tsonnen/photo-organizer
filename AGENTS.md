@@ -197,7 +197,12 @@ puts its Browse buttons on section headers for that reason.
   Copy: the card carries its own folder picker, so an unconfigured output folder must not disable it.
   The names it remembers live in `Settings::custom_categories`, deliberately *not* in `profiles.json` —
   a name with no centroid is a label the user chose not to retype, and folding it in as learned data
-  would put a profile in the file for an event that has none.
+  would put a profile in the file for an event that has none. `remember_custom_category` is the only
+  writer and it keeps `Unsorted` out: the fallback bucket is a directory every unmatched photo already
+  lands in, so offering it back would file photos where they were headed anyway while looking like a
+  choice. The card closes only on a batch that *landed* something, since `execute_transfer_to` returns
+  that count — a batch that filed nothing keeps the card up with its name and folder, which is what
+  makes the retry the same press.
 
 ### Classification types
 
@@ -235,6 +240,14 @@ this to that one call site — the authority to clear the flag is the whole reas
 bullets can hold, and `clicking_other_on_a_pending_photo_claims_nothing` is what pins the "Other"
 path shut.
 
+Both mark methods also zero `confidence`, so the grid's badge cannot print the number belonging to
+the answer a manual pick replaced. Callers write the category *before* calling either, and
+`apply_classification` stays reserved for decisions the pipeline makes.
+
+Copy clears the grid exactly as Move does. A copy is a completed filing, so keeping its row would
+leave the photo offered again — still selected, looking untouched — and a second press of the same
+button would file it again under a `_1` suffix. What a copy leaves behind is the *original*, on disk.
+
 `ProfileStore::classify` / `classify_with_heuristics` / `classify_heuristics` were collapsed into the one
 entry point — which is also where `classify_with_heuristics`'s `threshold` parameter went, so the
 `CONFIDENCE_THRESHOLD` constant is gone rather than reintroduced here. `ClassificationSource` is
@@ -265,6 +278,11 @@ re-exported from `profile_store` so existing `use` paths and the grid's badge ke
   (cargo runs tests on parallel threads). Don't split it or add another env-mutating test.
 - Tests create temp files as `temp_dir()/name_<pid>.<ext>`, and `src/transfer/` builds a whole
   temp tree per test (`temp_dir()/transfer_<name>_<pid>`). No fixtures directory exists.
+- Anything that runs a *real* transfer must point `app.journal_path` at a temp directory. It is a
+  field rather than a constant for exactly that: `LAST_JOURNAL` is a relative path, so the default
+  would overwrite the journal in the crate root — the slot the running app's **Undo** reads — every
+  time the suite ran. Nothing else in the repo clobbers it; the settings tests rewrite
+  `settings.json` and that has been accepted as a quirk.
 - `transfer::tests::test_undo_is_the_inverse_of_execute_for_both_modes` asserts that
   `undo(execute(inputs, mode))` puts the filesystem back exactly as it started, for both
   modes, sidecars included. It is the reason the two directions share a module — keep it

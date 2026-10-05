@@ -18,10 +18,11 @@
 //!   remembers the names used, newest first, so a second event is a click rather
 //!   than a retype.
 //! - **The user chooses the folder.** The default is the configured output
-//!   folder, keeping the `<Category>/<YYYY>/<MM>/` layout, but a folder picked
-//!   here overrides it for this batch alone — an event that straddles a year
-//!   boundary otherwise splits across two year folders, which is right for the
-//!   library and wrong for one trip.
+//!   folder, and the `<Category>/<YYYY>/<MM>/` layout under it is unchanged
+//!   either way — a folder picked here replaces the *base*, so where the rest of
+//!   the library goes is not where a batch filed from this card goes. That is
+//!   what an event collected somewhere else, or an archive kept apart from the
+//!   sorted output, needs.
 
 use super::chrome;
 use super::layout;
@@ -419,7 +420,9 @@ impl PhotoOrganizerApp {
             ui.separator();
 
             // Move and Copy need both, and each says which of the two it is
-            // missing rather than just sitting greyed.
+            // missing rather than just sitting greyed. Both tooltips end the same
+            // way because both leave the grid: what a copy leaves behind is the
+            // *original*, on disk.
             let transfer_blocked = missing_requirement(has_name, has_destination, true);
             if action_button(
                 ui,
@@ -433,7 +436,8 @@ impl PhotoOrganizerApp {
                 ui,
                 "📋 Copy Selected",
                 transfer_blocked,
-                "Copy the selected photos under this name, leaving the originals alone",
+                "Copy the selected photos under this name, leaving the originals in \
+                 place, then drop them from the grid",
             ) {
                 actions.transfer = Some(TransferMode::Copy);
             }
@@ -490,6 +494,10 @@ impl PhotoOrganizerApp {
             }
             item.category = name.as_str().to_string();
             item.is_custom = is_custom;
+            // Zeroed with the rest: a manual pick has no decision behind it, and
+            // the grid's badge prints this number next to the source. Left alone
+            // it would show the confidence of the answer this name replaced.
+            item.confidence = 0.0;
             item.mark_manual_over_pending();
             assigned += 1;
         }
@@ -518,7 +526,9 @@ impl PhotoOrganizerApp {
     /// Assigns first, so the transfer plans against the name just typed and the
     /// grid's labels agree with where the files went. A photo the move fails on
     /// keeps the name and stays selected, which is what makes the retry a single
-    /// click rather than a re-type.
+    /// click rather than a re-type — and a batch that landed nothing keeps the
+    /// card open for the same reason, since the folder it was headed for is as
+    /// much part of the retry as the name.
     fn bulk_transfer(
         &mut self,
         mode: TransferMode,
@@ -538,7 +548,12 @@ impl PhotoOrganizerApp {
             return;
         }
 
-        self.execute_transfer_to(mode, base, Some(name.clone()));
-        self.close_bulk_move();
+        // Close only once something actually landed. A batch that filed nothing
+        // keeps the card up with the typed name and the folder they picked, so
+        // the retry is the same press rather than reopening the card and
+        // re-answering both questions.
+        if self.execute_transfer_to(mode, base, Some(name.clone())) > 0 {
+            self.close_bulk_move();
+        }
     }
 }

@@ -8,9 +8,7 @@
 
 use super::PhotoOrganizerApp;
 use crate::category_name::CategoryName;
-use crate::transfer::{
-    ExecutionEngine, RawPhotoInput, TransferJournal, TransferMode, UndoStatus,
-};
+use crate::transfer::{ExecutionEngine, RawPhotoInput, TransferJournal, TransferMode, UndoStatus};
 use eframe::egui;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -19,7 +17,7 @@ impl PhotoOrganizerApp {
     /// The toolbar's Move and Copy: transfer every selected photo into the
     /// configured output folder, then drop the ones that landed from the grid.
     ///
-/// The destination and the two backstops the toolbar's own gating should
+    /// The destination and the two backstops the toolbar's own gating should
     /// have caught; [`Self::execute_transfer_to`] is where the transfer happens.
     pub(super) fn execute_transfer(&mut self, mode: TransferMode) {
         let Some(out_dir) = self.settings.output_folder.clone() else {
@@ -37,7 +35,7 @@ impl PhotoOrganizerApp {
             return;
         }
 
-self.execute_transfer_to(mode, out_dir, None);
+        self.execute_transfer_to(mode, out_dir, None);
     }
 
     /// The shared body of every transfer: plan the selection, run it, journal it,
@@ -153,7 +151,7 @@ self.execute_transfer_to(mode, out_dir, None);
 
     /// Rolls back the last transfer, if there is a journal to read.
     pub(super) fn undo_last_transfer(&mut self) {
-        let path = self.journal_path.clone();
+        let path = &self.journal_path;
         if !path.exists() {
             self.set_warning("Nothing to undo: no transfer has been recorded yet.");
             return;
@@ -390,7 +388,7 @@ mod tests {
         let journal = dir.join("journal.json");
 
         let mut app = app_with_one_selected(&source, &journal);
-        app.execute_transfer_to(TransferMode::Move, out_dir.clone());
+        app.execute_transfer_to(TransferMode::Move, out_dir.clone(), None);
 
         assert!(
             out_dir.join("Sunsets/2024/07/incoming.jpg").exists(),

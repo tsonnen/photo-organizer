@@ -145,8 +145,13 @@ impl StagedItem {
     ///
     /// Deliberately does not touch `pending` — a photo still waiting on the model has
     /// no category to have claimed, so the model's answer wins.
+    ///
+    /// Zeroes the confidence with the source. A manual pick is the user's call, so
+    /// there is no decision behind it and the number the grid prints beside the
+    /// badge would be describing the answer this one replaced.
     pub(super) fn mark_manual(&mut self) {
         self.source = ClassificationSource::Manual;
+        self.confidence = 0.0;
     }
 
     /// Claims a photo the model has not reached yet, on the strength of a name the
@@ -170,8 +175,14 @@ impl StagedItem {
     /// `apply_classification` refreshes those before it decides anything, so the
     /// embedding still arrives. That is what keeps a photo claimed mid-scan from
     /// training the next profile on the empty embedding it was staged with.
+    ///
+    /// Zeroes the confidence for the same reason [`Self::mark_manual`] does, and the
+    /// caller writes the category before calling either — so the two agree on what
+    /// a manual pick looks like on the grid rather than one of them leaving a stale
+    /// number next to the badge.
     pub(super) fn mark_manual_over_pending(&mut self) {
         self.source = ClassificationSource::Manual;
+        self.confidence = 0.0;
         self.pending = false;
     }
 
@@ -355,6 +366,41 @@ mod tests {
     }
 
     #[test]
+    fn a_manual_pick_does_not_keep_the_confidence_of_the_answer_it_replaced() {
+        // The badge prints `confidence` next to `source`, so a manual pick that
+        // keeps the old number reports "the user chose this, 90% sure" — a
+        // confidence for a decision nobody made. Both mark methods zero it, which
+        // is why this asserts the pair rather than one of them.
+        let profiles = ProfileStore::default();
+        let mut item = item(&profiles);
+        update(
+            &mut item,
+            &profiles,
+            &facts(),
+            decided("Screenshots", ClassificationSource::Heuristic),
+        );
+        assert!(
+            (item.confidence - 0.9).abs() < 1e-6,
+            "the model was sure, so there is a number to be stale"
+        );
+
+        item.category = "Receipts".to_string();
+        item.mark_manual();
+        assert_eq!(item.source, ClassificationSource::Manual);
+        assert_eq!(
+            item.confidence, 0.0,
+            "there is no decision behind a manual pick to be confident about"
+        );
+
+        item.confidence = 0.9;
+        item.mark_manual_over_pending();
+        assert_eq!(
+            item.confidence, 0.0,
+            "and the bulk move's route, which is the same claim, agrees"
+        );
+    }
+
+    #[test]
     fn a_pending_placeholder_is_never_preserved() {
         // The rule in one assertion, whatever route the Manual flag was set by.
         // Before `Pending` existed the placeholder was a real category with a text
@@ -392,12 +438,21 @@ mod tests {
 
         item.category = "Beach Trip".to_string();
         item.is_custom = true;
+        // A photo the model has already answered carries that answer's
+        // confidence, and the grid's badge prints the number beside the source.
+        // Set before the mark so the assertion below has something to fail on.
+        item.confidence = 0.87;
         item.mark_manual_over_pending();
 
         assert!(!item.pending, "the photo now carries a decision");
         assert!(
             item.is_filable(),
             "and may therefore be filed under that name"
+        );
+        assert_eq!(
+            item.confidence, 0.0,
+            "a manual pick has no decision behind it, so the grid must not print \
+             the confidence of the answer it replaced"
         );
 
         let mut later = facts();

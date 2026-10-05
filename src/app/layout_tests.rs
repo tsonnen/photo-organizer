@@ -850,11 +850,19 @@ fn bulk_move_harness_with(
     app.settings = settings;
     app.show_bulk_move_modal = true;
     app.bulk_move_name = name.to_string();
+    // The undo journal's slot is a field precisely so this can point a real
+    // transfer at a scratch directory. Left on its default it would overwrite the
+    // journal in the crate root — the one the running app's Undo reads — every
+    // time the suite ran.
+    app.journal_path = std::env::temp_dir()
+        .join(format!("bulk_move_journal_{}", std::process::id()))
+        .join("last_execution_manifest.json");
 
-    // Staged exactly once, and deliberately not on `items.is_empty()`: a move
-    // empties the grid, so that condition would put the photos straight back and
-    // hide whether they were dropped at all. `Cell` because the harness closure
-    // is `Fn` and re-staging has to be observable from inside it.
+    // Staged exactly once, and deliberately not on `items.is_empty()`: both a move
+    // and a copy empty the grid once their photos land, so that condition would
+    // put the photos straight back and hide whether they were dropped at all.
+    // `Cell` because the harness closure is `Fn` and re-staging has to be
+    // observable from inside it.
     let staged_once = std::cell::Cell::new(false);
     let mut harness = Harness::new_ui_state(
         move |ui, app: &mut PhotoOrganizerApp| {
@@ -1328,12 +1336,83 @@ fn bulk_move_puts_the_whole_selection_under_the_typed_name() {
         harness.state().items.is_empty(),
         "moved photos leave the grid, as the toolbar's Move already does"
     );
+    assert!(
+        !harness.state().show_bulk_move_modal,
+        "a batch that landed something closes the card, the same as the other \
+         two ways out"
+    );
 }
 
 #[test]
-fn bulk_copy_leaves_the_originals_and_keeps_the_photos_staged() {
-    // The same batch as a copy: the files are duplicated under the typed name
-    // and the grid keeps them, so the selection can be reviewed or re-filed.
+fn a_bulk_move_that_files_nothing_keeps_the_card_and_what_was_typed() {
+    // The other half of the close rule. The destination here cannot exist — it
+    // sits under a regular file, so `create_dir_all` fails with ENOTDIR for every
+    // photo in the batch — which is the ordinary way a bulk move lands nothing:
+    // a folder that was deleted, a drive that is not mounted, a path that is
+    // pointing at the wrong thing. Closing the card there would throw away the
+    // name and the folder the user had already answered, so the retry would be
+    // reopening the card and answering both questions again.
+    let scratch = Scratch::new("nothing_lands");
+    let photo = scratch.write("incoming/july.jpg", "july bytes");
+    scratch.write("blocker", "not a directory");
+
+    let screen = egui::vec2(1240.0, 900.0);
+    let settings = crate::settings::Settings {
+        output_folder: Some(scratch.join("blocker/under")),
+        ..Default::default()
+    };
+    let mut harness =
+        bulk_move_harness_with(screen, settings, "Beach Trip", vec![(photo, 2024, 7)]);
+
+    harness
+        .query_all_by_label_contains("Move Selected")
+        .next()
+        .expect("expected a Move Selected button")
+        .click();
+    harness.run();
+
+    assert!(
+        !scratch.exists("blocker/under/Beach Trip"),
+        "the batch should have filed nothing at all"
+    );
+    // Confirm the batch actually ran and failed, rather than never starting — an
+    // assertion about the card staying open would otherwise also pass if the
+    // button had done nothing at all.
+    let reported = &harness
+        .state()
+        .status_message
+        .as_ref()
+        .expect("a failed batch still says so in the status line")
+        .0;
+    assert!(
+        reported.contains("Nothing was transferred"),
+        "the status line should report the failure, got {reported:?}"
+    );
+    assert!(
+        harness.state().show_bulk_move_modal,
+        "nothing landed, so the card stays up — its name and folder are part of \
+         the retry"
+    );
+    assert_eq!(
+        harness.state().bulk_move_name,
+        "Beach Trip",
+        "the typed name survives the failed attempt"
+    );
+    let items = &harness.state().items;
+    assert_eq!(items.len(), 1, "the photo is still staged");
+    assert!(
+        items[0].selected,
+        "and still selected, so the retry is the same press of the same button"
+    );
+}
+
+#[test]
+fn bulk_copy_leaves_the_originals_and_clears_the_grid() {
+    // The same batch as a copy: the files are duplicated under the typed name and
+    // the originals stay where they were, which is the whole difference between
+    // the two modes. The grid clears either way — a copy is a completed filing,
+    // so leaving the row behind would offer the same photo again, still selected
+    // and looking untouched, and a second press would file it a second time.
     let scratch = Scratch::new("copy_keeps_originals");
     let july = scratch.write("incoming/july.jpg", "july bytes");
 
@@ -1361,7 +1440,11 @@ fn bulk_copy_leaves_the_originals_and_keeps_the_photos_staged() {
         "a copy leaves the original"
     );
     assert!(scratch.exists("sorted/Beach Trip/2024/07/july.jpg"));
-    assert_eq!(harness.state().items.len(), 1, "copied photos stay staged");
+    assert!(
+        harness.state().items.is_empty(),
+        "a copied photo leaves the grid like a moved one, so the same photo \
+         cannot be filed a second time by pressing the button again"
+    );
 }
 
 #[test]
@@ -1371,6 +1454,11 @@ fn a_name_typed_with_separators_cannot_create_a_directory_level() {
     // otherwise add a level and `..` would leave the output folder. This leans
     // on `CategoryName` doing its one job; the point of the assertion is that
     // the bulk move routes through it rather than joining the raw string.
+    //
+    // `../../escaped` has exactly one sanitised outcome: each `/` becomes a `-`,
+    // and the result is neither `.` nor `..`, so it stays a legal single
+    // component. Asserting that one path rather than accepting either of two is
+    // what would catch the sanitiser changing underneath this feature.
     let scratch = Scratch::new("name_is_one_component");
     let photo = scratch.write("incoming/a.jpg", "bytes");
 
@@ -1389,15 +1477,19 @@ fn a_name_typed_with_separators_cannot_create_a_directory_level() {
         .click();
     harness.run();
 
+    // Two levels above the scratch directory is where an unsanitised `../../escaped`
+    // would land, so that is the path to check rather than one inside the scratch
+    // — a `..` that worked would never have produced a directory here to find.
+    let escaped = scratch.join("../../escaped");
     assert!(
-        !scratch.exists("escaped"),
-        "a traversal attempt must not resolve outside the output folder"
+        !escaped.exists(),
+        "a traversal attempt must not resolve outside the output folder, \
+         found {escaped:?}"
     );
-    let filed = scratch.exists("sorted/Unsorted/2024/07/a.jpg")
-        || scratch.exists("sorted/..-..-escaped/2024/07/a.jpg");
     assert!(
-        filed,
-        "the photo still has to be filed somewhere, under the sanitised name"
+        scratch.exists("sorted/..-..-escaped/2024/07/a.jpg"),
+        "the photo still has to be filed somewhere, under the one component the \
+         sanitiser produced"
     );
 }
 

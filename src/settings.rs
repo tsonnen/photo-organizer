@@ -5,6 +5,7 @@
 //! learned. That split also means a `profiles.json` written by an older build
 //! never carries a stale copy of a value this module owns.
 
+use crate::category_name::CategoryName;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -56,8 +57,9 @@ pub struct Settings {
     /// exemplars would be the profile churn the feature exists to avoid.
     ///
     /// Kept to [`MAX_REMEMBERED_CATEGORIES`] and sanitised by
-    /// [`CategoryName`](crate::category_name::CategoryName) before it is stored,
-    /// so what the dropdown offers is exactly what will be used as a folder name.
+    /// [`CategoryName`] before it is stored, so what the dropdown offers is exactly
+    /// what will be used as a folder name. [`Self::remember_custom_category`] is the
+    /// only writer, and it keeps the fallback bucket out of the list.
     #[serde(default)]
     pub custom_categories: Vec<String>,
 }
@@ -145,9 +147,15 @@ impl Settings {
     /// name the user has merely retyped with different casing is the same name,
     /// and offering both would have them choose between two spellings of one
     /// folder. Newest-first is what makes the dropdown worth reading at all.
+    ///
+    /// The fallback bucket is never remembered, and the guard is here rather than
+    /// at the caller because the invariant is about what the dropdown may offer:
+    /// [`CategoryName::unsorted`] is a directory every unmatched photo already
+    /// lands in, not a name anyone chose, so listing it would put a row in the
+    /// recall list that files photos nowhere the user did not ask for.
     pub fn remember_custom_category(&mut self, name: &str) {
         let name = name.trim();
-        if name.is_empty() {
+        if name.is_empty() || name.eq_ignore_ascii_case(CategoryName::unsorted().as_str()) {
             return;
         }
         self.custom_categories
@@ -270,6 +278,28 @@ mod tests {
         assert!(settings.custom_categories.is_empty());
 
         settings.remember_custom_category("  Beach Trip  ");
+        assert_eq!(settings.custom_categories, vec!["Beach Trip"]);
+    }
+
+    #[test]
+    fn the_fallback_bucket_is_never_remembered() {
+        // A name the sanitiser cannot use as a directory becomes `Unsorted`, and
+        // that is a directory every unmatched photo already lands in rather than
+        // a name anyone chose. Offering it back would put a row in the dropdown
+        // that files photos where they were going anyway, while looking like a
+        // remembered choice.
+        let mut settings = Settings::default();
+        for fallback in ["Unsorted", "unsorted", " UNSORTED "] {
+            settings.remember_custom_category(fallback);
+        }
+        assert!(
+            settings.custom_categories.is_empty(),
+            "the fallback bucket is not a name the user chose, got {:?}",
+            settings.custom_categories
+        );
+
+        // An ordinary name is still remembered, so the guard is not over-broad.
+        settings.remember_custom_category("Beach Trip");
         assert_eq!(settings.custom_categories, vec!["Beach Trip"]);
     }
 
