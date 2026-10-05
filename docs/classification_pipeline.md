@@ -172,6 +172,32 @@ sorts *before* every one of them, since `Z` is `0x5A` and `a` is `0x61`.
 The unsorted name itself is read from `CategoryName::unsorted()` rather than
 copied, so the key cannot drift from the name a `Decision` actually carries.
 
+### The grid does not reorder under the caret
+
+Editing a category is exactly what changes the Category sort key. A grid that
+re-sorts on every keystroke therefore moves the row being edited out from under
+the caret — and egui identifies a cell's widgets by the *position* they occupy
+(`make_persistent_id` is `ui.id.with(salt)`, and a `Grid` cell's `ui.id` is
+positional), so the field under the caret silently becomes the next photo's
+field. The characters land in that photo, at that photo's old caret, and the
+rows behind it appear to scramble.
+
+Both halves are one cause, and both are fixed by `holding_order`: while a cell's
+editor holds focus the grid keeps the order it has. Filtering still applies — the
+two are independent, and a filter narrowing the grid under the user's hands is
+expected rather than alarming.
+
+The hold is released by the sort changing, not only by focus leaving. Clicking
+the direction button does not move keyboard focus in egui 0.30, so an editor the
+user clicked into keeps it, and a plain "editing, therefore frozen" rule would
+swallow the click. `order_sort` records the sort the current order was produced
+under, and a mismatch releases the hold on the next frame.
+
+Each grid cell is additionally wrapped in `ui.push_id(idx, …)`. That cannot make
+the ids absolute — the push is still relative to the positional cell id — but it
+does key them to the photo rather than to the counter of widgets created so far,
+so a photo that does move does not have its neighbours' fields pointed at it.
+
 ### Ties keep their order in both directions
 
 Descending inverts the *key* (`Reverse`), never the run. `sort_by_cached_key`

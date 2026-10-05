@@ -266,6 +266,16 @@ re-exported from `profile_store` so existing `use` paths and the grid's badge ke
   failed, and `category_sort_key` files the unsorted bucket last. Descending inverts the key, never the run,
   so ties keep their order. Adding a second copy of the "is it in view" predicate anywhere else is the bug
   this module exists to prevent.
+- **The grid must not reorder while a cell's category editor holds focus** — `PhotoOrganizerApp::holding_order`.
+  Editing a category is what changes the Category sort key, and egui identifies a cell's widgets by the
+  position they occupy, so a reordering frame makes the focused field the *next* photo's: the characters land
+  in the wrong photo and the rows behind it look scrambled. `render_custom_category_input` returns whether
+  it has focus and `render_grid` records it at the end of the frame; `render_grid_cell_controls` returns
+  `(train_request, editing)`. Check focus with `ui.memory(|m| m.has_focus(response.id))`, **not**
+  `Response::has_focus()` — the latter also requires the OS window to have focus, so it reports false for a
+  field the user is plainly typing into whenever the window manager says otherwise. The hold is released by
+  the *sort* changing (`order_sort`), not only by focus leaving: clicking a button does not move keyboard
+  focus in egui 0.30, so "editing, therefore frozen" would swallow a click on the direction button.
 - A transfer test in `layout_tests.rs` asserts on `last_execution_manifest.json`, which is written at a
   fixed relative path. It is the **only** test that calls `execute_transfer`, deliberately: a second one
   would race it over that file, and cargo runs tests in parallel. Both properties (a filtered transfer

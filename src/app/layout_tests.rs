@@ -84,7 +84,9 @@ fn render_category_cell(cell_width: f32) -> Vec<WidgetRect> {
             ui.vertical(|ui| {
                 // The production grid cell renderer itself, so these tests
                 // measure the real layout rather than a copy of it.
-                PhotoOrganizerApp::render_grid_cell_controls(
+                // The focus flag is the grid's business; this test only cares
+                // about geometry.
+                let _ = PhotoOrganizerApp::render_grid_cell_controls(
                     &store,
                     ui,
                     item,
@@ -1872,4 +1874,156 @@ fn a_transfer_moves_only_what_is_in_view() {
     );
 
     let _ = fs::remove_dir_all(&temp);
+}
+
+/// Focuses the custom-category editor showing `value`, the way a click would.
+///
+/// Found by matching the editor's *value*, since the editors are laid out in grid
+/// order and the photos can be in any order under a sort.
+fn focus_editor(harness: &mut Harness<'static, PhotoOrganizerApp>, value: &str) {
+    harness
+        .kittest_state()
+        .query_all(by().recursive(true))
+        .find(|node| {
+            format!("{:?}", node.role()).contains("TextInput")
+                && node.value().is_some_and(|v| v == value)
+        })
+        .unwrap_or_else(|| panic!("no category editor showing {value:?}"))
+        .focus();
+    harness.run();
+}
+
+/// One character into the focused editor, on its own frame.
+///
+/// One event per frame because that is how a real keyboard arrives, and because
+/// batching would hide the bug this exists for: focus and the caret survive one
+/// frame at a time or not at all.
+fn type_text(harness: &mut Harness<'static, PhotoOrganizerApp>, text: &str) {
+    harness
+        .input_mut()
+        .events
+        .push(egui::Event::Text(text.to_string()));
+    harness.run();
+}
+
+/// A grid of custom-category photos sorted by category, from `(name, category)`
+/// pairs.
+fn custom_sorted_grid(
+    pairs: &[(&'static str, &'static str)],
+) -> Harness<'static, PhotoOrganizerApp> {
+    app_with(
+        pairs
+            .iter()
+            .enumerate()
+            .map(|(i, (name, category))| photo(name, 2021, i as u32 + 1, category))
+            .collect(),
+        |app| {
+            if !app.items.iter().all(|item| item.is_custom) {
+                for item in &mut app.items {
+                    item.is_custom = true;
+                }
+            }
+            app.sort_by = SortBy::Category;
+        },
+    )
+}
+
+#[test]
+fn typing_a_category_keeps_the_row_and_the_caret_where_they_are() {
+    // The bug this pins down. A Category sort reorders the grid on the very
+    // keystroke that edits a category, and egui identifies a cell's widgets by the
+    // position they occupy — so the field under the caret became the *next*
+    // photo's field and the characters landed there, at that photo's old caret,
+    // which is also what made the rows behind it look scrambled. Typing "A" into a
+    // photo whose category was empty used to leave the intended photo holding "A"
+    // and put "bA", then "bAA", into its neighbour.
+    let mut harness = custom_sorted_grid(&[("aaa", "aaa"), ("bbb", "bbb"), ("zzz", "")]);
+
+    harness.run();
+    assert_eq!(
+        drawn_photo_order(&harness),
+        vec!["aaa.jpg", "bbb.jpg", "zzz.jpg"]
+    );
+
+    focus_editor(&mut harness, "");
+
+    // "A" sorts before both "aaa" and "bbb", so without the hold this row leaps
+    // from last to first on the first keystroke.
+    for expected in ["A", "AA", "AAA"] {
+        type_text(&mut harness, "A");
+        assert_eq!(
+            harness.state().items[2].category,
+            expected,
+            "the photo being edited should receive the character"
+        );
+        assert_eq!(
+            harness.state().items[1].category,
+            "bbb",
+            "an unrelated photo must not be edited"
+        );
+        assert_eq!(
+            drawn_photo_order(&harness),
+            vec!["aaa.jpg", "bbb.jpg", "zzz.jpg"],
+            "the grid must not move while a cell is being typed into"
+        );
+    }
+}
+
+#[test]
+fn the_grid_asserts_its_sort_once_the_editor_lets_go() {
+    // Holding the order is a pause, not a cancellation: the rename has to take
+    // effect once the user is done, or a category sort would quietly stop sorting.
+    let mut harness = custom_sorted_grid(&[("aaa", "aaa"), ("bbb", "bbb"), ("zzz", "")]);
+
+    harness.run();
+    focus_editor(&mut harness, "");
+    type_text(&mut harness, "A");
+    assert_eq!(
+        drawn_photo_order(&harness),
+        vec!["aaa.jpg", "bbb.jpg", "zzz.jpg"]
+    );
+
+    // Take focus off the editor the way clicking away would.
+    harness
+        .kittest_state()
+        .query_all(by().recursive(true))
+        .find(|node| format!("{:?}", node.role()).contains("Button"))
+        .expect("a button to take focus")
+        .focus();
+    harness.run();
+
+    assert_eq!(
+        drawn_photo_order(&harness),
+        vec!["zzz.jpg", "aaa.jpg", "bbb.jpg"],
+        "the sort should reassert itself once nothing is being edited"
+    );
+}
+
+#[test]
+fn changing_the_sort_while_typing_still_takes_effect() {
+    // The hold is on the *order*, not on the sort. Reversing mid-edit must still
+    // reverse the grid — clicking a button does not move keyboard focus in egui
+    // 0.30, so an editor the user clicked into keeps the focus, and a plain
+    // "editing, therefore frozen" rule would swallow this.
+    let mut harness = custom_sorted_grid(&[("aaa", "aaa"), ("bbb", "bbb")]);
+
+    harness.run();
+    focus_editor(&mut harness, "aaa");
+    assert!(
+        harness.state().holding_order(),
+        "an editor with focus should hold the order"
+    );
+
+    harness.state_mut().sort_direction = SortDirection::Descending;
+    harness.run();
+
+    assert!(
+        !harness.state().holding_order(),
+        "changing the sort releases the hold"
+    );
+    assert_eq!(
+        drawn_photo_order(&harness),
+        vec!["bbb.jpg", "aaa.jpg"],
+        "the reversed sort should apply immediately"
+    );
 }

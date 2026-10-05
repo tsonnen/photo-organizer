@@ -226,11 +226,16 @@ impl super::PhotoOrganizerApp {
     ///
     /// Both the grid cell and the modal render this, so a custom category is
     /// editable in either view.
+    ///
+    /// Returns whether the editor holds focus. The grid needs to know: editing a
+    /// category is exactly what changes the Category sort key, so the grid has to
+    /// be able to decline to re-sort while a cell is being typed into. See
+    /// [`super::PhotoOrganizerApp::render_grid`].
     pub(super) fn render_custom_category_input(
         ui: &mut egui::Ui,
         item: &mut StagedItem,
         input_width: f32,
-    ) {
+    ) -> bool {
         let custom_input = ui.add(
             egui::TextEdit::singleline(&mut item.category)
                 .hint_text("Custom category...")
@@ -239,23 +244,32 @@ impl super::PhotoOrganizerApp {
         if custom_input.changed() {
             item.mark_manual();
         }
+
+        // `Memory::has_focus`, not `Response::has_focus`: the latter also requires
+        // the *window* to have OS focus, which is a statement about the desktop
+        // rather than about the field, and it reports false for a field the user
+        // is plainly typing into whenever the window manager says otherwise.
+        ui.memory(|m| m.has_focus(custom_input.id))
     }
 
-    /// Renders one grid cell's category controls and returns the category to
-    /// train if the train button was clicked.
+    /// Renders one grid cell's category controls, returning the category to
+    /// train if the train button was clicked and whether the cell's editor holds
+    /// focus.
     ///
     /// The combo and train button share a row; the custom category input, when
     /// the item is custom, goes on the row *below*. That stacking is load
     /// bearing: sharing a single row starves the input down to whatever sliver
     /// is left after the combo, and forces the cell wider than its grid column.
+    #[must_use = "the focus flag is what lets the grid hold its order while typing"]
     pub(super) fn render_grid_cell_controls(
         profiles: &ProfileStore,
         ui: &mut egui::Ui,
         item: &mut StagedItem,
         item_width: f32,
         combo_id: egui::Id,
-    ) -> Option<String> {
+    ) -> (Option<String>, bool) {
         let mut train_request = None;
+        let mut editing = false;
         let combo_width = grid_cell_combo_width(item_width);
 
         ui.horizontal(|ui| {
@@ -278,10 +292,10 @@ impl super::PhotoOrganizerApp {
 
         if item.is_custom {
             let category_input_width = grid_cell_input_width(item_width);
-            Self::render_custom_category_input(ui, item, category_input_width);
+            editing = Self::render_custom_category_input(ui, item, category_input_width);
         }
 
-        train_request
+        (train_request, editing)
     }
 
     /// Renders the inspection modal's bottom control row and reports which
@@ -329,7 +343,14 @@ impl super::PhotoOrganizerApp {
             );
 
             if item.is_custom {
-                Self::render_custom_category_input(ui, item, super::layout::modal_input_width(ui));
+                // The focus flag is the grid's business, not the modal's: this
+                // editor draws over the grid, so typing here cannot reorder
+                // anything the user can see.
+                let _ = Self::render_custom_category_input(
+                    ui,
+                    item,
+                    super::layout::modal_input_width(ui),
+                );
             }
 
             if ui

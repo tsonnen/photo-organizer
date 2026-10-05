@@ -89,6 +89,23 @@ pub struct PhotoOrganizerApp {
     /// never looked at.
     filters: Filters,
     show_filter_panel: bool,
+    /// Whether a grid cell's category editor held focus when the grid was last
+    /// drawn.
+    ///
+    /// Set while the user is typing a category name, and the reason the grid stops
+    /// reordering while it is. Editing a category is precisely what changes the
+    /// Category sort key, so a grid that re-sorts on every keystroke moves the row
+    /// out from under the caret — and since egui identifies a cell's widgets by
+    /// their position, the field under the caret becomes the *next* photo's, so the
+    /// characters land in the wrong photo and the rows behind it appear to
+    /// scramble. Both halves of that are one cause. See
+    /// [`Self::render_grid`].
+    editing_cell: bool,
+    /// The sort the current order was produced under.
+    ///
+    /// A held order is only held while the sort itself is unchanged, so pressing
+    /// the direction button part-way through typing still takes effect.
+    order_sort: (SortBy, SortDirection),
     show_profiles_modal: bool,
     show_settings_modal: bool,
     delete_prompt: DeletePrompt,
@@ -139,6 +156,8 @@ impl PhotoOrganizerApp {
             sort_direction: SortDirection::default(),
             filters: Filters::default(),
             show_filter_panel: false,
+            editing_cell: false,
+            order_sort: (SortBy::default(), SortDirection::default()),
             show_profiles_modal: false,
             show_settings_modal: false,
             delete_prompt: DeletePrompt::default(),

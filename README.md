@@ -77,6 +77,10 @@ Two of the orders aren't the plain comparison:
   name you've cleared — as sorting last, rather than filing between **Travel** and
   **Vacation** as though you'd chosen it.
 
+The grid holds its order while you're typing a category name into a cell, so the
+photo doesn't jump out from under the caret as you rename it. The new order
+settles in when you click away — or the moment you change the sort.
+
 **Filters** has three narrowing controls that combine: a **date range**, a **confidence
 range**, and a **category**. All three have to hold for a photo to stay, so you can ask
 for "receipts, from 2021, that the model was sure about" in one go.

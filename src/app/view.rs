@@ -226,14 +226,22 @@ fn sort_ordered<K: Ord>(
 }
 
 impl PhotoOrganizerApp {
-    /// The staged photos the user is looking at, as indices into `self.items`:
-    /// the ones the filters keep, in the order the sort asks for.
+    /// Whether this frame should keep the order the grid already has, rather than
+    /// re-sorting it.
     ///
-    /// Recomputed on demand rather than held in a field. Items change underneath
-    /// it — a scan `Update` lands a category, a combo box renames one, the
-    /// threshold re-classifies the lot — and a category filter has to react in the
-    /// frame the rename happens. A cache would need invalidating in each of those
-    /// places and would be stale in whichever one was missed.
+    /// True while a cell's category editor holds focus and the sort itself has not
+    /// changed. Editing a category is what moves it in a Category sort, so
+    /// re-sorting mid-word pulls the row out from under the caret — and egui
+    /// identifies a cell's widgets by position, so the field under the caret
+    /// silently becomes another photo's and the characters land there instead.
+    ///
+    /// Derived rather than stored, so everything asking what is in view — the
+    /// toolbar, the footer, the grid — gets the same answer without depending on
+    /// where in the frame it happens to be worked out.
+    pub(super) fn holding_order(&self) -> bool {
+        self.editing_cell && (self.sort_by, self.sort_direction) == self.order_sort
+    }
+
     pub(super) fn visible_indices(&self) -> Vec<usize> {
         let threshold = self.settings.confidence_threshold;
         let mut rows: Vec<(Row<'_>, usize)> = self
@@ -244,7 +252,9 @@ impl PhotoOrganizerApp {
             .map(|(index, item)| (Row::from(item), index))
             .collect();
 
-        sort_rows(&mut rows, self.sort_by, self.sort_direction, threshold);
+        if !self.holding_order() {
+            sort_rows(&mut rows, self.sort_by, self.sort_direction, threshold);
+        }
 
         rows.into_iter().map(|(_, index)| index).collect()
     }
