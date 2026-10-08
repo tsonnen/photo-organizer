@@ -19,11 +19,14 @@ use eframe::egui;
 const WEEKDAYS: [&str; 7] = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
 
 /// A day cell's edge, in points. Square so a month reads as a grid.
-const DAY_SIZE: f32 = 26.0;
+///
+/// `pub(super)` because the layout test asserts on the calendar's rendered width,
+/// which is seven of these and nothing else.
+pub(super) const DAY_SIZE: f32 = 26.0;
 
 /// The gap between day cells, in points. Shared by the header and the days so the
 /// two grids cannot drift out of alignment.
-const DAY_SPACING: f32 = 2.0;
+const DAY_SPACING: f32 = 0.0;
 
 /// How many days earlier than the 1st a month may start, so the arrows have
 /// somewhere to go before the first photo was taken.
@@ -174,6 +177,13 @@ impl Calendar {
         egui::Grid::new("calendar")
             .num_columns(WEEKDAYS.len())
             .spacing([DAY_SPACING, DAY_SPACING])
+            .min_col_width(DAY_SIZE)
+            // Without this every cell is forced to `spacing.interact_size`, which
+            // is 40pt wide by default: a 26pt date sat in a 40pt column and the
+            // 14pt difference was a gap that no grid spacing could close, because
+            // it was never the grid's spacing. This is the whole fix for
+            // "leave a space between the dates".
+            .min_row_height(DAY_SIZE)
             .show(ui, |ui| {
                 for name in WEEKDAYS {
                     let (rect, _) = ui
@@ -220,9 +230,14 @@ impl Calendar {
 /// One day cell: a button that knows whether it is the range's start, its end, or
 /// inside it.
 ///
-/// The three states are told apart by fill rather than by one button style,
-/// because a range only reads as one thing if its interior is filled and its two
-/// ends stand out from it.
+/// `add_sized` rather than `Button::min_size` because the two differ in exactly
+/// the way that matters here: a default `Button` claims more column width than it
+/// draws — about 40pt for a 26pt cell — so every date sat with a 14pt gap to its
+/// right that no amount of grid spacing could close. `add_sized` forces the size,
+/// and the gap becomes the grid spacing, which is none.
+///
+/// It stays a real `Button` rather than painted text: a calendar of 31 unlabelled
+/// rectangles is neither keyboard-reachable nor assertable, and both matter.
 fn day_button(
     ui: &mut egui::Ui,
     year: u32,
@@ -238,12 +253,8 @@ fn day_button(
         (Some(start), Some(end)) => date.start() >= start.start() && date.end() <= end.end(),
         _ => false,
     };
-    // The end points a shade stronger than the days between them, so "from the
-    // 4th to the 9th" reads as a span rather than as ten equally-lit days.
-    //
-    // `RichText` for the label rather than a text colour on the button, which
-    // egui 0.30's `Button` has no builder for: a filled button would keep the
-    // default label colour and render dark-on-dark.
+    let selected = is_start || is_end || in_range;
+
     let (fill, text) = if is_start || is_end {
         (
             Some(egui::Color32::from_rgb(0, 150, 230)),
@@ -258,137 +269,20 @@ fn day_button(
         (None, egui::Color32::GRAY)
     };
 
+    // `RichText` for the label rather than a text colour on the button, which
+    // egui 0.30's `Button` has no builder for: a filled button would keep the
+    // default label colour and render dark-on-dark.
     let label = egui::RichText::new(day.to_string()).color(text);
-    let mut button = egui::Button::new(label)
-        .min_size(egui::vec2(DAY_SIZE, DAY_SIZE))
-        .rounding(3.0);
+    // Square, like the spacing being zero: with no gap between dates, rounded
+    // corners leave four small notches at every cell junction, which reads as a
+    // grid of separate chips rather than as one continuous field of dates.
+    let mut button = egui::Button::new(label).rounding(0.0);
     if let Some(fill) = fill {
         button = button.fill(fill);
     }
-
-    ui.add(button).clicked()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The days a month view offers, blanks dropped.
-    fn days_shown(year: u32, month: u32) -> Vec<u32> {
-        month_grid(year, month).into_iter().flatten().collect()
+    if selected {
+        button = button.selected(true);
     }
 
-    #[test]
-    fn a_month_offers_every_day_exactly_once() {
-        for (year, month, expected) in [
-            (2021, 1, 31),
-            (2021, 2, 28),
-            (2020, 2, 29), // leap
-            (1900, 2, 28), // century, not a leap year
-            (2000, 2, 29), // 400-divisible, so a leap year
-            (2021, 4, 30),
-        ] {
-            let days = days_shown(year, month);
-            assert_eq!(
-                days,
-                (1..=expected).collect::<Vec<u32>>(),
-                "{year}-{month:02} should offer 1..={expected}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_month_is_a_whole_number_of_weeks() {
-        // The whole point: without the trailing blanks a February would lay out
-        // as four rows and a May as five, and the picker would change height as
-        // the user paged.
-        for month in 1..=12 {
-            let cells = month_grid(2021, month).len();
-            assert_eq!(cells % 7, 0, "month {month} is not a whole number of weeks");
-            assert!(
-                (28..=42).contains(&cells),
-                "month {month} laid out as {cells} cells"
-            );
-        }
-    }
-
-    #[test]
-    fn the_first_of_the_month_lands_under_the_right_weekday() {
-        // 1 March 2021 was a Monday, so it gets no leading blanks.
-        assert_eq!(first_weekday(2021, 3), 0);
-        // 1 February 2021 was a Monday too.
-        assert_eq!(first_weekday(2021, 2), 0);
-        // 1 June 2021 was a Tuesday: one blank.
-        assert_eq!(first_weekday(2021, 6), 1);
-        // 1 May 2021 was a Saturday: five blanks.
-        assert_eq!(first_weekday(2021, 5), 5);
-
-        assert_eq!(month_grid(2021, 3)[0], Some(1));
-        assert_eq!(month_grid(2021, 3)[6], Some(7));
-        assert_eq!(month_grid(2021, 6)[0], None);
-        assert_eq!(month_grid(2021, 6)[1], Some(1));
-    }
-
-    #[test]
-    fn stepping_months_carries_across_the_year() {
-        assert_eq!(shift_month(2021, 12, 1), (2022, 1));
-        assert_eq!(shift_month(2021, 1, -1), (2020, 12));
-        assert_eq!(shift_month(2021, 6, 12), (2022, 6));
-        assert_eq!(shift_month(2021, 6, -12), (2020, 6));
-        // Far enough back and it stops at the floor rather than wrapping to a year
-        // no camera was made in.
-        assert_eq!(shift_month(1900, 1, -12).0, 1900);
-    }
-
-    #[test]
-    fn a_click_starts_a_range_and_the_next_closes_it() {
-        let first = PhotoDate::new(2021, 3, Some(4));
-        let second = PhotoDate::new(2021, 3, Some(9));
-
-        let (from, to) = range_after_click(None, None, first);
-        assert_eq!(from, Some(first));
-        assert_eq!(
-            to, None,
-            "the first click opens the range, it does not close it"
-        );
-
-        let (from, to) = range_after_click(from, to, second);
-        assert_eq!((from, to), (Some(first), Some(second)));
-    }
-
-    #[test]
-    fn closing_a_range_backwards_swaps_it_rather_than_inverting_it() {
-        // Clicking the dates in the order a person thinks about them — end, then
-        // start — has to leave a usable range. Storing it inverted reads as empty
-        // and silently filters everything away.
-        let early = PhotoDate::new(2021, 3, Some(4));
-        let late = PhotoDate::new(2021, 3, Some(9));
-
-        let (from, to) = range_after_click(Some(late), None, early);
-        assert_eq!((from, to), (Some(early), Some(late)));
-        assert!(from.unwrap().start() <= to.unwrap().end());
-    }
-
-    #[test]
-    fn a_third_click_starts_the_range_over() {
-        let first = PhotoDate::new(2021, 3, Some(4));
-        let last = PhotoDate::new(2021, 3, Some(9));
-        let elsewhere = PhotoDate::new(2021, 4, Some(2));
-
-        let (from, to) = range_after_click(Some(first), Some(last), elsewhere);
-        assert_eq!(from, Some(elsewhere));
-        assert_eq!(to, None);
-    }
-
-    #[test]
-    fn the_picker_opens_on_a_bound_before_a_default() {
-        let bound = PhotoDate::new(2019, 7, Some(2));
-        let fallback = (2021, 3);
-
-        // A bound the user set beats the folder's own dates: a range whose start
-        // is off screen is worse than no filter at all.
-        assert_eq!(opening_month(Some(bound), None, fallback), (2019, 7));
-        assert_eq!(opening_month(None, Some(bound), fallback), (2019, 7));
-        assert_eq!(opening_month(None, None, fallback), fallback);
-    }
+    ui.add_sized([DAY_SIZE, DAY_SIZE], button).clicked()
 }

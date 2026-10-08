@@ -273,11 +273,19 @@ re-exported from `profile_store` so existing `use` paths and the grid's badge ke
   February and a 31-day May; and a click that closes a range *before* it opens **swaps** the two bounds
   (`range_after_click`), because clicking end-then-start is the natural gesture and an inverted range reads
   as empty. `first_weekday` goes through `chrono` — a hand-rolled day count that is off by one shifts a whole
-  month by a column, and every wrong day then reads as a real date the user could pick. The weekday
-  initials and the days are rows of **one** grid, not two: two grids means two independent column sets, and
-  the real pitch is `DAY_SIZE + spacing + a further 14pt` that neither grid controls — which left every header
-  sitting to the right of the day it named. Month and year navigation is `◀`/`▶`/`«`/`»`, deliberately *not*
-  wired to the month label.
+  month by a column, and every wrong day then reads as a real date the user could pick.
+  Three layout facts that cost measurement to find, all of which look like styling and are not:
+  - The weekday initials and the days are rows of **one** grid, not two. Two grids means two independent
+    column sets and nothing makes them agree.
+  - The grid sets **`min_col_width(DAY_SIZE)`**. `egui::Grid` otherwise forces every cell to
+    `spacing.interact_size`, 40pt wide by default, so a 26pt date sat in a 40pt column and the 14pt
+    difference read as a gap that no `Grid::spacing` setting could close — because it was never the spacing.
+    With `DAY_SPACING` at 0 the dates are edge to edge.
+  - Day cells are `rounding(0.0)`. Rounded corners with no gap leave four notches at every junction and
+    undo the whole point.
+  Days stay real `Button`s via `add_sized` rather than painted text, so the calendar is keyboard-reachable
+  and the layout tests can find a day by its label. Month and year navigation is `◀`/`▶`/`«`/`»`,
+  deliberately *not* wired to the month label.
 - `PhotoDate.day` is `Option<u32>` and `photo_cache.day` is nullable. A row written before the column has
   none, and `Option` says "unknown" without inventing a day nobody recorded; `StagedItem` carries a whole
   `PhotoDate` rather than loose year/month/day so the three cannot drift. Range filtering is interval

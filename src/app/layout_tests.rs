@@ -2247,3 +2247,34 @@ fn the_calendar_days_line_up_in_one_set_of_columns() {
         "columns should be evenly pitched, got {pitches:?}"
     );
 }
+
+#[test]
+fn the_calendar_has_no_gap_between_its_dates() {
+    // `egui::Grid` forces every cell to `spacing.interact_size`, 40pt wide by
+    // default. A 26pt date therefore sat in a 40pt column with a 14pt gap beside
+    // it that was never the grid's spacing — which is why setting `DAY_SPACING`
+    // to zero did nothing. The grid asks for its own minimum instead.
+    //
+    // Asserted as the calendar's whole width: seven columns and no gaps is exactly
+    // seven cells.
+    use egui_kittest::Harness;
+    let mut harness = Harness::new_ui_state(
+        |ui, width: &mut Option<f32>| {
+            let mut from = None;
+            let mut to = None;
+            let mut cal = super::calendar::Calendar::new((2021, 6));
+            cal.show(ui, &mut from, &mut to);
+            *width = Some(ui.min_rect().width());
+        },
+        None,
+    );
+    harness.set_size(egui::vec2(1240.0, 900.0));
+    harness.run();
+
+    let day = super::calendar::DAY_SIZE;
+    assert_eq!(
+        *harness.state(),
+        Some(day * 7.0),
+        "seven columns with no gap between them should be exactly seven cells wide"
+    );
+}

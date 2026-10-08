@@ -226,6 +226,16 @@ Two details that are not cosmetic:
   day it named. One grid cannot drift. The header row is *painted* rather than
   laid out for a second reason — it is row 0, so a real label there would size
   the columns to two letters instead of to the day buttons.
+- **The grid sets `min_col_width(DAY_SIZE)`, `Grid::spacing` is zero, and the
+  cells are `rounding(0.0)`.** All three, and each closes something the other two
+  do not. `egui::Grid` forces every cell to `spacing.interact_size` — 40pt wide by
+  default — so a 26pt date sat in a 40pt column with a 14pt gap beside it that
+  was never the grid's spacing, which is why zeroing the spacing did nothing. And
+  square corners matter for the same reason: rounded ones leave four notches at
+  every cell junction and reopen the gap they were meant to sit in.
+
+  None of the three is observable through accesskit, so
+  `day_cells_are_square_and_gapless` reads the source for them.
 - **Every month is padded to whole weeks.** Otherwise a 28-day February lays out
   as four rows and a 31-day one as five, and the picker changes height as the
   user pages.
