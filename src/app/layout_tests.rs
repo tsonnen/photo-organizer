@@ -2565,4 +2565,14 @@ fn one_click_on_a_day_filters_to_that_day_alone() {
         vec!["middle.jpg", "late.jpg"],
         "widening should keep the day that was already selected"
     );
+
+    // A third starts over on that day — "not that, this instead". Without it the
+    // range would silently absorb every later click and a fortnight could become a
+    // year with no way back.
+    click_day(&mut harness, 7);
+    assert_eq!(
+        drawn_photo_order(&harness),
+        vec!["early.jpg"],
+        "a third click should start over on the day it was given"
+    );
 }

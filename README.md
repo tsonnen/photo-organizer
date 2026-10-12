@@ -85,7 +85,7 @@ range**, and a **category**. All three have to hold for a photo to stay, so you 
 for "receipts, from 2021, that the model was sure about" in one go.
 
 Sort and filter sit on one row. The date range is picked from a calendar that opens over
-the grid: press 📅, click a day to select it alone, click a second to make a range,
+the grid: press 📅, click a day to select it alone, click a second to make a range and a third to start over,
 another to close it. Clicking the dates the other way round works too — pick the 20th then
 the 10th and you get the 10th to the 20th, not an empty range.
 

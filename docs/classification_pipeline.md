@@ -275,9 +275,14 @@ That leaves several details that are not cosmetic:
   rule as a first click. Widening a fortnight one click at a time is what picking
   one out actually looks like, and the old "third click starts over" threw the
   range away with no way to adjust a single bound.
+- **The two states are told apart by whether the bounds are the same day**, not by
+  a flag. Both bounds on one day is a single day, so the next click widens it; any
+  actual range swallows the click. A one-sided selection cannot arise — a click
+  always sets both — and is handled as "start over" so a stray one resets rather
+  than narrowing forever.
 - **Bounds are compared through their spans**, not their start dates: a bound drawn
   from a whole month covers that month's days, and ordering it by its first would
-  put a click on the 28th "inside" a range running to the 31st of the same month.
+  put the 28th "before" a range running to the 31st of the same month.
 - **Widening backwards swaps the two.** Clicking the dates in the order a person
   thinks of them — end, then start — is the natural gesture, and storing that
   inverted produces a range that reads as empty and silently filters the whole

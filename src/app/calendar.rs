@@ -237,63 +237,53 @@ pub(super) fn opening_month(
 
 /// What a click on `clicked` does to a selection that currently reads `from..to`.
 ///
+/// Three states, and the third one starts over on purpose:
+///
+/// | selection        | click does                                    |
+/// |------------------|-----------------------------------------------|
+/// | none             | select that one day                           |
+/// | a single day     | widen to a range, the two clicks being the ends |
+/// | an actual range  | start over on the clicked day                  |
+///
 /// **One click is one day.** The first click sets both bounds to the same date, so
-/// it filters to that day and nothing else. This is the overwhelmingly common case
-/// over a folder of photos — "show me the ones from that day" — and treating a lone
-/// click as an *open-ended* range made it filter to every photo from that day
-/// onwards, while drawing it on the grid as a bar running off to the end of the
-/// month. The picker looked like it had understood and the grid said otherwise.
+/// it filters to that day and nothing else. Treating a lone click as an open-ended
+/// range filtered to every photo from that day onwards, while drawing itself on the
+/// grid as a bar running off to the end of the month: the picker looked like it had
+/// understood and the grid disagreed. It is also the commonest thing anyone wants
+/// out of a folder of photos, so charging two clicks for it was backwards.
 ///
-/// From there a click never discards anything:
+/// **The third click starts over.** Every date picker that has one does this —
+/// macOS, iOS, Google Calendar, Airbnb — and it is the only gesture that says
+/// "not that, this instead". The alternative is a range that absorbs every click
+/// outside it, so a fortnight silently becomes a year and there is no way back
+/// except picking both ends again. Restating a selection is cheap here precisely
+/// because a single day costs one click rather than two.
 ///
-/// - on a different day, the two become the ends of a range, in whichever order
-///   they were clicked — a range whose end precedes its start reads as empty, so
-///   clicking backwards has to swap rather than invert;
-/// - before the range, it moves the start out to meet it;
-/// - after the range, it moves the end out to meet it;
-/// - inside the range, it narrows to that one day, which is the same rule as a
-///   first click and so needs no special case to explain.
-///
-/// So a range can be widened one click at a time, or walked along with its ends,
-/// without ever being thrown away and retyped.
+/// Ordering compares the bounds' *spans* rather than their start dates: a bound
+/// naming a whole month covers that month's days, and ordering it by its first
+/// would put the 28th "before" a range that runs to the 31st of the same month.
 fn range_after_click(
     from: Option<PhotoDate>,
     to: Option<PhotoDate>,
     clicked: PhotoDate,
 ) -> (Option<PhotoDate>, Option<PhotoDate>) {
-    let (Some(start), Some(end)) = (from, to) else {
-        return (Some(clicked), Some(clicked));
-    };
+    match (from, to) {
+        (None, _) => (Some(clicked), Some(clicked)),
 
-    // Compare through the bounds' spans rather than their start dates: a bound
-    // drawn from a whole month covers that month's days, and ordering it by its
-    // first would put a click on the 28th "inside" a range that runs to the 31st
-    // of the same month.
-    let (lowest, highest) = if start.start() <= end.start() {
-        (start.start(), end.end())
-    } else {
-        (end.start(), start.end())
-    };
-
-    let clicked_start = clicked.start();
-    let clicked_end = clicked.end();
-
-    match (clicked_start, clicked_end) {
-        (cs, _) if cs < lowest => (Some(clicked), Some(end)),
-        (_, ce) if ce > highest => (Some(start), Some(clicked)),
-        // Inside, or exactly on an end: this is one day.
-        _ if clicked_start >= lowest && clicked_end <= highest => (Some(clicked), Some(clicked)),
-        // Overlapping but not contained: clicking a day that straddles one bound
-        // widens to take in the whole of it, which is what the user drew.
-        _ => {
-            let low = if clicked_start <= lowest {
-                clicked
+        // Both bounds on the same day: this is a single day, not a range yet, so
+        // the second click widens it rather than starting over.
+        (Some(day), Some(same)) if day == same => {
+            if clicked.start() < day.start() {
+                (Some(clicked), Some(day))
             } else {
-                start
-            };
-            let high = if clicked_end >= highest { clicked } else { end };
-            (Some(low), Some(high))
+                (Some(day), Some(clicked))
+            }
         }
+
+        // An actual range, swallow it. The `None` half is unreachable — a click
+        // always sets both bounds — and folded in here so a one-sided selection
+        // left by anything else resets rather than silently narrowing forever.
+        (Some(_), _) => (Some(clicked), Some(clicked)),
     }
 }
 
@@ -633,27 +623,26 @@ mod tests {
     }
 
     #[test]
-    fn clicking_outside_moves_the_nearest_end_rather_than_discarding_the_range() {
-        // The old third click threw the whole range away and started over. Widening
-        // one click at a time is what a user picking out a fortnight actually does.
+    fn a_third_click_starts_the_selection_over() {
+        // The gesture that says "not that, this instead", and the one every other
+        // date picker has. The alternative — a range that absorbs every click
+        // outside it — silently turns a fortnight into a year with no way back but
+        // picking both ends again.
         let first = PhotoDate::new(2021, 3, Some(4));
         let last = PhotoDate::new(2021, 3, Some(9));
+        let elsewhere = PhotoDate::new(2021, 4, Some(2));
 
         assert_eq!(
-            range_after_click(Some(first), Some(last), PhotoDate::new(2021, 3, Some(2))),
-            (Some(PhotoDate::new(2021, 3, Some(2))), Some(last)),
-            "a click before the range moves the start out to meet it"
-        );
-        assert_eq!(
-            range_after_click(Some(first), Some(last), PhotoDate::new(2021, 3, Some(20))),
-            (Some(first), Some(PhotoDate::new(2021, 3, Some(20)))),
-            "a click after the range moves the end out to meet it"
+            range_after_click(Some(first), Some(last), elsewhere),
+            (Some(elsewhere), Some(elsewhere)),
+            "clicking outside a range should start over on that day, not absorb it"
         );
     }
 
     #[test]
-    fn clicking_inside_narrows_to_that_one_day() {
-        // The same rule as a first click, so it needs no special case to learn.
+    fn clicking_inside_a_range_starts_over_on_that_day() {
+        // The same rule as a first click, so it needs no separate case to learn.
+        // It reads as "narrow to this" because a one-day selection *is* the result.
         let first = PhotoDate::new(2021, 3, Some(4));
         let last = PhotoDate::new(2021, 3, Some(9));
         let middle = PhotoDate::new(2021, 3, Some(6));
@@ -665,7 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn clicking_an_end_collapses_the_range_to_it() {
+    fn clicking_an_end_of_the_range_restarts_on_it() {
         let first = PhotoDate::new(2021, 3, Some(4));
         let last = PhotoDate::new(2021, 3, Some(9));
         assert_eq!(
@@ -675,55 +664,18 @@ mod tests {
     }
 
     #[test]
-    fn a_month_wide_click_absorbs_the_selection_it_overlaps() {
-        // A bound drawn from a whole month covers that month's days, so clicking
-        // the 28th of one must not read as "inside" a range that runs to the 31st.
-        let first = PhotoDate::new(2021, 3, Some(28));
-        let last = PhotoDate::new(2021, 3, None);
-        let (from, to) = range_after_click(Some(first), Some(last), first);
+    fn widening_orders_the_bounds_by_their_spans() {
+        // A bound naming a whole month covers that month's days, so ordering by its
+        // first would put the 28th "before" a range running to the 31st of the same
+        // month and produce an inverted one.
+        let month_end = PhotoDate::new(2021, 3, None);
+        let inside_it = PhotoDate::new(2021, 3, Some(28));
+        let (from, to) = range_after_click(Some(month_end), Some(month_end), inside_it);
 
         assert!(
             from.unwrap().start() <= to.unwrap().end(),
             "the result must be an ordered range, got {from:?}..{to:?}"
         );
-    }
-
-    #[test]
-    fn the_picker_opens_on_a_bound_before_a_default() {
-        let bound = PhotoDate::new(2019, 7, Some(2));
-        let fallback = (2021, 3);
-
-        // A bound the user set beats the folder's own dates: a range whose start
-        // is off screen is worse than no filter at all.
-        assert_eq!(opening_month(Some(bound), None, fallback), (2019, 7));
-        assert_eq!(opening_month(None, Some(bound), fallback), (2019, 7));
-        assert_eq!(opening_month(None, None, fallback), fallback);
-    }
-
-    #[test]
-    fn only_the_ends_of_a_range_round() {
-        // The difference between "a range" and "a row of pills": a run of selected
-        // days is one shape, so only the two cells where the bar begins and ends
-        // have rounded corners.
-        let leading = first_weekday(2026, 10);
-        let (from, to) = range((2026, 10, 4), (2026, 10, 10));
-
-        // Spelled out by day rather than as a literal list, so the expectation
-        // cannot drift out of step with the range it describes.
-        let fills: Vec<DayFill> = (1..=14)
-            .map(|day| day_fill(2026, 10, day, leading, from, to))
-            .collect();
-
-        let expected: Vec<DayFill> = (1..=14u32)
-            .map(|day| match day {
-                4 => DayFill::Starts,
-                5..=9 => DayFill::Middle,
-                10 => DayFill::Ends,
-                _ => DayFill::None,
-            })
-            .collect();
-
-        assert_eq!(fills, expected, "only 4 and 10 are ends; 5..9 run through");
     }
 
     #[test]

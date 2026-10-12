@@ -283,13 +283,17 @@ re-exported from `profile_store` so existing `use` paths and the grid's badge ke
   picker and the crate alternatives are unusable here, so it is hand-rolled. Two invariants: every month is
   padded to **whole weeks** (`month_grid`), or the picker changes height as the user pages between a 28-day
   February and a 31-day May.
-  `range_after_click` is the selection state machine and its rules are worth stating outright, because each
-  one replaced a complaint: **one click is one day** (it sets both bounds — an open-ended reading filtered to
-  every photo from that day onwards while *drawing* as a bar to the end of the month, so the picker looked
-  right and the grid disagreed); **no click ever discards a selection** (before the range moves the start out
-  to meet it, after moves the end, inside narrows to that day); and widening **backwards swaps** the two,
-  because clicking end-then-start is the natural gesture and an inverted range reads as empty. Bounds are
-  compared through `start()`/`end()`, never by start date alone — a whole-month bound covers that month. `first_weekday` goes through `chrono` — a hand-rolled day count that is off by one shifts a whole
+  `range_after_click` is the selection state machine. Three rules, each of which replaced a complaint:
+  **one click is one day** (it sets both bounds — an open-ended reading filtered to every photo from that day
+  onwards while *drawing* as a bar to the end of the month, so the picker looked right and the grid
+  disagreed); **the second click widens**, and widening **backwards swaps** the two bounds, because clicking
+  end-then-start is the natural gesture and an inverted range reads as empty; and **the third click starts
+  over**, the "not that, this instead" gesture every other date picker has. The absorb-it-alternative — a
+  range that grows to meet any later click — was tried and reverted: a fortnight silently becomes a year
+  with no way back. Restating is cheap *because* a single day costs one click. The two states are told apart
+  by whether the bounds are the same day, not by a flag, and a one-sided selection (unreachable from a
+  click) resets rather than narrowing forever. Bounds compare through `start()`/`end()`, never by start date
+  alone — a whole-month bound covers that month. `first_weekday` goes through `chrono` — a hand-rolled day count that is off by one shifts a whole
   month by a column, and every wrong day then reads as a real date the user could pick.
   Three layout facts that cost measurement to find, all of which look like styling and are not:
   - The weekday initials and the days are rows of **one** grid, not two. Two grids means two independent
