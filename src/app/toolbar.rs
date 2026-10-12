@@ -22,6 +22,14 @@ const ALL: &str = "All categories";
 /// What an open-ended date bound reads as in the filter row.
 const OPEN_END: &str = "…";
 
+/// Space below the sort/filter row, in points.
+///
+/// egui's default `item_spacing.y`, so the gap reads as part of the toolbar's
+/// rhythm rather than as a deliberate-looking number. The row is a bar of
+/// controls; without a margin underneath it reads as the last line of whatever
+/// comes after.
+const ROW_MARGIN: f32 = 6.0;
+
 /// What the filters do beyond narrowing the view, said on hover rather than
 /// printed under the row they apply to.
 ///
@@ -253,6 +261,10 @@ impl PhotoOrganizerApp {
                 ui.label(format!("{visible} of {staged} shown"));
             }
         });
+
+        // Breathing room under the bar, so it reads as controls rather than as the
+        // last line of the grid.
+        ui.add_space(ROW_MARGIN);
     }
 
     /// The date control: the range as it stands, and a button that opens the
