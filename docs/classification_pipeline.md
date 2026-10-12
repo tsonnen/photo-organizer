@@ -263,10 +263,25 @@ That leaves several details that are not cosmetic:
 - **Every month is padded to whole weeks.** Otherwise a 28-day February lays out
   as four rows and a 31-day one as five, and the picker changes height as the
   user pages.
-- **A click that closes a range before it opens swaps the two.** Clicking the
-  dates in the order a person thinks of them — end, then start — is the natural
-  gesture, and storing that inverted produces a range that reads as empty and
-  silently filters the whole folder away.
+- **One click is one day.** The first click sets *both* bounds, so it filters to
+  that day and nothing else. Treating a lone click as an open-ended range filtered
+  to every photo from that day onwards, while drawing it on the grid as a bar
+  running to the end of the month — the picker looked like it had understood and the
+  grid disagreed. It is also the overwhelmingly common request over a folder of
+  photos, so making it cost two clicks was backwards.
+- **A later click never discards anything** (`range_after_click`). A second click
+  makes a range; a click before the range moves the start out to meet it; a click
+  after moves the end; a click inside narrows to that one day, which is the same
+  rule as a first click. Widening a fortnight one click at a time is what picking
+  one out actually looks like, and the old "third click starts over" threw the
+  range away with no way to adjust a single bound.
+- **Bounds are compared through their spans**, not their start dates: a bound drawn
+  from a whole month covers that month's days, and ordering it by its first would
+  put a click on the 28th "inside" a range running to the 31st of the same month.
+- **Widening backwards swaps the two.** Clicking the dates in the order a person
+  thinks of them — end, then start — is the natural gesture, and storing that
+  inverted produces a range that reads as empty and silently filters the whole
+  folder away.
 
 `first_weekday` goes through `chrono` rather than a hand-rolled day count: an
 off-by-one there shifts a whole month by a column, and every wrong day then reads

@@ -2520,3 +2520,49 @@ fn opening_the_calendar_does_not_move_the_grid() {
         "opening the calendar must not move the grid a single point"
     );
 }
+
+#[test]
+fn one_click_on_a_day_filters_to_that_day_alone() {
+    // The end-to-end claim behind the rework. One click used to set a start with no
+    // end, so it filtered to every photo from that day onwards — while the grid
+    // drew it as a bar running to the end of the month, so the picker looked like
+    // it had understood and the contents disagreed.
+    let mut harness = app_with(
+        vec![
+            photo_on("early", PhotoDate::new(2021, 6, Some(7)), "Beach Trip"),
+            photo_on("middle", PhotoDate::new(2021, 6, Some(9)), "Beach Trip"),
+            photo_on("late", PhotoDate::new(2021, 6, Some(20)), "Beach Trip"),
+        ],
+        |_| {},
+    );
+    harness.run();
+    click_button(&mut harness, "📅");
+
+    // One click, on the 9th.
+    click_day(&mut harness, 9);
+
+    assert_eq!(
+        drawn_photo_order(&harness),
+        vec!["middle.jpg"],
+        "a single click should show that day alone, not everything after it"
+    );
+
+    // And it reads as one date rather than as a range one day wide.
+    let text = all_labels(&harness);
+    assert!(
+        text.iter().any(|t| t == "2021-06-09"),
+        "the row should show a single date, got {text:#?}"
+    );
+    assert!(
+        !text.iter().any(|t| t.contains('→')),
+        "a one-day selection is not a range, got {text:#?}"
+    );
+
+    // A second click turns it into a range, without discarding the first day.
+    click_day(&mut harness, 20);
+    assert_eq!(
+        drawn_photo_order(&harness),
+        vec!["middle.jpg", "late.jpg"],
+        "widening should keep the day that was already selected"
+    );
+}

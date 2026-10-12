@@ -288,7 +288,11 @@ impl PhotoOrganizerApp {
     ) {
         ui.label("Dates");
         ui.label(match (filters.date_from, filters.date_to) {
-            (None, None) => "Any".to_string(),
+            (None, _) => "Any".to_string(),
+            // A single day is the common case — one click sets both bounds — and
+            // spelling it "7 June 2021 → 7 June 2021" reads as a range that happens
+            // to be one day wide rather than as the day that was picked.
+            (Some(one), Some(same)) if one == same => format_date(&one),
             (from, to) => format!(
                 "{} → {}",
                 from.map_or_else(|| OPEN_END.to_string(), |d| format_date(&d)),

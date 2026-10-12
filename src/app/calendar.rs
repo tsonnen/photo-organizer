@@ -158,12 +158,10 @@ fn in_range(date: PhotoDate, from: PhotoDate, to: PhotoDate) -> bool {
     date.end() >= from.start() && date.start() <= to.end()
 }
 
-/// The fill for one day, given the range as it stands.
+/// The fill for one day, given the selection as it stands.
 ///
-/// An open range — a first click, so one bound and no other — fills from that
-/// bound to the end of its month, so the bar visibly runs off towards the edge the
-/// user has not chosen yet. That is also what makes a single click read as "from
-/// here" rather than as one already-closed day.
+/// Only the closed case is reachable: one click sets *both* bounds, so there is no
+/// "open" range to draw and nothing to show running off the edge of a month.
 pub(super) fn fill_for(
     from: Option<PhotoDate>,
     to: Option<PhotoDate>,
@@ -174,23 +172,7 @@ pub(super) fn fill_for(
 ) -> DayFill {
     match (from, to) {
         (Some(start), Some(end)) => day_fill(year, month, day, leading, start, end),
-        (Some(start), None) => day_fill(
-            year,
-            month,
-            day,
-            leading,
-            start,
-            PhotoDate::new(start.year, start.month, None),
-        ),
-        (None, Some(end)) => day_fill(
-            year,
-            month,
-            day,
-            leading,
-            PhotoDate::new(end.year, end.month, None),
-            end,
-        ),
-        (None, None) => DayFill::None,
+        _ => DayFill::None,
     }
 }
 
@@ -253,24 +235,65 @@ pub(super) fn opening_month(
         .unwrap_or(fallback)
 }
 
-/// What a click on `clicked` does to a range that currently reads `from..to`.
+/// What a click on `clicked` does to a selection that currently reads `from..to`.
 ///
-/// First click starts a range, second closes it, and a third starts over. Closing
-/// on a click *before* the start swaps the two rather than storing an inverted
-/// range: a range whose end precedes its start reads as empty, so clicking the
-/// dates backwards — the natural way to drag out a selection in one's head — would
-/// quietly filter everything away.
+/// **One click is one day.** The first click sets both bounds to the same date, so
+/// it filters to that day and nothing else. This is the overwhelmingly common case
+/// over a folder of photos — "show me the ones from that day" — and treating a lone
+/// click as an *open-ended* range made it filter to every photo from that day
+/// onwards, while drawing it on the grid as a bar running off to the end of the
+/// month. The picker looked like it had understood and the grid said otherwise.
+///
+/// From there a click never discards anything:
+///
+/// - on a different day, the two become the ends of a range, in whichever order
+///   they were clicked — a range whose end precedes its start reads as empty, so
+///   clicking backwards has to swap rather than invert;
+/// - before the range, it moves the start out to meet it;
+/// - after the range, it moves the end out to meet it;
+/// - inside the range, it narrows to that one day, which is the same rule as a
+///   first click and so needs no special case to explain.
+///
+/// So a range can be widened one click at a time, or walked along with its ends,
+/// without ever being thrown away and retyped.
 fn range_after_click(
     from: Option<PhotoDate>,
     to: Option<PhotoDate>,
     clicked: PhotoDate,
 ) -> (Option<PhotoDate>, Option<PhotoDate>) {
-    match (from, to) {
-        (None, _) | (Some(_), Some(_)) => (Some(clicked), None),
-        (Some(start), None) if clicked.sort_key() < start.sort_key() => {
-            (Some(clicked), Some(start))
+    let (Some(start), Some(end)) = (from, to) else {
+        return (Some(clicked), Some(clicked));
+    };
+
+    // Compare through the bounds' spans rather than their start dates: a bound
+    // drawn from a whole month covers that month's days, and ordering it by its
+    // first would put a click on the 28th "inside" a range that runs to the 31st
+    // of the same month.
+    let (lowest, highest) = if start.start() <= end.start() {
+        (start.start(), end.end())
+    } else {
+        (end.start(), start.end())
+    };
+
+    let clicked_start = clicked.start();
+    let clicked_end = clicked.end();
+
+    match (clicked_start, clicked_end) {
+        (cs, _) if cs < lowest => (Some(clicked), Some(end)),
+        (_, ce) if ce > highest => (Some(start), Some(clicked)),
+        // Inside, or exactly on an end: this is one day.
+        _ if clicked_start >= lowest && clicked_end <= highest => (Some(clicked), Some(clicked)),
+        // Overlapping but not contained: clicking a day that straddles one bound
+        // widens to take in the whole of it, which is what the user drew.
+        _ => {
+            let low = if clicked_start <= lowest {
+                clicked
+            } else {
+                start
+            };
+            let high = if clicked_end >= highest { clicked } else { end };
+            (Some(low), Some(high))
         }
-        (Some(start), None) => (Some(start), Some(clicked)),
     }
 }
 
@@ -573,43 +596,96 @@ mod tests {
     }
 
     #[test]
-    fn a_click_starts_a_range_and_the_next_closes_it() {
-        let first = PhotoDate::new(2021, 3, Some(4));
-        let second = PhotoDate::new(2021, 3, Some(9));
-
-        let (from, to) = range_after_click(None, None, first);
-        assert_eq!(from, Some(first));
+    fn one_click_is_one_day() {
+        // The whole point. A lone click used to set the start with no end, which
+        // filtered to every photo from that day onwards while drawing itself on the
+        // grid as a bar running to the end of the month — so the picker looked like
+        // it had understood and the grid disagreed.
+        let day = PhotoDate::new(2021, 3, Some(4));
         assert_eq!(
-            to, None,
-            "the first click opens the range, it does not close it"
+            range_after_click(None, None, day),
+            (Some(day), Some(day)),
+            "one click should select that day and nothing else"
         );
-
-        let (from, to) = range_after_click(from, to, second);
-        assert_eq!((from, to), (Some(first), Some(second)));
     }
 
     #[test]
-    fn closing_a_range_backwards_swaps_it_rather_than_inverting_it() {
-        // Clicking the dates in the order a person thinks about them — end, then
-        // start — has to leave a usable range. Storing it inverted reads as empty
-        // and silently filters everything away.
+    fn a_second_click_widens_it_to_a_range() {
+        let first = PhotoDate::new(2021, 3, Some(4));
+        let second = PhotoDate::new(2021, 3, Some(9));
+        assert_eq!(
+            range_after_click(Some(first), Some(first), second),
+            (Some(first), Some(second))
+        );
+    }
+
+    #[test]
+    fn widening_backwards_still_leaves_the_range_the_right_way_round() {
+        // Clicking the dates in the order a person thinks of them — end, then start
+        // — has to leave a usable range. Storing it inverted reads as empty and
+        // silently filters everything away.
         let early = PhotoDate::new(2021, 3, Some(4));
         let late = PhotoDate::new(2021, 3, Some(9));
 
-        let (from, to) = range_after_click(Some(late), None, early);
+        let (from, to) = range_after_click(Some(late), Some(late), early);
         assert_eq!((from, to), (Some(early), Some(late)));
         assert!(from.unwrap().start() <= to.unwrap().end());
     }
 
     #[test]
-    fn a_third_click_starts_the_range_over() {
+    fn clicking_outside_moves_the_nearest_end_rather_than_discarding_the_range() {
+        // The old third click threw the whole range away and started over. Widening
+        // one click at a time is what a user picking out a fortnight actually does.
         let first = PhotoDate::new(2021, 3, Some(4));
         let last = PhotoDate::new(2021, 3, Some(9));
-        let elsewhere = PhotoDate::new(2021, 4, Some(2));
 
-        let (from, to) = range_after_click(Some(first), Some(last), elsewhere);
-        assert_eq!(from, Some(elsewhere));
-        assert_eq!(to, None);
+        assert_eq!(
+            range_after_click(Some(first), Some(last), PhotoDate::new(2021, 3, Some(2))),
+            (Some(PhotoDate::new(2021, 3, Some(2))), Some(last)),
+            "a click before the range moves the start out to meet it"
+        );
+        assert_eq!(
+            range_after_click(Some(first), Some(last), PhotoDate::new(2021, 3, Some(20))),
+            (Some(first), Some(PhotoDate::new(2021, 3, Some(20)))),
+            "a click after the range moves the end out to meet it"
+        );
+    }
+
+    #[test]
+    fn clicking_inside_narrows_to_that_one_day() {
+        // The same rule as a first click, so it needs no special case to learn.
+        let first = PhotoDate::new(2021, 3, Some(4));
+        let last = PhotoDate::new(2021, 3, Some(9));
+        let middle = PhotoDate::new(2021, 3, Some(6));
+
+        assert_eq!(
+            range_after_click(Some(first), Some(last), middle),
+            (Some(middle), Some(middle))
+        );
+    }
+
+    #[test]
+    fn clicking_an_end_collapses_the_range_to_it() {
+        let first = PhotoDate::new(2021, 3, Some(4));
+        let last = PhotoDate::new(2021, 3, Some(9));
+        assert_eq!(
+            range_after_click(Some(first), Some(last), last),
+            (Some(last), Some(last))
+        );
+    }
+
+    #[test]
+    fn a_month_wide_click_absorbs_the_selection_it_overlaps() {
+        // A bound drawn from a whole month covers that month's days, so clicking
+        // the 28th of one must not read as "inside" a range that runs to the 31st.
+        let first = PhotoDate::new(2021, 3, Some(28));
+        let last = PhotoDate::new(2021, 3, None);
+        let (from, to) = range_after_click(Some(first), Some(last), first);
+
+        assert!(
+            from.unwrap().start() <= to.unwrap().end(),
+            "the result must be an ordered range, got {from:?}..{to:?}"
+        );
     }
 
     #[test]
@@ -651,33 +727,17 @@ mod tests {
     }
 
     #[test]
-    fn an_open_range_runs_off_the_edge_of_its_month() {
-        // The state after a single click: one bound, no other. The bar has to look
-        // unfinished, which is what tells the user a second click is expected — and
-        // it is why the fill cannot simply treat a missing bound as "nothing
-        // selected" and show a bare number on a day the user just clicked.
+    fn no_selection_leaves_the_month_unmarked() {
+        // A bound with no partner is unreachable now that one click sets both, so
+        // the only thing left to draw is the closed case.
         let leading = first_weekday(2026, 11);
-        let clicked = PhotoDate::new(2026, 11, Some(20));
-
-        let fills: Vec<DayFill> = (1..=30)
-            .map(|day| fill_for(Some(clicked), None, 2026, 11, day, leading))
-            .collect();
-
-        assert!(
-            fills[..19].iter().all(|f| !f.is_selected()),
-            "before the click"
-        );
-        assert_eq!(fills[19], DayFill::Starts, "the clicked day opens the bar");
-        assert!(
-            fills[20..].iter().all(|f| f.is_selected()),
-            "the bar runs to the end of the month, got {:?}",
-            &fills[20..]
-        );
-        assert_eq!(
-            fills[29],
-            DayFill::Ends,
-            "and stops at the month's edge rather than running past it"
-        );
+        for day in [1, 15, 30] {
+            assert_eq!(
+                fill_for(None, None, 2026, 11, day, leading),
+                DayFill::None,
+                "day {day} should be unmarked with nothing selected"
+            );
+        }
     }
 
     #[test]
