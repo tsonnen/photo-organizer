@@ -56,6 +56,12 @@ const ROW_SPACING: f32 = 6.0;
 /// a lone selected day a circle and a run of them a stadium.
 const BAR_RADIUS: f32 = DAY_SIZE / 2.0;
 
+/// Width reserved at each end of the heading for the two arrows, in points.
+///
+/// Fixed rather than measured, so the title between them is always centred: the
+/// two ends have to be the same width, and they are the same two glyph pairs.
+const ARROW_SLOT: f32 = 40.0;
+
 /// The earliest year the arrows will page to, so they stop somewhere rather than
 /// running off into a year before any camera existed.
 const MIN_YEAR: i32 = 1900;
@@ -298,30 +304,59 @@ impl Calendar {
     ) {
         let (year, month) = self.view;
 
-        // The month is the heading, not a control. It was clickable to jump a year
-        // at one point, which is not something anyone would try.
+        // The heading: two arrows, a centred title, two more arrows, laid out in
+        // the grid's own width so it lines up with the days below.
         //
-        // Arrows flank it rather than sitting in a corner: a title with the
-        // navigation on the far side of the widget reads as belonging to whatever
-        // is over there, and the two chevrons together read as one control.
-        ui.horizontal(|ui| {
-            if ui.button("‹").on_hover_text("Previous month").clicked() {
-                self.view = shift_month(year, month, -1);
-            }
-            ui.vertical_centered(|ui| {
-                ui.label(egui::RichText::new(month_name(month)).heading().strong());
-                ui.label(egui::RichText::new(year.to_string()).heading());
+        // The title slot is fixed rather than "whatever is left over". A nested
+        // `with_layout` ui takes *all* the remaining width, which pushed the right
+        // arrows out past the end of the band entirely; and a plain `label`
+        // left-aligns instead, which put "October 2026" at x=84 rather than x=141.
+        // Reserving the same width at each end is what centres it: the arrows are
+        // symmetric, so the middle sits centred on the band, and a long month name
+        // cannot widen one side and shove the heading off axis.
+        //
+        // Constrained to the grid's width because a bare `ui.horizontal` greedily
+        // fills the panel, and a filter panel is much wider than seven 38pt days:
+        // the arrows spread out to the panel edges and the year buttons fall off
+        // the right of it entirely.
+        let width = DAY_SIZE * WEEKDAYS.len() as f32;
+        ui.allocate_ui(egui::vec2(width, ui.spacing().interact_size.y), |ui| {
+            // Three explicit slots rather than a row of widgets. A nested
+            // `with_layout` ui claims *all* the remaining width, which left the
+            // right arrows nothing and pushed them past the end of the band; and a
+            // plain `label` left-aligns, which put "October 2026" at x=84 rather
+            // than x=141. Reserving equal slots at each end is what centres the
+            // title — and it stays centred for "September 2026", whose wider label
+            // would otherwise push the whole heading off axis.
+            ui.horizontal(|ui| {
+                let mut arrows = |ui: &mut egui::Ui, steps: [(&str, &str, i32); 2]| {
+                    for (arrow, tooltip, by) in steps {
+                        if ui.button(arrow).on_hover_text(tooltip).clicked() {
+                            self.view = shift_month(year, month, by);
+                        }
+                    }
+                };
+                ui.allocate_ui(egui::vec2(ARROW_SLOT, ui.spacing().interact_size.y), |ui| {
+                    arrows(
+                        ui,
+                        [("«", "Previous year", -12), ("‹", "Previous month", -1)],
+                    );
+                });
+                ui.allocate_ui_with_layout(
+                    egui::vec2(width - ARROW_SLOT * 2.0, ui.spacing().interact_size.y),
+                    egui::Layout::top_down(egui::Align::Center),
+                    |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("{} {}", month_name(month), year))
+                                .text_style(egui::TextStyle::Heading)
+                                .strong(),
+                        );
+                    },
+                );
+                ui.allocate_ui(egui::vec2(ARROW_SLOT, ui.spacing().interact_size.y), |ui| {
+                    arrows(ui, [("›", "Next month", 1), ("»", "Next year", 12)]);
+                });
             });
-            if ui.button("›").on_hover_text("Next month").clicked() {
-                self.view = shift_month(year, month, 1);
-            }
-            ui.separator();
-            if ui.button("«").on_hover_text("Previous year").clicked() {
-                self.view = shift_month(year, month, -12);
-            }
-            if ui.button("»").on_hover_text("Next year").clicked() {
-                self.view = shift_month(year, month, 12);
-            }
         });
 
         // The weekday initials are painted into the same seven columns as the days

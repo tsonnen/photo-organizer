@@ -296,6 +296,13 @@ re-exported from `profile_store` so existing `use` paths and the grid's badge ke
   Days stay real `Button`s via `add_sized` rather than painted text, so the calendar is keyboard-reachable
   and the layout tests can find a day by its label. Month and year navigation is `‹`/`›`/`«`/`»`,
   deliberately *not* wired to the month label.
+  - The heading is **three explicit slots** — `ARROW_SLOT`, title, `ARROW_SLOT` — in a band the width of
+    the grid, not a row of widgets. A bare `ui.horizontal` greedily fills the panel, and a filter panel is
+    much wider than seven 38pt days: the arrows spread to the panel edges and `«`/`»` land outside it,
+    clipped. A nested `with_layout` ui is no better — it claims *all* the remaining width, leaving the
+    right arrows nothing. And a plain `label` left-aligns in its slot rather than centring. Equal slots at
+    each end are what centre the title, and they keep it centred for "September 2026", whose wider label
+    would otherwise push the heading off axis. Do not "simplify" this into a `horizontal`.
 - `PhotoDate.day` is `Option<u32>` and `photo_cache.day` is nullable. A row written before the column has
   none, and `Option` says "unknown" without inventing a day nobody recorded; `StagedItem` carries a whole
   `PhotoDate` rather than loose year/month/day so the three cannot drift. Range filtering is interval

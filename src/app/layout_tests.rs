@@ -2292,3 +2292,107 @@ fn the_calendar_has_no_gap_between_its_dates() {
         "adjacent days should be exactly one cell apart"
     );
 }
+
+#[test]
+fn the_heading_is_centred_over_the_grid_and_fits_inside_it() {
+    // Three bugs in one row, all of which look like styling and are not.
+    //
+    // A bare `ui.horizontal` greedily fills the panel, so in a 400pt filter panel
+    // the arrows spread to the panel edges and `«`/`»` land *outside* it, clipped.
+    // Stacking the month and the year into a `vertical_centered` puts the title on
+    // two lines and leaves `‹` and `›` at different heights. And a plain `label`
+    // left-aligns inside whatever slot it is given, which is not the same as
+    // centring it.
+    use egui_kittest::Harness;
+
+    let heading = |month: u32| {
+        let mut harness = Harness::new_ui_state(
+            |ui, _: &mut ()| {
+                let (mut from, mut to) = (None, None);
+                let mut cal = super::calendar::Calendar::new((2026, month));
+                cal.show(
+                    ui,
+                    &mut from,
+                    &mut to,
+                    PhotoDate::new(2026, month, Some(11)),
+                );
+            },
+            (),
+        );
+        // Wider than seven 38pt days on purpose: that is the panel this is drawn
+        // in, and the width the arrows used to escape.
+        harness.set_size(egui::vec2(400.0, 700.0));
+        harness.run();
+
+        let bounds = |label: &str| {
+            harness
+                .kittest_state()
+                .query_all(by().recursive(true))
+                .find_map(|node| {
+                    let l = node.label().or_else(|| node.value())?;
+                    (l == label && format!("{:?}", node.role()).contains("Button"))
+                        .then(|| node.raw_bounds().unwrap())
+                })
+                .unwrap_or_else(|| panic!("no heading button {label}"))
+        };
+
+        // The grid the heading is meant to sit over, read from a day cell.
+        let grid = harness
+            .kittest_state()
+            .query_all(by().recursive(true))
+            .filter_map(|n| {
+                let l = n.label().or_else(|| n.value())?;
+                (l.parse::<u32>().is_ok()).then(|| n.raw_bounds().unwrap())
+            })
+            .fold(None::<(f64, f64)>, |acc: Option<(f64, f64)>, b| {
+                Some(match acc {
+                    None => (b.x0, b.x1),
+                    Some((lo, hi)) => (lo.min(b.x0), hi.max(b.x1)),
+                })
+            })
+            .expect("no day cells");
+        let title = harness
+            .kittest_state()
+            .query_all(by().recursive(true))
+            .find_map(|n| {
+                let l = n.label().or_else(|| n.value())?;
+                (l.ends_with("2026")).then(|| n.raw_bounds().unwrap())
+            })
+            .expect("no month title");
+
+        (
+            bounds("«"),
+            bounds("»"),
+            title,
+            grid,
+            (grid.0 + grid.1) / 2.0,
+        )
+    };
+
+    for month in [1u32, 9, 10, 12] {
+        let (prev_year, next_year, title, grid, grid_centre) = heading(month);
+        let title_centre = (title.x0 + title.x1) / 2.0;
+
+        assert!(
+            title_centre - grid_centre < 2.0 && grid_centre - title_centre < 2.0,
+            "month {month}: title centred at {title_centre} against a grid centre of {grid_centre}"
+        );
+        // The long month names are the ones that would break it: a wider title
+        // widens the slot it is in unless the arrows reserve their own.
+        assert!(
+            title.x1 < next_year.x0,
+            "month {}: title (ends {:?}) overlaps the next-year arrow (starts {:?})",
+            month,
+            title.x1,
+            next_year.x0
+        );
+        assert!(
+            next_year.x1 <= grid.1 + 2.0,
+            "month {}: the year arrows (end {:?}) escape the grid (ends {:?})",
+            month,
+            next_year.x1,
+            grid.1
+        );
+        assert!(prev_year.x0 >= grid.0 - 2.0, "month {month}: escapes left");
+    }
+}
