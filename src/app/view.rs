@@ -287,6 +287,17 @@ pub(super) fn category_choices<'a>(rows: impl IntoIterator<Item = Row<'a>>) -> V
     names
 }
 
+/// Today, as the calendar marks it.
+///
+/// Passed into the picker rather than read there so that "today" is one decision
+/// made in one place — and so a test can hand the calendar a date and assert on
+/// the ring instead of on the wall clock.
+pub(super) fn today() -> PhotoDate {
+    use chrono::Datelike;
+    let now = chrono::Local::now().date_naive();
+    PhotoDate::new(now.year() as u32, now.month(), Some(now.day()))
+}
+
 /// The newest `(year, month)` among the staged photos, or today's if nothing is
 /// staged.
 ///

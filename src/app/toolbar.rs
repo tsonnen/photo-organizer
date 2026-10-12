@@ -279,7 +279,12 @@ impl PhotoOrganizerApp {
             let mut picker = calendar::Calendar::new(self.calendar.month.unwrap_or(
                 calendar::opening_month(self.filters.date_from, self.filters.date_to, newest),
             ));
-            picker.show(ui, &mut self.filters.date_from, &mut self.filters.date_to);
+            picker.show(
+                ui,
+                &mut self.filters.date_from,
+                &mut self.filters.date_to,
+                view::today(),
+            );
             self.calendar.month = Some(picker.month());
         }
 

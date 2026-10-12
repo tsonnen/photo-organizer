@@ -210,14 +210,23 @@ which reads correctly at every precision —
 
 `src/app/calendar.rs`. egui 0.30 ships no date picker and the obvious crate
 alternative is either unmaintained or absent from this project's registry, so it
-is a month grid: weekday header, the days of one month, `◀`/`▶` for months and
-`«`/`»` for years.
+is a month grid: weekday header, the days of one month, `‹`/`›` for months and
+`«`/`»` for years. Weeks start on Sunday and the month is a heading flanked by the
+month arrows.
 
 The month/year navigation is deliberately *not* wired to the month label. It was,
 first: a label that silently jumps a year when clicked is not something anyone
 tries, and it made the control's purpose undiscoverable.
 
-Two details that are not cosmetic:
+A selected range is drawn as **one continuous bar per week**, not a row of filled
+squares, and that is the reason for most of the geometry here. `day_fill`
+classifies every day as the start, middle or end of the bar — by looking at
+whether the day either side of it is *also* selected and in the *same row of the
+grid* — and `DayFill::rounding` rounds only the corners the bar actually turns at.
+Round all four corners on every day and the range reads as a row of separate
+pills; round none and it is a plain block with two square ends.
+
+That leaves several details that are not cosmetic:
 
 - **The weekday initials and the days are rows of one `Grid`, not two.** They
   were two to begin with, and nothing made their columns agree: the pitch turned
@@ -226,16 +235,22 @@ Two details that are not cosmetic:
   day it named. One grid cannot drift. The header row is *painted* rather than
   laid out for a second reason — it is row 0, so a real label there would size
   the columns to two letters instead of to the day buttons.
-- **The grid sets `min_col_width(DAY_SIZE)`, `Grid::spacing` is zero, and the
-  cells are `rounding(0.0)`.** All three, and each closes something the other two
-  do not. `egui::Grid` forces every cell to `spacing.interact_size` — 40pt wide by
-  default — so a 26pt date sat in a 40pt column with a 14pt gap beside it that
-  was never the grid's spacing, which is why zeroing the spacing did nothing. And
-  square corners matter for the same reason: rounded ones leave four notches at
-  every cell junction and reopen the gap they were meant to sit in.
+- **The grid sets `min_col_width(DAY_SIZE)` and its horizontal spacing is zero.**
+  `egui::Grid` forces every cell to `spacing.interact_size` — 40pt wide by default
+  — so a day smaller than that sits in a wider column, and the difference reads as
+  a gap beside it that was never the grid's spacing, which is why zeroing the
+  spacing did nothing. With the cells abutting, a run of selected days is one
+  shape: this is the whole reason the bar reads as a bar.
 
-  None of the three is observable through accesskit, so
-  `day_cells_are_square_and_gapless` reads the source for them.
+  The *vertical* spacing is deliberately not zero. A month grid with no gap
+  between weeks is a dense block in which a range spilling into the next week
+  looks continuous with itself; a small gap makes each week its own bar, which is
+  what makes a range that wraps legible. Neither is observable through accesskit,
+  so `the_calendar_has_no_gap_between_its_dates` measures two adjacent day cells
+  instead.
+- **Unselected days have no cell at all** — just the number. There is no shape to
+  be square or rounded, which is why `DayFill::None` carries a transparent fill.
+  Corner rounding is a property of the *bar*, not of a date.
 - **Every month is padded to whole weeks.** Otherwise a 28-day February lays out
   as four rows and a 31-day one as five, and the picker changes height as the
   user pages.

@@ -2114,7 +2114,7 @@ fn the_calendar_picks_a_range_of_days() {
     click_button(&mut harness, "📅");
     // June 2021, where `newest_date` leaves the picker for this folder.
     assert!(
-        find_label(&harness, "Label", "06/2021"),
+        find_label(&harness, "Label", "June") && find_label(&harness, "Label", "2021"),
         "the picker should open on the newest month in the folder"
     );
 
@@ -2185,23 +2185,26 @@ fn paging_the_calendar_reaches_other_months_and_years() {
     // a folder of one month still has to be filterable by any month.
     let mut harness = with_filter_panel();
     click_button(&mut harness, "📅");
-    assert!(find_label(&harness, "Label", "06/2021"));
+    assert!(find_label(&harness, "Label", "June"));
 
-    click_button(&mut harness, "◀");
-    assert!(find_label(&harness, "Label", "05/2021"), "back one month");
+    click_button(&mut harness, "‹");
+    assert!(find_label(&harness, "Label", "May"), "back one month");
 
-    click_button(&mut harness, "▶");
-    click_button(&mut harness, "▶");
-    assert!(
-        find_label(&harness, "Label", "07/2021"),
-        "forward two months"
-    );
+    click_button(&mut harness, "›");
+    click_button(&mut harness, "›");
+    assert!(find_label(&harness, "Label", "July"), "forward two months");
 
     click_button(&mut harness, "»");
-    assert!(find_label(&harness, "Label", "07/2022"), "forward a year");
+    assert!(
+        find_label(&harness, "Label", "July") && find_label(&harness, "Label", "2022"),
+        "forward a year"
+    );
 
     click_button(&mut harness, "«");
-    assert!(find_label(&harness, "Label", "07/2021"), "back a year");
+    assert!(
+        find_label(&harness, "Label", "July") && find_label(&harness, "Label", "2021"),
+        "back a year"
+    );
 }
 
 #[test]
@@ -2221,7 +2224,7 @@ fn the_calendar_days_line_up_in_one_set_of_columns() {
             // 1 June 2021 was a Tuesday, so "1" leads column 1 and column 0 is a
             // spacer.
             let mut cal = super::calendar::Calendar::new((2021, 6));
-            cal.show(ui, &mut from, &mut to);
+            cal.show(ui, &mut from, &mut to, PhotoDate::new(2021, 6, Some(11)));
         },
         (),
     );
@@ -2251,30 +2254,41 @@ fn the_calendar_days_line_up_in_one_set_of_columns() {
 #[test]
 fn the_calendar_has_no_gap_between_its_dates() {
     // `egui::Grid` forces every cell to `spacing.interact_size`, 40pt wide by
-    // default. A 26pt date therefore sat in a 40pt column with a 14pt gap beside
-    // it that was never the grid's spacing — which is why setting `DAY_SPACING`
-    // to zero did nothing. The grid asks for its own minimum instead.
-    //
-    // Asserted as the calendar's whole width: seven columns and no gaps is exactly
-    // seven cells.
+    // default. A day smaller than that therefore sat in a wider column with the
+    // difference reading as a gap beside it — which was never the grid's spacing,
+    // and is why zeroing the spacing did nothing. The grid asks for its own
+    // minimum instead, so consecutive days are exactly one cell apart.
     use egui_kittest::Harness;
     let mut harness = Harness::new_ui_state(
-        |ui, width: &mut Option<f32>| {
+        |ui, _: &mut ()| {
             let mut from = None;
             let mut to = None;
+            // 1 June 2021 was a Monday, so "2" and "3" are in one row together.
             let mut cal = super::calendar::Calendar::new((2021, 6));
-            cal.show(ui, &mut from, &mut to);
-            *width = Some(ui.min_rect().width());
+            cal.show(ui, &mut from, &mut to, PhotoDate::new(2021, 6, Some(11)));
         },
-        None,
+        (),
     );
     harness.set_size(egui::vec2(1240.0, 900.0));
     harness.run();
 
-    let day = super::calendar::DAY_SIZE;
+    let left_of = |label: &str| {
+        harness
+            .kittest_state()
+            .query_all(by().recursive(true))
+            .find(|node| {
+                format!("{:?}", node.role()).contains("Button")
+                    && node.label().or_else(|| node.value()).as_deref() == Some(label)
+            })
+            .and_then(|node| node.raw_bounds())
+            .map(|b| b.x0)
+            .unwrap_or_else(|| panic!("no day cell {label}"))
+    };
+
+    let day = super::calendar::DAY_SIZE as f64;
     assert_eq!(
-        *harness.state(),
-        Some(day * 7.0),
-        "seven columns with no gap between them should be exactly seven cells wide"
+        left_of("3") - left_of("2"),
+        day,
+        "adjacent days should be exactly one cell apart"
     );
 }
