@@ -208,6 +208,15 @@ which reads correctly at every precision —
 
 ### The calendar
 
+The calendar is a **popup over the grid**, not a row in the toolbar. Inline it pushed
+everything below down — measured at 505pt in the layout test — so picking a date moved
+the photos the date was about, and a 266pt month grid sat in the toolbar for as long as
+a range was being edited. `popup_below_widget` anchors it under the 📅 button;
+`PopupCloseBehavior::CloseOnClickOutside` is the close rule and not `CloseOnClick`,
+because the days *are* clicks inside the popup and closing on them would dismiss the
+calendar after every single date picked. Whether it is open lives in egui's popup
+memory; only the month cursor is ours, so reopening lands on the bound being edited.
+
 `src/app/calendar.rs`. egui 0.30 ships no date picker and the obvious crate
 alternative is either unmaintained or absent from this project's registry, so it
 is a month grid: weekday header, the days of one month, `‹`/`›` for months and

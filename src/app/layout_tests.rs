@@ -1512,6 +1512,36 @@ fn app_with(
     photos: Vec<Photo>,
     tune: fn(&mut PhotoOrganizerApp),
 ) -> Harness<'static, PhotoOrganizerApp> {
+    app_with_timing(photos, tune, Timing::EveryFrame)
+}
+
+/// As [`app_with`], but the setup runs once rather than on every frame.
+///
+/// `app_with` re-applies its setup each frame, which is what a test wants when it
+/// is establishing a standing condition and cannot be defeated by the thing under
+/// test. It is the wrong tool for anything a test then tries to *undo*: the frame
+/// after the click that cleared the filter puts the filter straight back, and the
+/// click becomes unobservable. Hence two entry points rather than one with a flag.
+fn app_with_once(
+    photos: Vec<Photo>,
+    tune: impl FnMut(&mut PhotoOrganizerApp) + 'static,
+) -> Harness<'static, PhotoOrganizerApp> {
+    app_with_timing(photos, tune, Timing::FirstFrameOnly)
+}
+
+/// Whether an `app_with` setup is re-applied every frame or only once.
+#[derive(Clone, Copy)]
+enum Timing {
+    EveryFrame,
+    FirstFrameOnly,
+}
+
+fn app_with_timing(
+    photos: Vec<Photo>,
+    mut tune: impl FnMut(&mut PhotoOrganizerApp) + 'static,
+    timing: Timing,
+) -> Harness<'static, PhotoOrganizerApp> {
+    let mut applied = false;
     let mut harness = Harness::new_ui_state(
         move |ui, app: &mut PhotoOrganizerApp| {
             if app.items.is_empty() {
@@ -1526,7 +1556,14 @@ fn app_with(
                     })
                     .collect();
             }
-            tune(app);
+            match timing {
+                Timing::EveryFrame => tune(app),
+                Timing::FirstFrameOnly if !applied => {
+                    applied = true;
+                    tune(app);
+                }
+                Timing::FirstFrameOnly => {}
+            }
 
             let ctx = ui.ctx().clone();
             app.render_toolbar(&ctx);
@@ -1721,31 +1758,46 @@ fn select_all_only_ticks_the_photos_in_view() {
 }
 
 #[test]
-fn the_filters_button_says_when_something_is_narrowing_the_grid() {
-    // A closed panel whose filter is active is the case that has to read as
-    // active: the user cleared a filter from inside it, the panel closed, and the
-    // grid is still not showing everything.
-    let mut harness = app_with(
+fn a_narrowed_grid_says_so_on_the_row_rather_than_behind_a_toggle() {
+    // This used to be about a "Filters ●" button reporting a filter that had been
+    // set and then hidden behind a collapsed panel — a state the user could not
+    // otherwise see. The panel is gone: the filters sit on the sort row, so a
+    // narrowed grid states the filter outright and offers the way to undo it.
+    //
+    // Set up with `app_with_once`, not `app_with`: the filter has to survive being
+    // *cleared* below, and a setup re-applied every frame would put it straight
+    // back and make the click unobservable.
+    let mut harness = app_with_once(
         vec![
             photo("receipt", 2021, 5, "Documents"),
             photo("beach", 2021, 5, "Beach Trip"),
         ],
-        |app| {
-            app.filters.category = Some("Documents".to_string());
-        },
+        |app| app.filters.category = Some("Documents".to_string()),
     );
     harness.run();
 
     let text = all_labels(&harness);
 
     assert!(
-        text.iter()
-            .any(|t| t.contains("Filters") && t.contains('●')),
-        "the filters button should report an active filter, got {text:#?}"
+        text.iter().any(|t| t == "Documents"),
+        "the active category should be readable on the row, got {text:#?}"
     );
     assert!(
         text.iter().any(|t| t.contains("1 of 2 shown")),
         "the sort row should report how much is showing, got {text:#?}"
+    );
+    assert!(
+        text.iter().any(|t| t.contains("Clear")),
+        "and offer a way to undo the narrowing, got {text:#?}"
+    );
+
+    // Undo it from the row, and the whole folder comes back — in the order the
+    // grid would have had anyway, since neither was ever actually excluded.
+    click_button(&mut harness, "Clear");
+    assert_eq!(
+        drawn_photo_order(&harness),
+        vec!["receipt.jpg", "beach.jpg"],
+        "clearing the filter should put the whole folder back"
     );
 }
 
@@ -2029,22 +2081,22 @@ fn changing_the_sort_while_typing_still_takes_effect() {
     );
 }
 
-/// The filter panel open, with the date picker showing.
+/// The app with the date picker open.
 ///
-/// Rendered through the real toolbar, so the calendar is reached the way a user
-/// reaches it: press **Filters**, then press the calendar button.
-fn with_filter_panel() -> Harness<'static, PhotoOrganizerApp> {
+/// Rendered through the real toolbar and driven by a real click, so the calendar is
+/// reached the way a user reaches it. There is no filter panel to open any more —
+/// the filters are on the sort row and the calendar is a popup over the grid.
+fn with_date_picker() -> Harness<'static, PhotoOrganizerApp> {
     let mut harness = app_with(
         vec![
             photo("jan", 2021, 1, "Beach Trip"),
             photo("mar", 2021, 3, "Beach Trip"),
             photo("jun", 2021, 6, "Beach Trip"),
         ],
-        |app| {
-            app.show_filter_panel = true;
-        },
+        |_| {},
     );
     harness.run();
+    click_button(&mut harness, "📅");
     harness
 }
 
@@ -2105,13 +2157,12 @@ fn the_calendar_picks_a_range_of_days() {
     // Driven with real clicks through the real toolbar, because the parts that
     // matter are all wiring: the button that opens the picker, the day cells it
     // draws, and the filter the click lands in.
-    let mut harness = with_filter_panel();
+    let mut harness = with_date_picker();
     assert!(
         find_label(&harness, "Label", "Any"),
         "the date row should read as unbounded to begin with"
     );
 
-    click_button(&mut harness, "📅");
     // June 2021, where `newest_date` leaves the picker for this folder.
     assert!(
         find_label(&harness, "Label", "June") && find_label(&harness, "Label", "2021"),
@@ -2143,8 +2194,7 @@ fn picking_backwards_through_the_calendar_still_gives_a_usable_range() {
     // Clicking the dates in the order a person thinks of them — the 20th, then
     // the 10th — has to leave a range. Storing it inverted reads as empty and
     // silently filters the whole folder away.
-    let mut harness = with_filter_panel();
-    click_button(&mut harness, "📅");
+    let mut harness = with_date_picker();
     click_day(&mut harness, 20);
     click_day(&mut harness, 10);
 
@@ -2162,8 +2212,7 @@ fn picking_backwards_through_the_calendar_still_gives_a_usable_range() {
 fn the_calendar_only_keeps_the_photos_it_names() {
     // The end-to-end claim: a date filter drawn from the calendar narrows the grid,
     // and everything scoped to the view follows from it.
-    let mut harness = with_filter_panel();
-    click_button(&mut harness, "📅");
+    let mut harness = with_date_picker();
     click_day(&mut harness, 1); // 1 June
     click_day(&mut harness, 30); // 30 June
 
@@ -2183,8 +2232,7 @@ fn the_calendar_only_keeps_the_photos_it_names() {
 fn paging_the_calendar_reaches_other_months_and_years() {
     // The arrows are the only way to reach a date the folder does not contain, so
     // a folder of one month still has to be filterable by any month.
-    let mut harness = with_filter_panel();
-    click_button(&mut harness, "📅");
+    let mut harness = with_date_picker();
     assert!(find_label(&harness, "Label", "June"));
 
     click_button(&mut harness, "‹");
@@ -2395,4 +2443,80 @@ fn the_heading_is_centred_over_the_grid_and_fits_inside_it() {
         );
         assert!(prev_year.x0 >= grid.0 - 2.0, "month {month}: escapes left");
     }
+}
+
+/// A node's top edge, by exact label.
+fn top_of(harness: &Harness<'static, PhotoOrganizerApp>, text: &str) -> f64 {
+    harness
+        .kittest_state()
+        .query_all(by().recursive(true))
+        .find_map(|n| {
+            let l = node_text(&n);
+            (l == text).then(|| n.raw_bounds().unwrap().y0)
+        })
+        .unwrap_or_else(|| panic!("no label {text:?}"))
+}
+
+#[test]
+fn the_sort_and_the_filters_share_one_line() {
+    // The filter row used to live below the sort row, behind a toggle. Both facts
+    // were wrong on their own: opening it pushed the whole grid down a line, and a
+    // filter set and then hidden was a filter you could not see.
+    let mut harness = app_with(
+        vec![
+            photo("receipt", 2021, 5, "Documents"),
+            photo("beach", 2021, 5, "Beach Trip"),
+        ],
+        |_| {},
+    );
+    harness.run();
+
+    let sort = top_of(&harness, "Sort");
+    let filter = top_of(&harness, "Filter");
+
+    assert_eq!(
+        sort, filter,
+        "Sort and Filter should be on the same line, not stacked"
+    );
+}
+
+#[test]
+fn opening_the_calendar_does_not_move_the_grid() {
+    // The whole reason the picker is a popup rather than a row in the toolbar: a
+    // 266pt month grid inline shoved everything below it down, so picking a date
+    // moved the photos the date was about.
+    let mut harness = app_with(
+        vec![
+            photo("jan", 2021, 1, "Beach Trip"),
+            photo("mar", 2021, 3, "Beach Trip"),
+        ],
+        |_| {},
+    );
+    harness.run();
+
+    let before: Vec<(String, f64)> = harness
+        .kittest_state()
+        .query_all(by().recursive(true))
+        .filter_map(|n| {
+            let l = node_text(&n);
+            l.ends_with(".jpg").then(|| (l, n.raw_bounds().unwrap().y0))
+        })
+        .collect();
+    assert!(!before.is_empty(), "the grid should have photos in it");
+
+    click_button(&mut harness, "📅");
+
+    let after: Vec<(String, f64)> = harness
+        .kittest_state()
+        .query_all(by().recursive(true))
+        .filter_map(|n| {
+            let l = node_text(&n);
+            l.ends_with(".jpg").then(|| (l, n.raw_bounds().unwrap().y0))
+        })
+        .collect();
+
+    assert_eq!(
+        before, after,
+        "opening the calendar must not move the grid a single point"
+    );
 }

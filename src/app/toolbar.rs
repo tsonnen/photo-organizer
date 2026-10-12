@@ -11,9 +11,9 @@ use eframe::egui;
 /// Width of the sort combo, in points. Sized to its widest option, "Date Taken".
 const SORT_COMBO_WIDTH: f32 = 110.0;
 
-/// Width of the category combo in the filter panel, in points. Category names are
-/// the longest labels the app renders anywhere, so this is the one picker that
-/// gets extra room; it clips rather than widening the toolbar past the window.
+/// Width of the category combo in the filter row. Category names are the longest
+/// labels the app renders anywhere, so this is the one picker that gets extra
+/// room; it clips rather than widening the toolbar past the window.
 const CATEGORY_PICKER_WIDTH: f32 = 160.0;
 
 /// The category picker's "no filter" entry.
@@ -22,14 +22,24 @@ const ALL: &str = "All categories";
 /// What an open-ended date bound reads as in the filter row.
 const OPEN_END: &str = "…";
 
-/// Whether the date picker is open, and which month it is showing.
+/// What the filters do beyond narrowing the view, said on hover rather than
+/// printed under the row they apply to.
 ///
-/// One struct rather than two fields, because the two are the same piece of state:
-/// the month is only meaningful while the picker is open, and closing it should
-/// forget the month so the next visit opens on the bound being edited.
+/// It used to be a line of small text under the filter controls, and it is the
+/// one thing in the toolbar that is not a control. As a tooltip it survives the
+/// filters joining the sort row, where a trailing label would have forced the
+/// whole thing onto a line of its own again.
+const FILTER_HINT: &str = "Filters combine, and apply to what you can see: \
+     photos outside them are not counted below, not ticked by All, and not moved.";
+
+/// Which month the calendar is showing.
+///
+/// Not whether it is open — that lives in egui's popup memory, so closing on an
+/// outside click and on Escape are egui's problem rather than a second
+/// implementation of it here. This is the part that is genuinely ours: reopening
+/// should land on the bound being edited, not wherever the user last paged to.
 #[derive(Default)]
 pub(super) struct CalendarControl {
-    pub(super) open: bool,
     pub(super) month: Option<(u32, u32)>,
 }
 
@@ -38,10 +48,7 @@ impl PhotoOrganizerApp {
         egui::TopBottomPanel::top("top").show(ctx, |ui| {
             self.render_toolbar_actions(ui, ctx);
             self.render_status_line(ui);
-            self.render_sort_row(ui);
-            if self.show_filter_panel {
-                self.render_filter_panel(ui);
-            }
+            self.render_sort_and_filter_row(ui);
             if self.show_categories_panel {
                 self.render_categories_panel(ui);
             }
@@ -110,30 +117,6 @@ impl PhotoOrganizerApp {
             }
 
             ui.separator();
-
-            // The panel is open, or something is narrowing the grid: either way
-            // the button says so. An open panel on its own would go stale the
-            // moment a filter was cleared from inside it, leaving a button that
-            // reads as inactive while its controls are still on screen.
-            let filters_active = !self.filters.is_open();
-            let filter_text = match (self.show_filter_panel, filters_active) {
-                (false, false) => "🔍 Filters ▼",
-                (false, true) => "🔍 Filters ▼ ●",
-                (true, _) => "🔍 Filters ▲",
-            };
-            if ui
-                .button(filter_text)
-                .on_hover_text(if filters_active {
-                    "Narrow which photos the grid shows"
-                } else {
-                    "No filters are narrowing the grid"
-                })
-                .clicked()
-            {
-                self.show_filter_panel = !self.show_filter_panel;
-            }
-
-            ui.separator();
             let toggle_text = if self.show_categories_panel {
                 "⚙ AI & Categories ▲"
             } else {
@@ -196,14 +179,28 @@ impl PhotoOrganizerApp {
         });
     }
 
-    /// The order the grid is in, always visible.
+    /// The order the grid is in and the things narrowing it, on one row.
     ///
-    /// A permanent row rather than a menu item, because the current order is the
-    /// thing a user checks most often — usually to confirm a sort did what they
-    /// meant — and a menu hides the answer behind the click that changes it.
-    fn render_sort_row(&mut self, ui: &mut egui::Ui) {
+    /// They were two rows, the second behind a toggle, and that was wrong twice
+    /// over. Opening the filter row shoved the entire grid down a line, so
+    /// reaching for a filter moved the thing the filter was about; and a filter
+    /// that had been set and then closed was a filter you could not see, which is
+    /// why the toggle had to carry a "●" to say the grid was still narrowed
+    /// somewhere behind it. On one row there is nothing to reveal and nothing to
+    /// mark.
+    ///
+    /// Wrapped rather than a plain `horizontal`, so a narrow window folds the row
+    /// instead of running the category picker off the end of it.
+    fn render_sort_and_filter_row(&mut self, ui: &mut egui::Ui) {
+        // Read the folder's shape before the row is drawn: the category picker is
+        // populated from the staged photos, and borrowing `self.items` while the
+        // row mutates `self.filters` would be two borrows of one struct.
+        let rows: Vec<view::Row<'_>> = self.items.iter().map(view::Row::from).collect();
+        let categories = view::category_choices(rows.iter().copied());
+        let newest = view::newest_date(rows.iter().copied());
+
         ui.separator();
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new("Sort").strong());
 
             egui::ComboBox::from_id_salt("sort_by")
@@ -223,6 +220,31 @@ impl PhotoOrganizerApp {
                 self.sort_direction = self.sort_direction.toggled();
             }
 
+            ui.separator();
+
+            ui.label(egui::RichText::new("Filter").strong())
+                .on_hover_text(FILTER_HINT);
+
+            Self::render_date_filter_row(ui, &mut self.filters, &mut self.calendar, newest);
+
+            ui.separator();
+            Self::render_confidence_bounds(ui, &mut self.filters);
+
+            ui.separator();
+            Self::render_category_filter(ui, &categories, &mut self.filters);
+
+            // Offered only once there is something to undo, so the row is one
+            // control shorter in the common case where nothing is narrowed.
+            if !self.filters.is_open()
+                && ui
+                    .button("✖ Clear")
+                    .on_hover_text("Show every staged photo again")
+                    .clicked()
+            {
+                self.filters = Filters::default();
+                self.calendar = CalendarControl::default();
+            }
+
             // Only while a filter is actually narrowing something: with the whole
             // folder in view, "400 of 400 shown" is noise.
             let (visible, staged) = self.view_counts();
@@ -233,69 +255,15 @@ impl PhotoOrganizerApp {
         });
     }
 
-    /// The three narrowing controls, behind a toggle.
-    ///
-    /// Collapsed by default where the sort is not, because two sliders, a picker
-    /// and a calendar is a wall of controls for something a user sets once and then
-    /// mostly leaves alone — but unlike the sort, nothing here is worth reading at a
-    /// glance, so there is nothing to keep on screen.
-    fn render_filter_panel(&mut self, ui: &mut egui::Ui) {
-        ui.separator();
-
-        // Read the folder's shape before the row is drawn: the category picker is
-        // populated from the staged photos, and borrowing `self.items` while the
-        // row mutates `self.filters` would be two borrows of one struct.
-        let rows: Vec<view::Row<'_>> = self.items.iter().map(view::Row::from).collect();
-        let categories = view::category_choices(rows.iter().copied());
-        let newest = view::newest_date(rows.iter().copied());
-
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Filter").strong());
-
-            Self::render_date_filter_row(ui, &mut self.filters, &mut self.calendar, newest);
-
-            ui.separator();
-            Self::render_confidence_bounds(ui, &mut self.filters);
-
-            ui.separator();
-            Self::render_category_filter(ui, &categories, &mut self.filters);
-
-            ui.separator();
-            if ui
-                .button("✖ Clear")
-                .on_hover_text("Show every staged photo again")
-                .clicked()
-            {
-                self.filters = Filters::default();
-                self.calendar = CalendarControl::default();
-            }
-        });
-
-        // Below the row rather than in a popup: a popup is another layer to get
-        // right, and it would cover the very rows the filter is about. Inline also
-        // means the grid below stays visible while a range is dragged out.
-        if self.calendar.open {
-            ui.add_space(4.0);
-            let mut picker = calendar::Calendar::new(self.calendar.month.unwrap_or(
-                calendar::opening_month(self.filters.date_from, self.filters.date_to, newest),
-            ));
-            picker.show(
-                ui,
-                &mut self.filters.date_from,
-                &mut self.filters.date_to,
-                view::today(),
-            );
-            self.calendar.month = Some(picker.month());
-        }
-
-        ui.small(
-            "Filters combine, and apply to what you can see: photos outside them \
-             are not counted below, not ticked by All, and not moved.",
-        );
-    }
-
     /// The date control: the range as it stands, and a button that opens the
     /// calendar to change it.
+    ///
+    /// The calendar is a popup over the grid rather than a row in the toolbar.
+    /// Inline it pushed everything below it down a line, so picking a date moved
+    /// the photos the date was about — and a 266pt-wide month grid sitting in the
+    /// toolbar for as long as a range is being edited is a lot of window spent on
+    /// a control that is only read while it is being used. The toolbar still says
+    /// what the range currently is, so the popup is only needed while it is open.
     ///
     /// The range is spelled out even when it is open-ended — "… → 2021-08-31" —
     /// because a half-set filter reads as no filter at all right up until it
@@ -316,14 +284,18 @@ impl PhotoOrganizerApp {
             ),
         });
 
-        let arrow = if calendar.open { "▲" } else { "▼" };
-        if ui
-            .button(format!("📅 {arrow}"))
-            .on_hover_text("Choose a date range")
-            .clicked()
-        {
-            calendar.open = !calendar.open;
-            if calendar.open {
+        // egui's popup memory holds the open/closed state rather than a field of
+        // ours, which is what makes an outside click and Escape close it without
+        // either being reimplemented here.
+        let popup_id = ui.make_persistent_id("date_range_calendar");
+        let is_open = ui.memory(|m| m.is_popup_open(popup_id));
+        let response = ui
+            .button(format!("📅 {}", if is_open { "▲" } else { "▼" }))
+            .on_hover_text("Choose a date range");
+
+        if response.clicked() {
+            ui.memory_mut(|m| m.toggle_popup(popup_id));
+            if !is_open {
                 // Reopening lands on the bound being edited rather than on
                 // wherever the user last paged to.
                 calendar.month = Some(calendar::opening_month(
@@ -333,6 +305,28 @@ impl PhotoOrganizerApp {
                 ));
             }
         }
+
+        // `CloseOnClickOutside`, not `CloseOnClick`: the days *are* clicks inside
+        // the popup, and closing on them would dismiss the calendar after every
+        // single date the user picked.
+        egui::popup::popup_below_widget(
+            ui,
+            popup_id,
+            &response,
+            egui::popup::PopupCloseBehavior::CloseOnClickOutside,
+            |ui| {
+                let mut picker = calendar::Calendar::new(calendar.month.unwrap_or(
+                    calendar::opening_month(filters.date_from, filters.date_to, newest),
+                ));
+                picker.show(
+                    ui,
+                    &mut filters.date_from,
+                    &mut filters.date_to,
+                    view::today(),
+                );
+                calendar.month = Some(picker.month());
+            },
+        );
 
         // Offered once there is a range to undo. Clearing the two bounds
         // separately is not offered, because a one-sided range is not a state a

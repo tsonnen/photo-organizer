@@ -259,6 +259,18 @@ re-exported from `profile_store` so existing `use` paths and the grid's badge ke
   testing anything is worse than one that fails.
 - `src/app/` was split out of `app.rs` (commit 161b3e7); `mod.rs` documents the submodule split. Keep the
   module boundary and the top-of-file `//!` orientation comments that go with it.
+- The sort and the filters are **one row** (`render_sort_and_filter_row`), not a sort row
+  plus a filter panel behind a toggle. Both halves were wrong alone: opening the filter row
+  shoved the whole grid down a line, and a filter set then hidden behind a closed panel was a
+  filter the user could not see — which is what forced the `Filters ●` marker button. Now
+  there is nothing to reveal and nothing to mark, and `Clear` appears only when something is
+  narrowed. The row is `horizontal_wrapped` so a narrow window folds it rather than running
+  the category picker off the end.
+- `app_with`'s `tune` runs **every frame**. That is right for establishing a standing
+  condition and wrong for anything a test then tries to undo — the frame after the click
+  puts the filter straight back and the click becomes unobservable. `app_with_once` exists
+  for the second case; reaching for `app_with` there produces a test that passes for the
+  wrong reason or fails for no visible reason.
 - `src/app/view.rs` is the single answer to "is this photo in view" — grid, footer, **All**/**None**,
   both training routes, the transfer batch and the modal navigation all read `visible_indices`. It runs
   over `Row`, a borrowing view of the five fields that decide visibility, because nothing in it looks at a
@@ -296,6 +308,12 @@ re-exported from `profile_store` so existing `use` paths and the grid's badge ke
   Days stay real `Button`s via `add_sized` rather than painted text, so the calendar is keyboard-reachable
   and the layout tests can find a day by its label. Month and year navigation is `‹`/`›`/`«`/`»`,
   deliberately *not* wired to the month label.
+  - The calendar is a **popup**, not a toolbar row: inline it pushed the grid down 505pt
+    (measured by `opening_the_calendar_does_not_move_the_grid`), so choosing a date moved
+    the photos the date was about. Open/closed state is egui's popup memory; only the
+    month cursor is `CalendarControl`'s. `CloseOnClickOutside`, **not** `CloseOnClick` —
+    the day cells are clicks *inside* the popup, and closing on them would dismiss the
+    calendar after every date picked.
   - The heading is **three explicit slots** — `ARROW_SLOT`, title, `ARROW_SLOT` — in a band the width of
     the grid, not a row of widgets. A bare `ui.horizontal` greedily fills the panel, and a filter panel is
     much wider than seven 38pt days: the arrows spread to the panel edges and `«`/`»` land outside it,

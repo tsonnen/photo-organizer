@@ -90,11 +90,13 @@ pub struct PhotoOrganizerApp {
     /// the footer counts photos the user cannot see and Move files photos they
     /// never looked at.
     filters: Filters,
-    /// Whether the date picker in the filter panel is open, and which month it is
-    /// showing. Kept here rather than in the renderer so closing and reopening the
-    /// panel does not lose the month the user paged to.
+    /// Which month the date picker is showing.
+    ///
+    /// Whether it is open is egui's business — the popup closes itself on an
+    /// outside click and on Escape — but which month it was left on is ours, so
+    /// reopening lands on the bound being edited rather than wherever the user
+    /// last paged to.
     calendar: toolbar::CalendarControl,
-    show_filter_panel: bool,
     /// Whether a grid cell's category editor held focus when the grid was last
     /// drawn.
     ///
@@ -162,7 +164,6 @@ impl PhotoOrganizerApp {
             sort_direction: SortDirection::default(),
             filters: Filters::default(),
             calendar: Default::default(),
-            show_filter_panel: false,
             editing_cell: false,
             order_sort: (SortBy::default(), SortDirection::default()),
             show_profiles_modal: false,

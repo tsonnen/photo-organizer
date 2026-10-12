@@ -84,7 +84,8 @@ settles in when you click away — or the moment you change the sort.
 range**, and a **category**. All three have to hold for a photo to stay, so you can ask
 for "receipts, from 2021, that the model was sure about" in one go.
 
-The date range is picked from a calendar: press 📅, click a day to start the range and
+Sort and filter sit on one row. The date range is picked from a calendar that opens over
+the grid: press 📅, click a day to start the range and
 another to close it. Clicking the dates the other way round works too — pick the 20th then
 the 10th and you get the 10th to the 20th, not an empty range.
 
