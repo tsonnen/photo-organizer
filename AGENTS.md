@@ -77,11 +77,12 @@ CI (`.github/workflows/build-and-test.yaml`) runs these in order, so match it lo
 cargo fmt --check
 cargo clippy -- -D warnings     # warnings are errors; the tree is currently clean
 cargo build
-cargo test                      # 195 tests, ~5s once built
+cargo test                      # 234 tests, ~5s once built
 ```
 
 - One test / one area: `cargo test media::tests::test_scan_preview_jpeg_scales_down_and_keeps_original_size`,
-  `cargo test app::layout_tests`, `cargo test scanner`, `cargo test transfer`, `cargo test app::models::tests`.
+  `cargo test app::layout_tests`, `cargo test scanner`, `cargo test transfer`, `cargo test app::models::tests`,
+  `cargo test app::view`.
 - `cargo test -- --nocapture inference::tests::test_init_clip_session_real_file` to watch the real
   CLIP load + forward pass. It **silently returns** if the model file is under 1024 bytes (an LFS pointer).
 - Linux build deps: `libgtk-3-dev libxkbcommon-dev` (the release workflow installs these).
@@ -168,6 +169,18 @@ puts its Browse buttons on section headers for that reason.
   space) but keeps `profiles.json`: the centroids are stale too, but they are the user's work. The chosen
   path is preferred but not required — the row warns when what resolves isn't what was chosen, because a
   green dot next to a silently substituted checkpoint reads as confirmation.
+- **Grid view and order** (`src/app/view.rs`): the one answer to "is this photo in view". The grid
+  draws `visible_indices`, and the footer count, **All**/**None**, both training routes, the transfer
+  batch and the modal's paging all read the same list — a second copy of the predicate is the bug this
+  module exists to prevent. It runs over `Row`, a borrowing view of the fields that decide visibility,
+  because nothing in it looks at a texture and the ordering rules should stay assertable without a live
+  `Context`. It is recomputed per frame rather than cached: items change underneath it (a scan `Update`,
+  a combo rename, a threshold re-classification), and a cache would be stale in whichever writer was
+  missed. Two orderings are not the plain comparison: `rank_confidence` scales a rule-assigned photo
+  into the band *below* the threshold it failed, and `category_sort_key` files the unsorted bucket last
+  (under `ZZZZ`, so lower-cased real names sort after it). Descending inverts the key (`Reverse`), never
+  the run, so `sort_by_cached_key`'s positional tie-break survives and ties keep their order. See
+  `docs/classification_pipeline.md` → **Ordering and narrowing the grid** for the rules and why.
 - **Transfer** (`src/transfer/`): `plan_batch` → `execute_batch` → `TransferJournal` →
   `undo`, `_1` collision suffixes instead of overwriting, `.xmp`/`.aae` sidecars travelling
   with the photo. One module owns the on-disk layout on purpose: with the reverse
@@ -187,7 +200,11 @@ puts its Browse buttons on section headers for that reason.
   nothing is not journalled at all, so it cannot displace the previous batch's Undo.
   `discover_sidecars` claims sidecar files batch-wide — `photo.jpg` and `photo.jpeg`
   both want `photo.xmp` at the same destination, and the second attempt failing used to
-  report a sidecar as broken when it had in fact travelled.
+  report a sidecar as broken when it had in fact travelled. The batch is also scoped to
+  `visible_indices`, so a photo the grid's filters exclude is not transferred even if a
+  tick on it from before the filter outlived it. That is what keeps the removal honest:
+  it keys off `completed_ops`, and a photo that was never offered to the engine cannot
+  appear there — so the "held back" case stays narrow and does not need its own check.
 - **Bulk move** (`src/app/bulk_move_modal.rs`): the fourth route to a category, and the only one that
   trains nothing — a name typed over a selection becomes a `Manual` pick, which is exactly what makes it
   survive re-classification. `assign_selected_to_category` labels the items, then `execute_transfer_to`
@@ -271,6 +288,28 @@ re-exported from `profile_store` so existing `use` paths and the grid's badge ke
   the file: a test reading `settings.json` would race the other tests' writes.
 - `categories.rs` has a source-text test (`include_str!`) requiring exactly two call sites of
   `render_custom_category_input` (grid + modal). Adding a third call site fails the build.
+- `src/app/view.rs` is the single answer to "is this photo in view" — grid, footer, **All**/**None**,
+  both training routes, the transfer batch and the modal navigation all read `visible_indices`. It runs
+  over `Row`, a borrowing view of the fields that decide visibility, because nothing in it looks at a
+  texture and the ordering rules should stay assertable without a live `Context`. Two orderings are not
+  the plain comparison: `rank_confidence` scales a rule-assigned photo into the band *below* the
+  threshold it failed, and `category_sort_key` files the unsorted bucket last. Descending inverts the
+  key, never the run, so ties keep their order. Adding a second copy of the is-it-in-view predicate
+  anywhere else is the bug this module exists to prevent.
+- **The grid must not reorder while a cell's category editor holds focus** —
+  `PhotoOrganizerApp::holding_order`. Editing a category is what changes the Category sort key, and egui
+  identifies a cell's widgets by the position they occupy, so a reordering frame makes the focused field
+  the *next* photo's: the characters land in the wrong photo and the rows behind it look scrambled.
+  `render_custom_category_input` returns whether it has focus and `render_grid` records it at the end of
+  the frame; `render_grid_cell_controls` returns `(train_request, editing)`. Check focus with
+  `ui.memory(|m| m.has_focus(response.id))`, **not** `Response::has_focus()` — the latter also requires
+  the OS window to have focus, so it reports false for a field the user is plainly typing into whenever
+  the window manager says otherwise. The hold is released by the *sort* changing (`order_sort`), not only
+  by focus leaving: clicking a button does not move keyboard focus in egui 0.30, so "editing, therefore
+  frozen" would swallow a click on the direction button.
+- The sort row and the filter panel are **two** rows: `render_sort_row` always shows, and the filters sit
+  behind a **🔍 Filters** toggle whose label carries a **●** when something is narrowed, so a filter the
+  user cannot see is at least marked. Starting a scan clears the filters and keeps the sort.
 - A closed egui `ComboBox` puts **no label** in the accesskit tree, so a kittest assertion has to find it
   by role — and `accesskit::Role` is not a dependency, so stringify it the way `placed_widgets` does. To
   assert what is *in* the list, open it (click the combo, run a frame) and query by label instead.

@@ -55,6 +55,38 @@ Pick a **Source Folder** and the scan starts. Photos appear in the grid as thumb
 while classification continues in the background, so you can start reviewing before it's
 finished.
 
+### Sorting and filtering
+
+**Sort** offers three orders, each with a button to flip it: **Date Taken**, **Confidence**,
+and **Category**. Photos that tie on the sort key keep a fixed order, so flipping the
+direction moves the groups between them and leaves the ties where they are.
+
+Two of the orders aren't the plain comparison:
+
+- **Confidence** puts every photo the model actually matched above every photo a *rule*
+  claimed — a screenshot caught by its filename, a camera photo by its EXIF. Those carry
+  a number measuring how sure the *rule* is, not the model, and ranked as-is a
+  confidently mis-filed screenshot would sit above a genuine match. They rank below the
+  threshold you set, which is the only reason they ran at all, and still order among
+  themselves by how sure their rule was.
+- **Category** treats anything with no category — the **Unsorted** fallback, or a custom
+  name you've cleared — as sorting last, rather than filing between **Travel** and
+  **Vacation** as though you'd chosen it.
+
+The grid holds its order while you're typing a category name into a cell, so the photo
+doesn't jump out from under the caret as you rename it. The new order settles in when you
+click away — or the moment you change the sort.
+
+**Filters** has three narrowing controls that combine: a **date range**, a **confidence
+range**, and a **category**. All three have to hold for a photo to stay, so you can ask
+for "receipts, from 2021, that the model was sure about" in one go. A date bound with no
+year or month set is that end open, so **From** alone means "everything since".
+
+A filter narrows what you're looking at *and* what the actions act on. Photos outside it
+aren't counted in the footer, aren't ticked by **All**, aren't trained from, and aren't
+moved or copied — so the count above **Move** always describes the same photos the grid
+is showing. Scanning a new folder clears the filters; the sort is kept.
+
 Every cell has a category dropdown showing your trained profiles with a confidence
 percentage, plus a small 🎓 button to train that category from the one photo. Anything
 that doesn't fit gets **Other**, which gives you a free-text field for a name of your
