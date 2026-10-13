@@ -181,6 +181,13 @@ puts its Browse buttons on section headers for that reason.
   (under `ZZZZ`, so lower-cased real names sort after it). Descending inverts the key (`Reverse`), never
   the run, so `sort_by_cached_key`'s positional tie-break survives and ties keep their order. See
   `docs/classification_pipeline.md` → **Ordering and narrowing the grid** for the rules and why.
+- `PhotoDate.day` is `Option<u32>` and `photo_cache.day` is nullable. A row written before the column has
+  none, and `Option` says "unknown" without inventing a day nobody recorded; `StagedItem` carries a whole
+  `PhotoDate` rather than loose year/month/day so the three cannot drift. The day is what the date sort
+  orders by. The date *filter* is still month-wide tuple comparison — the calendar PR makes it a span.
+  A photo's day used to be parsed and then dropped by `extract_date`, which made every photo in a month
+  tie under a date sort. If a day is ever added to `RawPhotoInput`, note that the output layout
+  `<Category>/<YYYY>/<MM>/` is month-granular **by contract** and does not take one.
 - **Transfer** (`src/transfer/`): `plan_batch` → `execute_batch` → `TransferJournal` →
   `undo`, `_1` collision suffixes instead of overwriting, `.xmp`/`.aae` sidecars travelling
   with the photo. One module owns the on-disk layout on purpose: with the reverse

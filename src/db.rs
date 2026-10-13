@@ -49,7 +49,8 @@ impl Database {
                 thumb_height INTEGER,
                 thumbnail BLOB,
                 original_width INTEGER,
-                original_height INTEGER
+                original_height INTEGER,
+                day INTEGER
             )",
             [],
         )?;
@@ -68,6 +69,10 @@ impl Database {
             "ALTER TABLE photo_cache ADD COLUMN original_height INTEGER",
             [],
         );
+        // Nullable, unlike `year` and `month`: a row cached before this column
+        // existed has no day, and zero is a day that never happened. The scan
+        // backfills one from the file on the next rescan.
+        let _ = conn.execute("ALTER TABLE photo_cache ADD COLUMN day INTEGER", []);
 
         // The cache takes one insert per photo during a scan and is read back on
         // every rescan. Under the default rollback journal with
@@ -101,24 +106,27 @@ impl Database {
         // cached rather than re-parsed every time. Safe because all access goes
         // through a single connection guarded by a mutex.
         let mut stmt = self.conn.prepare_cached(
-            "SELECT year, month, is_exif_date, embedding, thumb_width, thumb_height, thumbnail, original_width, original_height FROM photo_cache WHERE hash = ?1",
+            "SELECT year, month, day, is_exif_date, embedding, thumb_width, thumb_height, thumbnail, original_width, original_height FROM photo_cache WHERE hash = ?1",
         )?;
         let mut rows = stmt.query(params![hash])?;
 
         if let Some(row) = rows.next()? {
             let year: u32 = row.get(0)?;
             let month: u32 = row.get(1)?;
-            let is_exif: i32 = row.get(2)?;
-            let blob: Vec<u8> = row.get(3)?;
+            // A row cached before the day column existed reports none, and the scan
+            // re-reads it from the file on the next rescan. Zero is not a day.
+            let day: Option<u32> = row.get(2)?;
+            let is_exif: i32 = row.get(3)?;
+            let blob: Vec<u8> = row.get(4)?;
             #[allow(clippy::chunks_exact_to_as_chunks)]
             let embedding: Vec<f32> = blob
                 .chunks_exact(4)
                 .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
                 .collect();
 
-            let thumb_w: Option<u32> = row.get(4)?;
-            let thumb_h: Option<u32> = row.get(5)?;
-            let thumb_blob: Option<Vec<u8>> = row.get(6)?;
+            let thumb_w: Option<u32> = row.get(5)?;
+            let thumb_h: Option<u32> = row.get(6)?;
+            let thumb_blob: Option<Vec<u8>> = row.get(7)?;
 
             let thumbnail = match (thumb_w, thumb_h, thumb_blob) {
                 (Some(w), Some(h), Some(rgba))
@@ -136,15 +144,15 @@ impl Database {
             // A row cached before the frame columns existed has no size to offer,
             // and the scan re-reads the header once to fill it in. Zero dimensions
             // count as unknown: not a frame any ratio rule could read.
-            let original_w: Option<u32> = row.get(7)?;
-            let original_h: Option<u32> = row.get(8)?;
+            let original_w: Option<u32> = row.get(8)?;
+            let original_h: Option<u32> = row.get(9)?;
             let frame = match (original_w, original_h) {
                 (Some(w), Some(h)) if w > 0 && h > 0 => Some(FrameSize::new(w, h)),
                 _ => None,
             };
 
             Ok(Some(CachedPhotoData {
-                date: PhotoDate::new(year, month),
+                date: PhotoDate::new(year, month, day.filter(|d| *d > 0)),
                 is_exif_date: is_exif != 0,
                 embedding,
                 thumbnail,
@@ -172,13 +180,14 @@ impl Database {
 
         self.conn
             .prepare_cached(
-                "INSERT OR REPLACE INTO photo_cache (hash, year, month, is_exif_date, embedding, thumb_width, thumb_height, thumbnail, original_width, original_height)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                "INSERT OR REPLACE INTO photo_cache (hash, year, month, day, is_exif_date, embedding, thumb_width, thumb_height, thumbnail, original_width, original_height)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             )?
             .execute(params![
                 hash,
                 data.date.year,
                 data.date.month,
+                data.date.day,
                 data.is_exif_date as i32,
                 blob,
                 tw,
@@ -202,7 +211,7 @@ mod tests {
         let hash = "abc123hash";
         let thumb_rgba = vec![255u8, 0, 0, 255, 0, 255, 0, 255]; // 2 pixels RGBA
         let photo_data = CachedPhotoData {
-            date: PhotoDate::new(2025, 12),
+            date: PhotoDate::new(2025, 12, Some(12)),
             is_exif_date: true,
             embedding: vec![0.123, 0.456, -0.789, 1.0],
             thumbnail: Some(CachedThumbnail {
@@ -219,7 +228,7 @@ mod tests {
             .expect("query cache")
             .expect("found record");
 
-        assert_eq!(retrieved.date, PhotoDate::new(2025, 12));
+        assert_eq!(retrieved.date, PhotoDate::new(2025, 12, Some(12)));
         assert!(retrieved.is_exif_date);
         assert_eq!(retrieved.frame, Some(FrameSize::new(4000, 3000)));
         assert_eq!(retrieved.embedding.len(), 4);
@@ -300,7 +309,11 @@ mod tests {
             .get_cached("legacy_hash")
             .expect("query legacy item")
             .expect("item exists");
-        assert_eq!(cached.date, PhotoDate::new(2022, 5));
+        // A legacy row has no day column, so it reports none. The scan backfills one
+        // from the file on the next rescan. What matters is that the reader reports
+        // the absence rather than inventing a day, which would file the photo
+        // somewhere it was never taken.
+        assert_eq!(cached.date, PhotoDate::new(2022, 5, None));
         assert!(cached.is_exif_date);
         assert_eq!(cached.embedding, vec![1.0, 2.0]);
         assert_eq!(cached.thumbnail, None);
@@ -312,6 +325,51 @@ mod tests {
     }
 
     #[test]
+    fn a_day_written_by_one_scan_is_read_back_by_the_next() {
+        // The day is only useful if it survives the cache: without this the whole
+        // change is invisible on any folder that has been scanned before, since
+        // every row would come back with no day and every photo would still sort
+        // as "some day in this month".
+        let db = Database::init(":memory:").expect("init in-memory db");
+        let hash = "day_hash";
+        db.insert_cache(
+            hash,
+            &CachedPhotoData {
+                date: PhotoDate::new(2021, 3, Some(14)),
+                is_exif_date: true,
+                embedding: vec![0.5],
+                thumbnail: None,
+                frame: None,
+            },
+        )
+        .expect("insert");
+
+        let read = db.get_cached(hash).expect("query").expect("present");
+        assert_eq!(read.date, PhotoDate::new(2021, 3, Some(14)));
+    }
+
+    #[test]
+    fn a_zero_day_is_treated_as_no_day() {
+        // `day` is nullable, but a hand-edited or half-written row could hold 0,
+        // and day zero is a date that never happened.
+        let db = Database::init(":memory:").expect("init in-memory db");
+        db.insert_cache(
+            "zero_day",
+            &CachedPhotoData {
+                date: PhotoDate::new(2021, 3, Some(0)),
+                is_exif_date: false,
+                embedding: vec![0.5],
+                thumbnail: None,
+                frame: None,
+            },
+        )
+        .expect("insert");
+
+        let read = db.get_cached("zero_day").expect("query").expect("present");
+        assert_eq!(read.date.day, None);
+    }
+
+    #[test]
     fn test_db_frame_size_survives_a_rescan() {
         // The rescan has to read the same resolution the first scan decided on,
         // out of the cache alone.
@@ -320,7 +378,7 @@ mod tests {
         db.insert_cache(
             hash,
             &CachedPhotoData {
-                date: PhotoDate::new(2026, 9),
+                date: PhotoDate::new(2026, 9, Some(9)),
                 is_exif_date: false,
                 embedding: vec![0.1, 0.2],
                 thumbnail: Some(CachedThumbnail {
@@ -376,7 +434,9 @@ mod tests {
             .get_cached("corrupted_thumb")
             .expect("query item")
             .expect("item exists");
-        assert_eq!(cached.date, PhotoDate::new(2024, 1));
+        // The row names no day column, so the day is absent — the same legacy path the
+        // migration test covers, reached here by a raw insert.
+        assert_eq!(cached.date, PhotoDate::new(2024, 1, None));
         // Thumbnail should be gracefully set to None when buffer is truncated/mismatched
         assert_eq!(cached.thumbnail, None);
     }
@@ -387,7 +447,7 @@ mod tests {
         let hash = "update_test_hash";
 
         let initial_data = CachedPhotoData {
-            date: PhotoDate::new(2020, 1),
+            date: PhotoDate::new(2020, 1, Some(1)),
             is_exif_date: false,
             embedding: vec![0.1],
             thumbnail: None,
@@ -396,7 +456,7 @@ mod tests {
         db.insert_cache(hash, &initial_data).expect("insert");
 
         let updated_data = CachedPhotoData {
-            date: PhotoDate::new(2021, 6),
+            date: PhotoDate::new(2021, 6, Some(6)),
             is_exif_date: true,
             embedding: vec![0.5, 0.9],
             thumbnail: Some(CachedThumbnail {
@@ -409,7 +469,7 @@ mod tests {
         db.insert_cache(hash, &updated_data).expect("update");
 
         let retrieved = db.get_cached(hash).unwrap().unwrap();
-        assert_eq!(retrieved.date, PhotoDate::new(2021, 6));
+        assert_eq!(retrieved.date, PhotoDate::new(2021, 6, Some(6)));
         assert!(retrieved.is_exif_date);
         assert_eq!(retrieved.embedding, vec![0.5, 0.9]);
         assert_eq!(retrieved.frame, Some(FrameSize::new(3000, 4000)));
@@ -432,7 +492,7 @@ mod tests {
         db.insert_cache(
             hash,
             &CachedPhotoData {
-                date: PhotoDate::new(2023, 4),
+                date: PhotoDate::new(2023, 4, Some(4)),
                 is_exif_date: false,
                 embedding: vec![0.3],
                 thumbnail: Some(CachedThumbnail {
@@ -452,7 +512,7 @@ mod tests {
 
         let reread = db.get_cached(hash).unwrap().unwrap();
         assert_eq!(reread.frame, Some(FrameSize::new(1920, 1080)));
-        assert_eq!(reread.date, PhotoDate::new(2023, 4));
+        assert_eq!(reread.date, PhotoDate::new(2023, 4, Some(4)));
         assert_eq!(reread.thumbnail.map(|t| t.rgba.len()), Some(8));
     }
 
@@ -471,7 +531,7 @@ mod tests {
             handles.push(thread::spawn(move || {
                 let hash = format!("hash_{}", i);
                 let data = CachedPhotoData {
-                    date: PhotoDate::new(2000 + i as u32, (i % 12 + 1) as u32),
+                    date: PhotoDate::new(2000 + i as u32, (i % 12 + 1) as u32, Some(15)),
                     is_exif_date: true,
                     embedding: vec![i as f32],
                     thumbnail: Some(CachedThumbnail {

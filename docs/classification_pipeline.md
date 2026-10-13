@@ -175,14 +175,19 @@ sorts *before* every one of them, since `Z` is `0x5A` and `a` is `0x61`.
 The unsorted name itself is read from `CategoryName::unsorted()` rather than
 copied, so the key cannot drift from the name a `Decision` actually carries.
 
-### The date range keeps whole months
+### A photo's date carries a day, and the filter keeps whole months
 
-A photo's date is a year and a month; `extract_date` reads it from EXIF
-`DateTimeOriginal` when it is there and from the file's filesystem timestamp
-otherwise, and drops the day it parsed along the way. The two bounds are
-therefore (year, month) pairs picked from combo boxes, and a photo is admitted
-when it falls inside both. An unset bound is that direction open: a **From**
-alone means "everything since", a **To** alone means "everything up to".
+`PhotoDate` is a year, a month and an optional day. `extract_date` reads the day
+from EXIF `DateTimeOriginal` when it is there and from the file's filesystem
+timestamp otherwise, and `photo_cache` persists it in a nullable `day` column —
+a row written before the column has none, and the next rescan backfills it from
+the file. The day is what the date sort orders by, so a folder of photos from one
+trip stops reading as a shuffled month.
+
+The date *filter* is still month-wide: the two bounds are `(year, month)` pairs
+picked from combo boxes, and a photo is admitted when it falls inside both. An
+unset bound is that direction open: a **From** alone means "everything since", a
+**To** alone means "everything up to".
 
 ### The grid does not reorder under the caret
 

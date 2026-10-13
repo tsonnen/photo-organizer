@@ -11,7 +11,7 @@ use super::layout::{self, MIN_CONTROL_WIDTH};
 use super::models::{Filters, SortBy, SortDirection, StagedItem};
 use super::profiles_modal::DeletePrompt;
 use super::PhotoOrganizerApp;
-use crate::classification::{ClassificationSource, FrameSize};
+use crate::classification::{ClassificationSource, FrameSize, PhotoDate};
 use crate::profile_store::{CategoryProfile, ProfileStore};
 use eframe::egui;
 use egui_kittest::kittest::{by, Queryable};
@@ -54,8 +54,7 @@ impl WidgetRect {
 fn staged_item(ctx: &egui::Context) -> StagedItem {
     StagedItem {
         source_path: PathBuf::from("/photos/sample.jpg"),
-        year: 2024,
-        month: 5,
+        date: PhotoDate::new(2024, 5, None),
         is_exif: true,
         frame: Some(FrameSize::new(3000, 2000)),
         category: "Beach Trip".into(),
@@ -769,8 +768,7 @@ fn the_profile_modal_lists_every_profile_under_a_count() {
 /// A staged photo with `selected` set, for the bulk move's selection handling.
 fn staged_item_selected(ctx: &egui::Context, selected: bool, year: u32, month: u32) -> StagedItem {
     StagedItem {
-        year,
-        month,
+        date: PhotoDate::new(year, month, None),
         selected,
         ..staged_item(ctx)
     }
@@ -878,8 +876,7 @@ fn bulk_move_harness_with(
                     .iter()
                     .map(|(path, year, month)| StagedItem {
                         source_path: path.clone(),
-                        year: *year,
-                        month: *month,
+                        date: PhotoDate::new(*year, *month, None),
                         selected: true,
                         // Deliberately *not* the name being bulk-filed: the
                         // point of the feature is that the per-photo category is
@@ -2479,8 +2476,7 @@ fn app_with(
                     .iter()
                     .map(|p| StagedItem {
                         source_path: PathBuf::from(format!("/photos/{}.jpg", p.name)),
-                        year: p.year,
-                        month: p.month,
+                        date: PhotoDate::new(p.year, p.month, None),
                         category: p.category.to_string(),
                         selected: true,
                         ..staged_item(ui.ctx())
@@ -2743,8 +2739,7 @@ fn a_transfer_moves_only_what_is_in_view() {
                     .map(|name| StagedItem {
                         // The real file, so a transfer has something to act on.
                         source_path: staged_from.join(format!("{name}.jpg")),
-                        year: 2021,
-                        month: 5,
+                        date: PhotoDate::new(2021, 5, None),
                         category: if name == "receipt" {
                             "Documents".into()
                         } else {

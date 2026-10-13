@@ -67,17 +67,35 @@ impl FrameSize {
     }
 }
 
-/// The year and month a photo is filed under: from EXIF when it carries a date,
-/// from the filesystem otherwise (`media::extract_date`).
+/// The day, month and year a photo is filed under: from EXIF when it carries a
+/// date, from the filesystem otherwise (`media::extract_date`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PhotoDate {
     pub year: u32,
     pub month: u32,
+    /// The day, or `None` when nothing recorded one.
+    ///
+    /// A fresh scan always has one — EXIF `DateTimeOriginal` carries it, and the
+    /// filesystem fallback carries it too. `None` is only for a photo whose row in
+    /// `photo_cache` predates the column, in which case the next rescan backfills
+    /// it. Optional for the same reason `PhotoFacts::frame` is: a cached row can
+    /// predate the field, and inventing a day would file the photo somewhere it was
+    /// never taken.
+    pub day: Option<u32>,
 }
 
 impl PhotoDate {
-    pub const fn new(year: u32, month: u32) -> Self {
-        Self { year, month }
+    pub const fn new(year: u32, month: u32, day: Option<u32>) -> Self {
+        Self { year, month, day }
+    }
+
+    /// `(year, month, day)` as one comparable key, for sorting and ordering.
+    ///
+    /// A missing day sorts as 0, before every real day of the month. That is
+    /// arbitrary but *stable*: two photos with no recorded day keep the order they
+    /// arrived in rather than trading places on each frame.
+    pub fn sort_key(&self) -> (u32, u32, u32) {
+        (self.year, self.month, self.day.unwrap_or(0))
     }
 }
 
@@ -173,7 +191,7 @@ mod tests {
         // than reading a size off the thumbnail.
         let facts = PhotoFacts {
             path: PathBuf::from("/photos/plain.png"),
-            date: PhotoDate::new(2026, 3),
+            date: PhotoDate::new(2026, 3, Some(3)),
             frame: None,
             is_exif: false,
             embedding: Vec::new(),
