@@ -25,6 +25,10 @@ impl PhotoOrganizerApp {
             .frame(panel_frame)
             .show(ctx, |ui| {
                 let visible = self.visible_indices();
+                // Declared out here because it is read after the scroll area
+                // closes, which is the only point at which the whole grid has been
+                // drawn and "somewhere a cell is being typed into" is settled.
+                let mut editing_this_frame = false;
 
                 egui::ScrollArea::vertical()
                     .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
@@ -52,22 +56,49 @@ impl PhotoOrganizerApp {
                                 for (position, &idx) in visible.iter().enumerate() {
                                     ui.vertical(|ui| {
                                         let item = &mut self.items[idx];
-                                        if render_photo_cell(ui, item, item_width) {
-                                            open_modal_idx = Some(idx);
-                                        }
-                                        if let Some(category) = Self::render_grid_cell_controls(
-                                            &self.profiles,
-                                            ui,
-                                            item,
-                                            item_width,
-                                            ui.make_persistent_id((
-                                                "cat_combo",
-                                                idx,
-                                                &item.source_path,
-                                            )),
-                                        ) {
-                                            train_request = Some((idx, category));
-                                        }
+                                        // Every widget in the cell identifies itself against this
+                                        // photo rather than against the slot it happens to
+                                        // occupy.
+                                        //
+                                        // Without it egui falls back to
+                                        // `next_auto_id`, a count of how many widgets
+                                        // this frame has created, so a cell's ids are
+                                        // positional. That is invisible until the grid
+                                        // reorders, and then it is not cosmetic:
+                                        // sorting by Category reorders the grid on the
+                                        // very keystroke that edits a category, so the
+                                        // focused text field silently becomes a
+                                        // different photo's field and the characters
+                                        // land in it, at that photo's old caret. The
+                                        // checkbox and the hover card drift the same way.
+                                        //
+                                        // Keyed on the index rather than the path, which
+                                        // would have to be cloned to be read alongside
+                                        // the mutable borrow of the item. An index into
+                                        // `items` identifies a photo just as well and is
+                                        // stable for as long as that photo is staged: the
+                                        // sort permutes `visible_indices`, never the
+                                        // vector itself.
+                                        ui.push_id(idx, |ui| {
+                                            if render_photo_cell(ui, item, item_width) {
+                                                open_modal_idx = Some(idx);
+                                            }
+                                            let (train, editing) = Self::render_grid_cell_controls(
+                                                &self.profiles,
+                                                ui,
+                                                item,
+                                                item_width,
+                                                ui.make_persistent_id((
+                                                    "cat_combo",
+                                                    idx,
+                                                    &item.source_path,
+                                                )),
+                                            );
+                                            if let Some(category) = train {
+                                                train_request = Some((idx, category));
+                                            }
+                                            editing_this_frame |= editing;
+                                        });
                                     });
                                     if (position + 1) % columns == 0 {
                                         ui.end_row();
@@ -83,6 +114,14 @@ impl PhotoOrganizerApp {
                             self.train_single_item(idx, &category);
                         }
                     });
+
+                // Recorded after the cells are drawn, because that is the only
+                // point where "is a cell being typed into" is known. Read back at
+                // the top of the next frame by `resolve_order_hold`, one frame
+                // later than the keystroke — by which point the editor has had a
+                // frame to take focus, which it could not have done sooner.
+                self.editing_cell = editing_this_frame;
+                self.order_sort = (self.sort_by, self.sort_direction);
             });
     }
 
