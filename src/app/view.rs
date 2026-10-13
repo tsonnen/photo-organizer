@@ -138,11 +138,19 @@ pub(super) fn admits(filters: &Filters, row: &Row<'_>, threshold: f32) -> bool {
         && admits_category(filters, row)
 }
 
-/// Inclusive on both ends, so a range set to one exact month keeps that month
-/// instead of needing a second bound to agree with it.
+/// Inclusive on both ends, so a range set to one exact day keeps that day.
+///
+/// Dates carry an *optional* day, so each covers a span rather than a point: a
+/// date with a day is that day, a date without one is its whole month. A photo is
+/// admitted when its span overlaps the range. That reads naturally at every
+/// precision — "March 2021" keeps a photo taken on the 14th, and a month-wide
+/// range keeps a photo whose day was never recorded, which dropping it would not.
 fn admits_date(filters: &Filters, row: &Row<'_>) -> bool {
-    let date = (row.date.year, row.date.month);
-    filters.date_from.is_none_or(|from| date >= from) && filters.date_to.is_none_or(|to| date <= to)
+    let (photo_first, photo_last) = row.date.span();
+    filters
+        .date_from
+        .is_none_or(|from| photo_last >= from.start())
+        && filters.date_to.is_none_or(|to| photo_first <= to.end())
 }
 
 /// Compares against [`rank_confidence`] rather than the displayed number, so the
@@ -339,11 +347,28 @@ pub(super) fn category_choices<'a>(rows: impl IntoIterator<Item = Row<'a>>) -> V
 /// the years present in the folder are the only ones a filter can usefully name.
 /// Staged rather than every year a photo *could* carry, because a bound on a
 /// year nothing was taken in cannot narrow anything.
-pub(super) fn year_choices<'a>(rows: impl IntoIterator<Item = Row<'a>>) -> Vec<u32> {
-    let mut years: Vec<u32> = rows.into_iter().map(|row| row.date.year).collect();
-    years.sort_unstable();
-    years.dedup();
-    years
+/// Today, as the calendar marks it.
+///
+/// Passed into the picker rather than read there so that "today" is one decision
+/// the caller makes, and so a test can supply its own.
+pub(super) fn today() -> PhotoDate {
+    let now = chrono::Local::now().date_naive();
+    use chrono::Datelike;
+    PhotoDate::new(now.year() as u32, now.month(), Some(now.day()))
+}
+
+/// The newest `(year, month)` among the staged photos, or today's if nothing is
+/// staged — the month the date picker should open on when there is no bound to
+/// land on.
+pub(super) fn newest_date<'a>(rows: impl IntoIterator<Item = Row<'a>>) -> (u32, u32) {
+    rows.into_iter()
+        .map(|row| (row.date.year, row.date.month))
+        .max()
+        .unwrap_or_else(|| {
+            let today = chrono::Local::now().date_naive();
+            use chrono::Datelike;
+            (today.year() as u32, today.month())
+        })
 }
 
 /// The direction button's text: which way the *current* sort runs, named in
@@ -458,8 +483,8 @@ mod tests {
     #[test]
     fn a_date_range_keeps_only_what_is_inside_it() {
         let filters = Filters {
-            date_from: Some((2020, 6)),
-            date_to: Some((2021, 3)),
+            date_from: Some(PhotoDate::new(2020, 6, None)),
+            date_to: Some(PhotoDate::new(2021, 3, None)),
             ..Filters::default()
         };
 
@@ -473,18 +498,95 @@ mod tests {
     #[test]
     fn an_open_ended_date_range_bounds_only_one_side() {
         let from = Filters {
-            date_from: Some((2020, 1)),
+            date_from: Some(PhotoDate::new(2020, 1, None)),
             ..Filters::default()
         };
         assert!(admits(&from, &row(2030, 12, "a", 0.5), THRESHOLD));
         assert!(!admits(&from, &row(2019, 12, "a", 0.5), THRESHOLD));
 
         let to = Filters {
-            date_to: Some((2020, 1)),
+            date_to: Some(PhotoDate::new(2020, 1, None)),
             ..Filters::default()
         };
         assert!(admits(&to, &row(1999, 1, "a", 0.5), THRESHOLD));
         assert!(!admits(&to, &row(2020, 2, "a", 0.5), THRESHOLD));
+    }
+
+    #[test]
+    fn a_date_range_can_be_narrowed_to_a_single_day() {
+        // One click on a day sets both bounds, so a range set to a single day has
+        // to keep that day and drop its neighbours.
+        let filters = Filters {
+            date_from: Some(PhotoDate::new(2021, 5, Some(14))),
+            date_to: Some(PhotoDate::new(2021, 5, Some(14))),
+            ..Filters::default()
+        };
+
+        assert!(admits(
+            &filters,
+            &row_on(PhotoDate::new(2021, 5, Some(14)), "on the day", 0.5),
+            THRESHOLD
+        ));
+        assert!(!admits(
+            &filters,
+            &row_on(PhotoDate::new(2021, 5, Some(13)), "the day before", 0.5),
+            THRESHOLD
+        ));
+        assert!(!admits(
+            &filters,
+            &row_on(PhotoDate::new(2021, 5, Some(15)), "the day after", 0.5),
+            THRESHOLD
+        ));
+    }
+
+    #[test]
+    fn a_month_wide_bound_covers_a_photo_dated_to_the_day() {
+        // A bound naming no day spans its whole month, so a range of
+        // "March 2021" keeps a photo taken on the 14th. Comparing starts alone
+        // would read as an empty range and drop it.
+        let filters = Filters {
+            date_from: Some(PhotoDate::new(2021, 3, None)),
+            date_to: Some(PhotoDate::new(2021, 3, None)),
+            ..Filters::default()
+        };
+
+        assert!(admits(
+            &filters,
+            &row_on(PhotoDate::new(2021, 3, Some(14)), "mid month", 0.5),
+            THRESHOLD
+        ));
+        assert!(admits(
+            &filters,
+            &row_on(PhotoDate::new(2021, 3, Some(31)), "last day", 0.5),
+            THRESHOLD
+        ));
+    }
+
+    #[test]
+    fn a_photo_with_no_recorded_day_survives_a_month_wide_range() {
+        // A row cached before the day column existed has none, and it must not
+        // silently drop out of a range it belongs in.
+        let filters = Filters {
+            date_from: Some(PhotoDate::new(2021, 3, None)),
+            date_to: Some(PhotoDate::new(2021, 3, None)),
+            ..Filters::default()
+        };
+
+        assert!(admits(&filters, &undated("legacy row", 0.5), THRESHOLD));
+    }
+
+    #[test]
+    fn a_day_bound_does_not_admit_another_month() {
+        // The span comparison is overlap, not containment, so a day-bound range
+        // still excludes a photo from a neighbouring month rather than reading
+        // its span as covering it.
+        let filters = Filters {
+            date_from: Some(PhotoDate::new(2021, 5, Some(14))),
+            date_to: Some(PhotoDate::new(2021, 5, Some(14))),
+            ..Filters::default()
+        };
+
+        assert!(!admits(&filters, &row(2021, 6, "june", 0.5), THRESHOLD));
     }
 
     #[test]
@@ -560,7 +662,7 @@ mod tests {
         }
         .is_open());
         assert!(!Filters {
-            date_to: Some((2020, 1)),
+            date_to: Some(PhotoDate::new(2020, 1, None)),
             ..Filters::default()
         }
         .is_open());
@@ -596,8 +698,8 @@ mod tests {
         // one short-circuited to true, the filter panel would be three controls
         // all setting the same single filter.
         let filters = Filters {
-            date_from: Some((2020, 1)),
-            date_to: Some((2020, 12)),
+            date_from: Some(PhotoDate::new(2020, 1, None)),
+            date_to: Some(PhotoDate::new(2020, 12, None)),
             confidence_from: 0.8,
             confidence_to: 0.95,
             category: Some("Beach Trip".to_string()),
