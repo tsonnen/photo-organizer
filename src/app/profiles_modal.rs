@@ -168,7 +168,7 @@ fn render_profile_row(
     profile: &CategoryProfile,
     prompt: &mut DeletePrompt,
 ) -> Option<String> {
-    let armed = prompt.is_armed(&profile.name);
+    let armed = prompt.is_armed(profile.name.as_str());
     let mut confirmed = None;
 
     egui::Frame::none()
@@ -204,7 +204,7 @@ fn render_profile_row(
                         .on_hover_text(format!("Delete the {} profile", profile.name))
                         .clicked()
                     {
-                        prompt.arm(&profile.name);
+                        prompt.arm(profile.name.as_str());
                     }
                 });
             });

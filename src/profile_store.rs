@@ -20,7 +20,7 @@ pub struct RankedProfile {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CategoryProfile {
-    pub name: String,
+    pub name: CategoryName,
     pub centroid: Vec<f32>,
     #[serde(default = "default_sample_count")]
     pub sample_count: usize,
@@ -39,7 +39,7 @@ impl CategoryProfile {
             // `rank_profiles`, the dropdown — and files it under it, so a name
             // only sanitised at the point of use would stop identifying its own
             // profile the moment it was shown next to the stored spelling.
-            name: CategoryName::from_user_input(&name.into()).into_string(),
+            name: CategoryName::from_user_input(&name.into()),
             centroid: norm_centroid,
             sample_count: 1,
         }
@@ -92,7 +92,7 @@ impl ProfileStore {
         // point of use is what stops a sanitised name from looking like a
         // different, custom category to the dropdown.
         for profile in &mut store.profiles {
-            profile.name = CategoryName::from_user_input(&profile.name).into_string();
+            profile.name = CategoryName::from_user_input(profile.name.as_str());
         }
 
         Ok(store)
@@ -111,7 +111,8 @@ impl ProfileStore {
 
     pub fn remove_category(&mut self, name: &str) -> bool {
         let initial_len = self.profiles.len();
-        self.profiles.retain(|p| !p.name.eq_ignore_ascii_case(name));
+        self.profiles
+            .retain(|p| !p.name.as_str().eq_ignore_ascii_case(name));
         self.profiles.len() < initial_len
     }
 
@@ -130,7 +131,7 @@ impl ProfileStore {
         if let Some(existing) = self
             .profiles
             .iter_mut()
-            .find(|p| p.name.eq_ignore_ascii_case(category.as_str()))
+            .find(|p| p.name.as_str().eq_ignore_ascii_case(category.as_str()))
         {
             existing.add_sample(embedding);
         } else {
@@ -205,7 +206,7 @@ impl ProfileStore {
         !self
             .profiles
             .iter()
-            .any(|p| p.name.eq_ignore_ascii_case(category))
+            .any(|p| p.name.as_str().eq_ignore_ascii_case(category))
     }
 
     /// The closest trained centroid to `embedding`, with its similarity, or
@@ -228,12 +229,11 @@ impl ProfileStore {
 
         let (profile, similarity) = best?;
         Some((
-            // A backstop, not the sanitisation point: `CategoryProfile::new`
-            // and `load_from_file` both canonicalise the name, so this is
-            // already a no-op and the result still identifies the profile
-            // it came from. It stays because the field is public and a
-            // `CategoryProfile` can be built by struct literal.
-            CategoryName::from_user_input(&profile.name),
+            // The name is already a `CategoryName` now that the field is one,
+            // so this is just a clone rather than a re-sanitisation. It stays
+            // as a clone because the field is public and a `CategoryProfile`
+            // can be built by struct literal with an unsanitised name.
+            profile.name.clone(),
             similarity.clamp(0.0, 1.0),
         ))
     }
@@ -251,7 +251,7 @@ impl ProfileStore {
                     0.0
                 };
                 RankedProfile {
-                    name: p.name.clone(),
+                    name: p.name.to_string(),
                     confidence: conf,
                 }
             })
@@ -595,7 +595,7 @@ mod tests {
 
         let mut store = ProfileStore::default();
         store.profiles.push(CategoryProfile {
-            name: "Sunsets".to_string(),
+            name: CategoryName::from_user_input("Sunsets"),
             centroid: vec![0.8, 0.6],
             sample_count: 3,
         });
@@ -604,7 +604,7 @@ mod tests {
         let loaded = ProfileStore::load_from_file(&file_path).expect("load profiles");
 
         assert_eq!(loaded.profiles.len(), 1);
-        assert_eq!(loaded.profiles[0].name, "Sunsets");
+        assert_eq!(loaded.profiles[0].name.as_str(), "Sunsets");
         assert_eq!(loaded.profiles[0].sample_count, 3);
 
         let _ = fs::remove_file(&file_path);
@@ -637,7 +637,7 @@ mod tests {
 
         let loaded = ProfileStore::load_from_file(&file_path).expect("load legacy profiles");
         assert_eq!(loaded.profiles.len(), 1);
-        assert_eq!(loaded.profiles[0].name, "Sunsets");
+        assert_eq!(loaded.profiles[0].name.as_str(), "Sunsets");
 
         loaded.save_to_file(&file_path).expect("re-save");
         let rewritten = fs::read_to_string(&file_path).expect("read re-saved");
@@ -690,7 +690,7 @@ mod tests {
         // And the rewrite is persisted, so it only has to happen once.
         loaded.save_to_file(&file_path).expect("re-save");
         let reloaded = ProfileStore::load_from_file(&file_path).expect("reload re-saved");
-        assert_eq!(reloaded.profiles[0].name, "Beach-Trip");
+        assert_eq!(reloaded.profiles[0].name.as_str(), "Beach-Trip");
 
         let _ = fs::remove_file(&file_path);
     }

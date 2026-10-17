@@ -169,7 +169,7 @@ fn store_with(names: &[&str], samples: usize) -> ProfileStore {
         profiles: names
             .iter()
             .map(|name| CategoryProfile {
-                name: (*name).to_string(),
+                name: crate::category_name::CategoryName::from_user_input(name),
                 centroid: vec![1.0, 0.0],
                 sample_count: samples,
             })
@@ -681,7 +681,7 @@ fn open_profiles_modal(screen: egui::Vec2, names: &[String]) -> (Vec<WidgetRect>
     app.profiles.profiles = names
         .iter()
         .map(|name| crate::profile_store::CategoryProfile {
-            name: name.clone(),
+            name: crate::category_name::CategoryName::from_user_input(name),
             centroid: vec![1.0, 0.0],
             sample_count: 3,
         })
