@@ -71,8 +71,8 @@ impl PhotoOrganizerApp {
                 subject: override_subject.clone().unwrap_or_else(|| {
                     crate::category_name::CategoryName::from_user_input(&self.items[i].category)
                 }),
-                year: self.items[i].year,
-                month: self.items[i].month,
+                year: self.items[i].date.year,
+                month: self.items[i].date.month,
             })
             .collect();
 
@@ -287,6 +287,7 @@ fn first_failure(journal: &TransferJournal) -> String {
 mod tests {
     use super::*;
     use crate::app::models::StagedItem;
+    use crate::classification::PhotoDate;
     use crate::transfer::FileOperation;
 
     /// An app holding one selected, decided photo at `source_path`.
@@ -299,8 +300,7 @@ mod tests {
         app.journal_path = journal_path.to_path_buf();
         app.items = vec![StagedItem {
             source_path: source_path.to_path_buf(),
-            year: 2024,
-            month: 7,
+            date: PhotoDate::new(2024, 7, None),
             is_exif: false,
             frame: None,
             category: "Sunsets".into(),

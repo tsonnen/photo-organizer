@@ -77,7 +77,7 @@ CI (`.github/workflows/build-and-test.yaml`) runs these in order, so match it lo
 cargo fmt --check
 cargo clippy -- -D warnings     # warnings are errors; the tree is currently clean
 cargo build
-cargo test                      # 239 tests, ~5s once built
+cargo test                      # 244 tests, ~5s once built
 ```
 
 - One test / one area: `cargo test media::tests::test_scan_preview_jpeg_scales_down_and_keeps_original_size`,
@@ -181,6 +181,22 @@ puts its Browse buttons on section headers for that reason.
   (under `ZZZZ`, so lower-cased real names sort after it). Descending inverts the key (`Reverse`), never
   the run, so `sort_by_cached_key`'s positional tie-break survives and ties keep their order. See
   `docs/classification_pipeline.md` → **Ordering and narrowing the grid** for the rules and why.
+- `PhotoDate.day` is `Option<u32>` and `photo_cache.day` is nullable. A row written before the column has
+  none, and `Option` says "unknown" without inventing a day nobody recorded; `StagedItem` carries a whole
+  `PhotoDate` rather than loose year/month/day so the three cannot drift. The day is what the date sort
+  orders by. The date *filter* is still month-wide tuple comparison — the calendar PR makes it a span.
+  A photo's day used to be parsed and then dropped by `extract_date`, which made every photo in a month
+  tie under a date sort. If a day is ever added to `RawPhotoInput`, note that the output layout
+  `<Category>/<YYYY>/<MM>/` is month-granular **by contract** and does not take one.
+  **The missing day is repaired, and it has to be.** The scanner's cached branch re-reads a row with no
+  day off the file and writes it back, beside the frame-size repair it already does, because the reader
+  reporting `None` is not a repair: it hands `PhotoFacts` a dateless photo and `insert_cache` then writes
+  that `None` straight back out. Without the repair every returning user keeps their month-tied sort for
+  the life of the folder — which is the complaint the day was added to answer — and the comments here and
+  in `db.rs` read like the repair exists. It was asserted by three comments and a PR body before it was
+  implemented; `a_rescan_backfills_the_day_a_legacy_row_is_missing` is what pins it. `is_exif_date` is
+  rewritten with it, since `extract_date` returns the pair together and a filesystem date on a row that
+  claims EXIF is not a row anyone can reason about.
 - **Transfer** (`src/transfer/`): `plan_batch` → `execute_batch` → `TransferJournal` →
   `undo`, `_1` collision suffixes instead of overwriting, `.xmp`/`.aae` sidecars travelling
   with the photo. One module owns the on-disk layout on purpose: with the reverse

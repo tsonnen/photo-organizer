@@ -1,4 +1,4 @@
-use crate::classification::{Classification, FrameSize, PhotoDate, PhotoFacts};
+use crate::classification::{Classification, FrameSize, PhotoFacts};
 use crate::db::{CachedPhotoData, Database};
 use crate::inference::{extract_embedding, init_clip_session};
 use crate::media::{
@@ -203,6 +203,31 @@ pub fn scan_folder_with_db(
                 };
 
                 if let Some(mut c) = cached {
+                    // A row written before the cache stored the day has none, and
+                    // the date sort and the calendar both key off it: re-read the
+                    // file's timestamp once and fill it in, the same way a missing
+                    // frame size is repaired below. Without this a returning user's
+                    // `photo_cache.db` keeps reporting `None` forever — every photo
+                    // in a month stays tied under the sort, which is the complaint
+                    // the day was added to answer. Costs one header read per legacy
+                    // row, once.
+                    //
+                    // `is_exif_date` travels with the day because `extract_date`
+                    // returns them as a pair, and a date read off the filesystem
+                    // recorded under a row that claims EXIF is not a row anyone
+                    // can reason about. It cannot disagree with what is already
+                    // there: the hash matches, so the file has not changed, and the
+                    // flag was written from the same call.
+                    if c.date.day.is_none() {
+                        let (date, is_exif_date) = extract_date(path);
+                        c.date = date;
+                        c.is_exif_date = is_exif_date;
+                        let db_guard = db.lock().unwrap();
+                        if let Some(ref db_conn) = *db_guard {
+                            let _ = db_conn.insert_cache(&file_hash, &c);
+                        }
+                    }
+
                     // A row written before the cache stored the frame size has
                     // none, and the rules key off resolution: re-read the header
                     // once and fill it in, so this photo is decided the same way on
@@ -277,15 +302,15 @@ pub fn scan_folder_with_db(
                 let (date_info, preview, cached_thumb, image) = match load_scan_preview(path) {
                     Ok(preview) => {
                         let (thumb, egui_img) = dynamic_to_cached_thumb(&preview.image);
-                        let date_info = extract_date(path);
-                        (date_info, preview, thumb, egui_img)
+                        let (date, is_exif_date) = extract_date(path);
+                        ((date, is_exif_date), preview, thumb, egui_img)
                     }
                     Err(_) => return,
                 };
 
                 let mut facts = PhotoFacts {
                     path: path.clone(),
-                    date: PhotoDate::new(date_info.0, date_info.1),
+                    date: date_info.0,
                     // The heuristics read real resolution (a 1920x1080 PNG is a
                     // screenshot), so the facts carry the source dimensions
                     // rather than the preview's.
@@ -293,7 +318,7 @@ pub fn scan_folder_with_db(
                         preview.original_width,
                         preview.original_height,
                     )),
-                    is_exif: date_info.2,
+                    is_exif: date_info.1,
                     embedding: Vec::new(),
                 };
 
@@ -361,6 +386,8 @@ pub fn scan_folder_with_db(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::classification::PhotoDate;
+    use crate::media;
 
     /// A rules-only scan config: no model, so these tests exercise the
     /// heuristic path without depending on a CLIP checkpoint being present.
@@ -424,6 +451,96 @@ mod tests {
             }
         }
         (items, updates)
+    }
+
+    /// Runs a scan to completion, returning the date each photo was staged with,
+    /// keyed by file name.
+    ///
+    /// The `Item` message rather than the `Update`, so it reads the date the scan
+    /// actually decided on: a cached photo is classified before it is staged and
+    /// never sends an `Update` at all.
+    fn scan_dates(folder: &Path, db_path: &Path) -> std::collections::HashMap<String, PhotoDate> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        scan_folder_with_db(
+            folder.to_path_buf(),
+            ProfileStore::default(),
+            rules_only(),
+            tx,
+            egui::Context::default(),
+            db_path.to_path_buf(),
+            1,
+        );
+
+        let name_of = |p: &Path| p.file_name().unwrap().to_string_lossy().into_owned();
+        let mut dates = std::collections::HashMap::new();
+        while let Ok(event) = rx.recv_timeout(std::time::Duration::from_secs(60)) {
+            match event.message {
+                ScanMessage::Item(payload) => {
+                    dates.insert(name_of(&payload.facts.path), payload.facts.date);
+                }
+                ScanMessage::Complete => break,
+                _ => {}
+            }
+        }
+        dates
+    }
+
+    #[test]
+    fn a_rescan_backfills_the_day_a_legacy_row_is_missing() {
+        // The state every returning user is in: a `photo_cache.db` written before
+        // the day column existed, so every row's `day` is NULL. Three comments and
+        // a PR body said the next rescan would read the day back off the file.
+        // Without the repair it never does — the reader reports `None`, the
+        // scanner passed that through as the photo's date, and `insert_cache`
+        // wrote the `None` straight back out — so every photo in a month stayed
+        // tied under the date sort, which is the whole complaint the day was
+        // added to answer.
+        let temp_dir =
+            std::env::temp_dir().join(format!("test_scan_day_backfill_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&temp_dir);
+        fs::create_dir_all(&temp_dir).unwrap();
+        let db_path = temp_dir.join("legacy_cache.db");
+        let photo = temp_dir.join("holiday_pic.png");
+        png_of_size(&photo, 1920, 1080, [10, 100, 150]);
+
+        // The row a build without the day column would have left: the real hash,
+        // so the scan finds it, but no day.
+        let hash = Database::compute_file_hash(&photo).expect("hash the photo");
+        let db = Database::init(&db_path).expect("open the cache");
+        db.insert_cache(
+            &hash,
+            &CachedPhotoData {
+                // Deliberately a different year and month from the file's, so a
+                // "carry the old value through" bug cannot pass this by accident.
+                date: PhotoDate::new(1999, 1, None),
+                is_exif_date: false,
+                embedding: vec![],
+                thumbnail: None,
+                frame: None,
+            },
+        )
+        .expect("write the legacy row");
+
+        let dates = scan_dates(&temp_dir, &db_path);
+        let from_file = media::extract_date(&photo).0;
+        assert!(
+            from_file.day.is_some(),
+            "the fixture itself has to carry a day, or this proves nothing"
+        );
+        assert_eq!(
+            dates["holiday_pic.png"], from_file,
+            "the rescan should have replaced the legacy row's date with the file's"
+        );
+
+        // And it is written back, so the repair costs one scan rather than one per
+        // scan for the rest of the folder's life.
+        let reread = db
+            .get_cached(&hash)
+            .expect("query the cache")
+            .expect("the row is still there");
+        assert_eq!(reread.date, from_file, "and persisted, not just reported");
+
+        let _ = fs::remove_dir_all(&temp_dir);
     }
 
     // One test, because the env var is process-global and cargo runs tests in

@@ -69,8 +69,8 @@ const NAME_FIELD_WIDTH: f32 = 260.0;
 /// cannot escape `base`.
 fn destination_for(base: &Path, name: &CategoryName, item: &StagedItem) -> PathBuf {
     base.join(name.as_str())
-        .join(format!("{:04}", item.year))
-        .join(format!("{:02}", item.month))
+        .join(format!("{:04}", item.date.year))
+        .join(format!("{:02}", item.date.month))
 }
 
 /// The distinct `<year>/<month>` folders a selection would land in, ordered.

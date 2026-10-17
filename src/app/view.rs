@@ -28,7 +28,7 @@
 use super::models::{Filters, SortBy, SortDirection, StagedItem};
 use super::PhotoOrganizerApp;
 use crate::category_name::CategoryName;
-use crate::classification::ClassificationSource;
+use crate::classification::{ClassificationSource, PhotoDate};
 
 /// Sorts after every real category name, in an ascending sort.
 ///
@@ -44,8 +44,7 @@ const UNCLASSIFIED_SORT_KEY: &str = "zzzz";
 /// several times a frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct Row<'a> {
-    year: u32,
-    month: u32,
+    date: PhotoDate,
     category: &'a str,
     confidence: f32,
     source: ClassificationSource,
@@ -54,8 +53,7 @@ pub(super) struct Row<'a> {
 impl<'a> From<&'a StagedItem> for Row<'a> {
     fn from(item: &'a StagedItem) -> Self {
         Self {
-            year: item.year,
-            month: item.month,
+            date: item.date,
             category: &item.category,
             confidence: item.confidence,
             source: item.source,
@@ -143,7 +141,7 @@ pub(super) fn admits(filters: &Filters, row: &Row<'_>, threshold: f32) -> bool {
 /// Inclusive on both ends, so a range set to one exact month keeps that month
 /// instead of needing a second bound to agree with it.
 fn admits_date(filters: &Filters, row: &Row<'_>) -> bool {
-    let date = (row.year, row.month);
+    let date = (row.date.year, row.date.month);
     filters.date_from.is_none_or(|from| date >= from) && filters.date_to.is_none_or(|to| date <= to)
 }
 
@@ -174,7 +172,7 @@ pub(super) fn sort_rows(
     threshold: f32,
 ) {
     match sort {
-        SortBy::DateTaken => sort_ordered(rows, direction, |row| (row.year, row.month)),
+        SortBy::DateTaken => sort_ordered(rows, direction, |row| row.date.sort_key()),
         SortBy::Confidence => {
             // Not `sort_ordered`: `f32` is not `Ord`, so there is no key to
             // cache — and none worth caching either, since the key is a field
@@ -342,7 +340,7 @@ pub(super) fn category_choices<'a>(rows: impl IntoIterator<Item = Row<'a>>) -> V
 /// Staged rather than every year a photo *could* carry, because a bound on a
 /// year nothing was taken in cannot narrow anything.
 pub(super) fn year_choices<'a>(rows: impl IntoIterator<Item = Row<'a>>) -> Vec<u32> {
-    let mut years: Vec<u32> = rows.into_iter().map(|row| row.year).collect();
+    let mut years: Vec<u32> = rows.into_iter().map(|row| row.date.year).collect();
     years.sort_unstable();
     years.dedup();
     years
@@ -401,12 +399,27 @@ mod tests {
     /// tests need neither a texture nor a live `Context`.
     fn row(year: u32, month: u32, category: &'static str, confidence: f32) -> Row<'static> {
         Row {
-            year,
-            month,
+            date: PhotoDate::new(year, month, None),
             category,
             confidence,
             source: ClassificationSource::VisualModel,
         }
+    }
+
+    /// A row on a given day of a month.
+    fn row_on(date: PhotoDate, category: &'static str, confidence: f32) -> Row<'static> {
+        Row {
+            date,
+            category,
+            confidence,
+            source: ClassificationSource::VisualModel,
+        }
+    }
+
+    /// A date with no day, the way a photo cached before the day column existed
+    /// is read back.
+    fn undated(category: &'static str, confidence: f32) -> Row<'static> {
+        row_on(PhotoDate::new(2021, 3, None), category, confidence)
     }
 
     fn manual(row: Row<'_>) -> Row<'_> {
@@ -741,6 +754,39 @@ mod tests {
         assert_eq!(
             sorted_names(rows, SortBy::DateTaken, SortDirection::Ascending),
             vec!["early", "late"]
+        );
+    }
+
+    #[test]
+    fn dates_sort_by_day_not_just_by_month() {
+        // The day has to take part in the comparison, not merely break ties
+        // between months. A folder of photos from one trip is otherwise a
+        // shuffled month.
+        let rows = vec![
+            row_on(PhotoDate::new(2021, 5, Some(20)), "c", 0.5),
+            row_on(PhotoDate::new(2021, 5, Some(2)), "a", 0.5),
+            row_on(PhotoDate::new(2021, 5, Some(11)), "b", 0.5),
+        ];
+
+        assert_eq!(
+            sorted_names(rows, SortBy::DateTaken, SortDirection::Ascending),
+            vec!["a", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn photos_with_no_recorded_day_sort_before_the_rest_of_their_month() {
+        // A row cached before the day column existed has none. It sorts first in
+        // its month, which is arbitrary but stable, and keeps it out of the way
+        // of the photos whose day is known.
+        let rows = vec![
+            row_on(PhotoDate::new(2021, 5, Some(14)), "dated", 0.5),
+            undated("undated", 0.5),
+        ];
+
+        assert_eq!(
+            sorted_names(rows, SortBy::DateTaken, SortDirection::Ascending),
+            vec!["undated", "dated"]
         );
     }
 
