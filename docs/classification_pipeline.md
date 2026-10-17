@@ -141,6 +141,14 @@ underneath it: a scan `Update` lands a category, a combo box renames one, the
 threshold re-classifies the lot. A cache would need invalidating in each of those
 places and would be stale in whichever one was missed.
 
+The sort control and the three filters are **one row**, not a sort row plus a
+filter panel behind a toggle. Both halves were wrong alone: opening the panel
+shoved the whole grid down a line, so reaching for a filter moved the thing the
+filter was about, and a filter set then hidden was a filter the user could not
+see — which is what forced the `●` marker that made the toggle guessable. With
+nothing to reveal there is nothing to mark, and `Clear` appears only while
+something is narrowed.
+
 ### Confidence is ranked, not read
 
 `rank_confidence` is not `item.confidence`, and the difference is the whole
@@ -175,19 +183,82 @@ sorts *before* every one of them, since `Z` is `0x5A` and `a` is `0x61`.
 The unsorted name itself is read from `CategoryName::unsorted()` rather than
 copied, so the key cannot drift from the name a `Decision` actually carries.
 
-### A photo's date carries a day, and the filter keeps whole months
+### A date bound is a span, not a point
 
-`PhotoDate` is a year, a month and an optional day. `extract_date` reads the day
-from EXIF `DateTimeOriginal` when it is there and from the file's filesystem
-timestamp otherwise, and `photo_cache` persists it in a nullable `day` column —
-a row written before the column has none, and the next rescan backfills it from
-the file. The day is what the date sort orders by, so a folder of photos from one
-trip stops reading as a shuffled month.
+`PhotoDate.day` is optional, so each end of the range covers a *span* rather than a
+single day: a bound naming a day is that day, and a bound naming only a month is its
+whole month. A photo is admitted when its own span overlaps the range, and the ends
+are compared through `start()`/`end()` rather than by start date alone — comparing
+starts would make "March 2021" an empty range and drop every photo taken in it,
+including one taken on the 14th.
 
-The date *filter* is still month-wide: the two bounds are `(year, month)` pairs
-picked from combo boxes, and a photo is admitted when it falls inside both. An
-unset bound is that direction open: a **From** alone means "everything since", a
-**To** alone means "everything up to".
+That overlap also keeps a photo with no recorded day inside a month-wide range, which
+`Option` exists to express in the first place: a row cached before the day column has
+none, and dropping it would quietly hide photos a rescan has not yet reached.
+
+### The calendar
+
+egui 0.30 has no date picker and the crate alternatives are unusable here, so
+`src/app/calendar.rs` is a hand-rolled month grid. Two invariants hold it together:
+
+- `month_grid` pads every month to **whole weeks**. Without that a 28-day February
+  lays out as four rows and a 31-day May as five, and the picker changes height as
+  the user pages.
+- `first_weekday` goes through `chrono`, because a hand-rolled day count that is off
+  by one shifts a whole month by a column — and every wrong day then reads as a real
+  date the user could pick.
+
+`range_after_click` is the selection state machine, and it has three rules because
+each replaced a complaint:
+
+- **One click is one day.** It sets *both* bounds. The previous reading — a start with
+  no end — filtered to every photo from that day onwards while *drawing* as a bar to
+  the end of the month, so the picker looked right and the grid disagreed.
+- **The second click widens, and widening backwards swaps the two bounds.** Clicking
+  end-then-start is the natural gesture, and an inverted range reads as empty.
+- **The third click starts over**, the "not that, this instead" gesture every other
+  date picker has. The absorb-it-instead alternative — a range that grows to meet any
+  later click — was tried and reverted: a fortnight silently becomes a year with no
+  way back. Restating is cheap *because* a single day costs one click.
+
+The two states are told apart by whether the bounds are the same day rather than by a
+flag, and a one-sided selection (unreachable from a click) resets rather than
+narrowing forever.
+
+The picker is a **popup over the grid**, not a row in the toolbar: inline it pushed the
+grid down 505pt, measured by `opening_the_calendar_does_not_move_the_grid`, so
+choosing a date moved the photos the date was about. Open/closed state is egui's popup
+memory — `CloseOnClickOutside`, **not** `CloseOnClick`, since the day cells are clicks
+*inside* the popup and closing on them would dismiss the calendar after every date
+picked. Only the month cursor is the app's, in `CalendarControl`, so reopening lands
+on the bound being edited rather than wherever the user last paged to.
+
+Three layout facts that cost measurement to find, all of which look like styling and
+are not:
+
+- The weekday initials and the days are rows of **one** grid, not two. Two grids means
+  two independent column sets and nothing makes them agree.
+- The grid sets **`min_col_width(DAY_SIZE)`**. `egui::Grid` otherwise forces every
+  cell to `spacing.interact_size`, 40pt wide by default, so a day sat in a wider column
+  and the difference read as a gap that no `Grid::spacing` setting could close —
+  because it was never the spacing. With `DAY_SPACING_X` at 0 the dates are edge to
+  edge.
+- **The horizontal spacing is 0 and the vertical is not.** They want opposite things:
+  abutting cells are what make a selected range read as one bar, while a gap between
+  weeks is what stops a range that wraps looking continuous with itself.
+
+A selected range is **one continuous bar per week**, so the corner rounding belongs to
+the *bar* rather than to a date: `day_fill` decides `Starts`/`Middle`/`Ends`/`Only` by
+asking whether the day either side is selected **and in the same row of the grid**, and
+`DayFill::rounding` rounds only the corners the bar turns at. Two bugs live in it: the
+column must be taken `(leading + day - 1) % 7`, or a day in the second week looks as
+though it had a day to its left and the bar runs off the row; and `first_weekday`
+converts chrono with **`+ 1`**, not `+ 6`.
+
+The heading is **three explicit slots** — `ARROW_SLOT`, title, `ARROW_SLOT` — in a band
+the width of the grid, not a row of widgets. A bare `ui.horizontal` greedily fills the
+panel, and a filter panel is much wider than seven 38pt days: the arrows spread to the
+panel edges and `«`/`»` land outside it, clipped.
 
 ### The grid does not reorder under the caret
 

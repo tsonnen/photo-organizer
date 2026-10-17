@@ -79,8 +79,13 @@ click away — or the moment you change the sort.
 
 **Filters** has three narrowing controls that combine: a **date range**, a **confidence
 range**, and a **category**. All three have to hold for a photo to stay, so you can ask
-for "receipts, from 2021, that the model was sure about" in one go. A date bound with no
-year or month set is that end open, so **From** alone means "everything since".
+for "receipts, from 2021, that the model was sure about" in one go.
+
+Sort and filter sit on one row. The date range is picked from a calendar that opens over
+the grid: press 📅, click a day to select it alone, click a second to make a range and a
+third to start over. Clicking the dates the other way round works too — pick the 20th then
+the 10th and you get the 10th to the 20th, not an empty range. A bound that names no day
+covers its whole month, so "March 2021" keeps a photo taken on the 14th.
 
 A filter narrows what you're looking at *and* what the actions act on. Photos outside it
 aren't counted in the footer, aren't ticked by **All**, aren't trained from, and aren't

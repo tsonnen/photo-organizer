@@ -272,15 +272,17 @@ pub(crate) fn format_date(date: &PhotoDate) -> String {
 /// is the floor that admits everything, and a control whose resting position
 /// already says what it does needs no second switch saying it again.
 ///
-/// A date bound is a whole `(year, month)` rather than a loose year on its own:
-/// a month with no year to put it in has no meaning, and a half-set bound is the
-/// kind of state that quietly filters everything out.
+/// A date bound is a whole [`PhotoDate`] rather than loose fields: a month with
+/// no year to put it in has no meaning, and a half-set bound is the kind of state
+/// that quietly filters everything out. `PhotoDate::day` is optional, so a bound
+/// can be a single day or a whole month — and both ends of the range are spans
+/// rather than points, which is what lets one bound describe either.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Filters {
     /// Inclusive lower bound on the photo's date.
-    pub date_from: Option<(u32, u32)>,
+    pub date_from: Option<PhotoDate>,
     /// Inclusive upper bound on the photo's date.
-    pub date_to: Option<(u32, u32)>,
+    pub date_to: Option<PhotoDate>,
     /// Inclusive lower bound on confidence, in `0.0..=1.0`. Zero admits all.
     ///
     /// Read against [`crate::app::view::rank_confidence`], not against the number

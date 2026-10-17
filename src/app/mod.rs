@@ -11,6 +11,7 @@
 //! - [`chrome`] the backdrop and card every modal shares
 //! - [`categories`] classification, training and the category widgets
 //! - [`view`] which staged photos are in view: the filters, and their order
+//! - [`calendar`] the month-grid date picker the date filter is set from
 //! - [`toolbar`] the top panel and its menu bar
 //! - [`footer`] the bottom panel: selection count and transfer destination
 //! - [`bulk_move_modal`] filing a whole selection under one name, untrained
@@ -19,6 +20,7 @@
 //! - [`models`] the staged-item record and the single write path onto it
 
 mod bulk_move_modal;
+mod calendar;
 mod categories;
 mod chrome;
 mod footer;
@@ -46,6 +48,7 @@ use models::{Filters, ModalPreview, SortBy, SortDirection, StagedItem};
 use profiles_modal::DeletePrompt;
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
+use toolbar::CalendarControl;
 
 pub struct PhotoOrganizerApp {
     input_folder: Option<PathBuf>,
@@ -99,7 +102,12 @@ pub struct PhotoOrganizerApp {
     /// the footer counts photos the user cannot see and Move files photos they
     /// never looked at.
     filters: Filters,
-    show_filter_panel: bool,
+    /// The month-grid date picker, kept across frames while its popup is open.
+    ///
+    /// Only the cursor is held here: open/closed state is egui's popup memory,
+    /// because a picker whose own flag disagreed with the popup's would either
+    /// stay open after a click outside it or refuse to open twice.
+    calendar: CalendarControl,
     /// Whether a grid cell's category editor held focus when the grid was last
     /// drawn.
     ///
@@ -194,7 +202,10 @@ impl PhotoOrganizerApp {
             sort_by: SortBy::default(),
             sort_direction: SortDirection::default(),
             filters: Filters::default(),
-            show_filter_panel: false,
+            // Replaced by `calendar::opening_month` the moment the picker is
+            // opened, so it lands on the bound being edited rather than wherever
+            // the user last paged to.
+            calendar: CalendarControl::default(),
             editing_cell: false,
             order_sort: (SortBy::default(), SortDirection::default()),
             drawn_order: Vec::new(),

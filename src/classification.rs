@@ -85,6 +85,27 @@ pub struct PhotoDate {
     pub day: Option<u32>,
 }
 
+/// How many days a month has, for a 1-based month.
+///
+/// Hand-rolled rather than reached for: chrono 0.4 has no days-in-month helper
+/// on its public API, and this is the whole of what the calendar needs.
+pub(crate) fn days_in_month(year: u32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        // Not a month any real date can name; 31 keeps `end()` ordered rather
+        // than panicking, and no photo will ever carry it.
+        _ => 31,
+    }
+}
+
+/// The Gregorian leap rule: divisible by 4, except centuries not divisible by 400.
+fn is_leap_year(year: u32) -> bool {
+    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
+}
+
 impl PhotoDate {
     pub const fn new(year: u32, month: u32, day: Option<u32>) -> Self {
         Self { year, month, day }
@@ -97,6 +118,33 @@ impl PhotoDate {
     /// arrived in rather than trading places on each frame.
     pub fn sort_key(&self) -> (u32, u32, u32) {
         (self.year, self.month, self.day.unwrap_or(0))
+    }
+
+    /// The first day this date can mean: itself, or the 1st when no day was
+    /// recorded.
+    pub fn start(&self) -> (u32, u32, u32) {
+        (self.year, self.month, self.day.unwrap_or(1))
+    }
+
+    /// The last day it can mean: itself, or the last of the month when none was
+    /// recorded.
+    pub fn end(&self) -> (u32, u32, u32) {
+        (
+            self.year,
+            self.month,
+            self.day
+                .unwrap_or_else(|| days_in_month(self.year, self.month)),
+        )
+    }
+
+    /// The days this date covers, as `(first, last)` — one point when it names a
+    /// day, the whole month when it does not.
+    ///
+    /// What makes an optional day workable at all: "March 2021" and "the 14th of
+    /// March" are both expressible, and a range test is interval overlap rather
+    /// than three-way comparison.
+    pub fn span(&self) -> ((u32, u32, u32), (u32, u32, u32)) {
+        (self.start(), self.end())
     }
 }
 

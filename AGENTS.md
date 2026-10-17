@@ -77,12 +77,12 @@ CI (`.github/workflows/build-and-test.yaml`) runs these in order, so match it lo
 cargo fmt --check
 cargo clippy -- -D warnings     # warnings are errors; the tree is currently clean
 cargo build
-cargo test                      # 244 tests, ~5s once built
+cargo test                      # 275 tests, ~5s once built
 ```
 
 - One test / one area: `cargo test media::tests::test_scan_preview_jpeg_scales_down_and_keeps_original_size`,
   `cargo test app::layout_tests`, `cargo test scanner`, `cargo test transfer`, `cargo test app::models::tests`,
-  `cargo test app::view`.
+  `cargo test app::view`, `cargo test app::calendar`.
 - `cargo test -- --nocapture inference::tests::test_init_clip_session_real_file` to watch the real
   CLIP load + forward pass. It **silently returns** if the model file is under 1024 bytes (an LFS pointer).
 - Linux build deps: `libgtk-3-dev libxkbcommon-dev` (the release workflow installs these).
@@ -183,10 +183,11 @@ puts its Browse buttons on section headers for that reason.
   `docs/classification_pipeline.md` → **Ordering and narrowing the grid** for the rules and why.
 - `PhotoDate.day` is `Option<u32>` and `photo_cache.day` is nullable. A row written before the column has
   none, and `Option` says "unknown" without inventing a day nobody recorded; `StagedItem` carries a whole
-  `PhotoDate` rather than loose year/month/day so the three cannot drift. The day is what the date sort
-  orders by. The date *filter* is still month-wide tuple comparison — the calendar PR makes it a span.
-  A photo's day used to be parsed and then dropped by `extract_date`, which made every photo in a month
-  tie under a date sort. If a day is ever added to `RawPhotoInput`, note that the output layout
+  `PhotoDate` rather than loose year/month/day so the three cannot drift. Range filtering is interval
+  overlap over `PhotoDate::span()`, not tuple comparison — that is what lets "March 2021" keep a photo taken
+  on the 14th, and a month-wide range keep a photo with no recorded day. Don't "simplify" it to `Ord`.
+  A photo's day used to be parsed and then dropped by `extract_date`, which made every photo in a month tie
+  under a date sort. If a day is ever added to `RawPhotoInput`, note that the output layout
   `<Category>/<YYYY>/<MM>/` is month-granular **by contract** and does not take one.
   **The missing day is repaired, and it has to be.** The scanner's cached branch re-reads a row with no
   day off the file and writes it back, beside the frame-size repair it already does, because the reader
@@ -197,6 +198,52 @@ puts its Browse buttons on section headers for that reason.
   implemented; `a_rescan_backfills_the_day_a_legacy_row_is_missing` is what pins it. `is_exif_date` is
   rewritten with it, since `extract_date` returns the pair together and a filesystem date on a row that
   claims EXIF is not a row anyone can reason about.
+- `src/app/calendar.rs` is the month-grid date picker the date filter is set from — egui 0.30 has no date
+  picker and the crate alternatives are unusable here, so it is hand-rolled. Two invariants: every month is
+  padded to **whole weeks** (`month_grid`), or the picker changes height as the user pages between a 28-day
+  February and a 31-day May; and `first_weekday` goes through `chrono`, because an off-by-one there shifts a
+  whole month by a column and every wrong day then reads as a real date the user could pick.
+  `range_after_click` is the selection state machine. Three rules, each of which replaced a complaint:
+  **one click is one day** (it sets both bounds — an open-ended reading filtered to every photo from that day
+  onwards while *drawing* as a bar to the end of the month, so the picker looked right and the grid
+  disagreed); **the second click widens**, and widening **backwards swaps** the two bounds, because clicking
+  end-then-start is the natural gesture and an inverted range reads as empty; and **the third click starts
+  over**, the "not that, this instead" gesture every other date picker has. The absorb-it-alternative — a
+  range that grows to meet any later click — was tried and reverted: a fortnight silently becomes a year
+  with no way back. Restating is cheap *because* a single day costs one click. The two states are told apart
+  by whether the bounds are the same day, not by a flag, and a one-sided selection (unreachable from a
+  click) resets rather than narrowing forever. Bounds compare through `start()`/`end()`, never by start date
+  alone — a whole-month bound covers that month.
+  Three layout facts that cost measurement to find, all of which look like styling and are not:
+  - The weekday initials and the days are rows of **one** grid, not two. Two grids means two independent
+    column sets and nothing makes them agree.
+  - The grid sets **`min_col_width(DAY_SIZE)`**. `egui::Grid` otherwise forces every cell to
+    `spacing.interact_size`, 40pt wide by default, so a date smaller than that sat in a wider column and the
+    difference read as a gap that no `Grid::spacing` setting could close — because it was never the spacing.
+    With `DAY_SPACING_X` at 0 the dates are edge to edge.
+  - **The horizontal spacing is 0 and the vertical is not.** They want opposite things: abutting cells are what
+    make a selected range read as one bar, while a gap between weeks is what stops a range that wraps looking
+    continuous with itself. `ROW_SPACING` exists for that second reason alone.
+  A selected range is **one continuous bar per week**, so corner rounding belongs to the *bar*, not to a date:
+  `day_fill` decides `Starts`/`Middle`/`Ends`/`Only` by asking whether the day either side is selected **and in
+  the same row of the grid**, and `DayFill::rounding` rounds only the corners the bar turns at. Round all four
+  on every day and the range reads as loose pills; round none and it is a block with square ends. Two bugs
+  live in `day_fill`: the column must be taken `(leading + day - 1) % 7`, or a day in the second week looks as
+  though it had a day to its left and the bar runs off the row; and `first_weekday` converts chrono with
+  **`+ 1`**, not `+ 6` — chrono counts Monday from 0 and this counts Sunday from 0.
+  The picker is a **popup**, not a toolbar row: inline it pushed the grid down 505pt
+  (measured by `opening_the_calendar_does_not_move_the_grid`), so choosing a date moved
+  the photos the date was about. Open/closed state is egui's popup memory; only the
+  month cursor is `CalendarControl`'s. `CloseOnClickOutside`, **not** `CloseOnClick` —
+  the day cells are clicks *inside* the popup, and closing on them would dismiss the
+  calendar after every date picked.
+  The heading is **three explicit slots** — `ARROW_SLOT`, title, `ARROW_SLOT` — in a band the width of
+  the grid, not a row of widgets. A bare `ui.horizontal` greedily fills the panel, and a filter panel is
+  much wider than seven 38pt days: the arrows spread to the panel edges and `«`/`»` land outside it,
+  clipped. A nested `with_layout` ui is no better — it claims *all* the remaining width, leaving the
+  right arrows nothing. And a plain `label` left-aligns in its slot rather than centring. Equal slots at
+  each end are what centre the title, and they keep it centred for "September 2026", whose wider label
+  would otherwise push the heading off axis. Do not "simplify" this into a `horizontal`.
 - **Transfer** (`src/transfer/`): `plan_batch` → `execute_batch` → `TransferJournal` →
   `undo`, `_1` collision suffixes instead of overwriting, `.xmp`/`.aae` sidecars travelling
   with the photo. One module owns the on-disk layout on purpose: with the reverse
@@ -304,6 +351,11 @@ re-exported from `profile_store` so existing `use` paths and the grid's badge ke
   the file: a test reading `settings.json` would race the other tests' writes.
 - `categories.rs` has a source-text test (`include_str!`) requiring exactly two call sites of
   `render_custom_category_input` (grid + modal). Adding a third call site fails the build.
+- `app_with`'s `tune` runs **every frame**. That is right for establishing a standing
+  condition and wrong for anything a test then tries to undo — the frame after the click
+  puts the filter straight back and the click becomes unobservable. `app_with_once` exists
+  for the second case; reaching for `app_with` there produces a test that passes for the
+  wrong reason or fails for no visible reason.
 - `src/app/view.rs` is the single answer to "is this photo in view" — grid, footer, **All**/**None**,
   both training routes, the transfer batch and the modal navigation all read `visible_indices`. It runs
   over `Row`, a borrowing view of the fields that decide visibility, because nothing in it looks at a
@@ -339,9 +391,13 @@ re-exported from `profile_store` so existing `use` paths and the grid's badge ke
   every selected photo while the transfer it runs in front of filed only the visible ones, so photos
   the user could not see were renamed to a name that says where they are and not moved — and the next
   Move with the filter cleared filed them there.
-- The sort row and the filter panel are **two** rows: `render_sort_row` always shows, and the filters sit
-  behind a **🔍 Filters** toggle whose label carries a **●** when something is narrowed, so a filter the
-  user cannot see is at least marked. Starting a scan clears the filters and keeps the sort.
+- The sort and the filters are **one row** (`render_sort_and_filter_row`), not a sort row
+  plus a filter panel behind a toggle. Both halves were wrong alone: opening the filter row
+  shoved the whole grid down a line, and a filter set then hidden behind a closed panel was a
+  filter the user could not see — which is what forced the `Filters ●` marker button. Now
+  there is nothing to reveal and nothing to mark, and `Clear` appears only when something is
+  narrowed. The row is `horizontal_wrapped` so a narrow window folds it rather than running
+  the category picker off the end.
 - A closed egui `ComboBox` puts **no label** in the accesskit tree, so a kittest assertion has to find it
   by role — and `accesskit::Role` is not a dependency, so stringify it the way `placed_widgets` does. To
   assert what is *in* the list, open it (click the combo, run a frame) and query by label instead.
