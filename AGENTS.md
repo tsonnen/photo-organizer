@@ -7,14 +7,12 @@ No server, no API keys, no network at runtime.
 ## Workflow
 
 Every change lands through a **git worktree** — never edit in the main checkout, so `main` stays clean and
-buildable while a branch is in flight. Worktrees are siblings of the repo, not children of it, so a stale
-worktree can't turn up in `git status`:
+buildable while a branch is in flight. Worktrees are siblings of the repo, not children of it:
 
     /home/tobye/code/photo-organizer/                     # main checkout, stays on main
     /home/tobye/code/photo-organizer_worktrees/feat/foo/   # branch feat/foo
 
-The directory is the branch name verbatim, prefix included, so `git worktree list` output pastes straight into
-`cd`. Branch from an up-to-date `origin/main`, and run every `cargo` command from the worktree root:
+Branch from an up-to-date `origin/main`, run every `cargo` command from the worktree root:
 
 ```bash
 git fetch origin
@@ -22,25 +20,19 @@ git worktree add ../photo-organizer_worktrees/feat/foo -b feat/foo origin/main
 cd ../photo-organizer_worktrees/feat/foo
 ```
 
-A cold debug worktree lands near 4 GB: ~600 MB of LFS weights in `models/`, another ~600 MB for the copy
-`build.rs` publishes into `target/<profile>/models`, and ~3 GB of compiled deps (`deps` alone is 3.1 GB —
-eframe/wgpu/candle). LFS smudges the weights out of the shared `.git/lfs` object, so it's a copy rather than
-a re-download, but it's still a copy per worktree. Hardlink it to one canonical copy:
+A cold debug worktree lands near 4 GB (~600 MB LFS weights in `models/`, ~600 MB for the copy
+`build.rs` publishes into `target/<profile>/models`, ~3 GB compiled deps). Hardlink the weights to one
+canonical copy (invisible to `git status`, unlike a symlink):
 
 ```bash
 ln -f "$(git rev-parse --git-common-dir)/../models/clip_vision.safetensors" models/clip_vision.safetensors
 ```
 
-`ln`, not `ln -s`: a symlink reads as a typechange in `git status`, while a hardlink to identical bytes is
-invisible. `build.rs` then hardlinks the `target/` copy, which brings a worktree to ~3 GB. Never point
-`target/<profile>/models` at that path yourself — `fs::copy` truncates *through* hardlinks, which is what
-`publish_model` in `build.rs` exists to prevent.
+`build.rs` then hardlinks the `target/` copy. Never point `target/<profile>/models` at that path yourself —
+`fs::copy` truncates *through* hardlinks; that's what `publish_model` prevents. Don't share
+`CARGO_TARGET_DIR` across worktrees: they invalidate each other's artifacts on every switch.
 
-A shared `CARGO_TARGET_DIR` would delete the remaining ~3 GB, but two worktrees on different branches
-invalidate each other's artifacts on every switch — exactly the workflow this convention creates. Don't.
-
-Reuse a worktree for follow-up commits on the same branch rather than opening a new one, and drop it once
-the PR merges:
+Reuse a worktree for follow-up commits on the same branch; drop it once the PR merges:
 
 ```bash
 git worktree remove ../photo-organizer_worktrees/feat/foo
@@ -49,407 +41,235 @@ git branch -d feat/foo
 
 ### PR size and stacking
 
-Aim for **~1500 changed lines per PR**, measured against that PR's own base branch — insertions and
-deletions, tests and docs included, `Cargo.lock` excluded:
-
-```bash
-git diff --shortstat <base-branch>...HEAD
-```
-
-Going over is a prompt to look for a seam, not an automatic split. Stack when the work has a natural fault
-line and each slice is independently reviewable and mergeable on its own — usually a refactor that the rest
-depends on:
-
-- PR1 `refactor/extract-scan-service` → `main`: the scanner's pool and message plumbing behind one interface.
-- PR2 `feat/scan-progress` → `refactor/extract-scan-service`: the feature that needed it.
-
-In a stack, each PR targets the branch below it, the PR bodies list the stack bottom-up, and the PRs land on
-`main` one squash commit at a time. Don't stack to hit the number: one cohesive 2000-line change beats two
-arbitrary halves, while a 1200-line PR that mixes a shared-service refactor with every new caller of it is
-still two PRs. Split when the change spans unrelated concerns, when a reviewer would need two mental models,
-or when the first slice is safe to merge on its own.
+Aim for **~1500 changed lines per PR** against its own base (insertions + deletions, tests and docs
+included, `Cargo.lock` excluded): `git diff --shortstat <base-branch>...HEAD`. Going over is a prompt to
+look for a seam, not an automatic split. Stack only when there's a natural fault line and each slice is
+independently reviewable/mergeable (usually a refactor the rest depends on). Don't stack to hit the number.
 
 ## Commands
 
-CI (`.github/workflows/build-and-test.yaml`) runs these in order, so match it locally:
+CI runs these in order; match locally:
 
 ```bash
 cargo fmt --check
-cargo clippy -- -D warnings     # warnings are errors; the tree is currently clean
+cargo clippy -- -D warnings     # warnings are errors; tree is clean
 cargo build
 cargo test                      # 275 tests, ~5s once built
 ```
 
-- One test / one area: `cargo test media::tests::test_scan_preview_jpeg_scales_down_and_keeps_original_size`,
+- One test/area: `cargo test media::tests::test_scan_preview_jpeg_scales_down_and_keeps_original_size`,
   `cargo test app::layout_tests`, `cargo test scanner`, `cargo test transfer`, `cargo test app::models::tests`,
   `cargo test app::view`, `cargo test app::calendar`.
-- `cargo test -- --nocapture inference::tests::test_init_clip_session_real_file` to watch the real
-  CLIP load + forward pass. It **silently returns** if the model file is under 1024 bytes (an LFS pointer).
-- Linux build deps: `libgtk-3-dev libxkbcommon-dev` (the release workflow installs these).
-- `cargo run` needs a display and must be run from the worktree root so the relative `models/` lookup hits.
+- `cargo test -- --nocapture inference::tests::test_init_clip_session_real_file` watches the real CLIP
+  load + forward pass. Silently returns if the model file is under 1024 bytes (an LFS pointer).
+- Linux build deps: `libgtk-3-dev libxkbcommon-dev`. `cargo run` needs a display and must run from the
+  worktree root so the relative `models/` lookup hits.
 
 ## Model + build.rs
 
 - `models/clip_vision.safetensors` (~600 MB, OpenCLIP ViT-B/32) is **Git LFS**. `git lfs pull` before
-  building; CI checks out with `lfs: true`. Missing model is a supported state: the app runs rules-only
-  and simply can't train categories.
+  building; CI checks out with `lfs: true`. Missing model is supported: app runs rules-only, can't train.
 - `inference.rs` hardcodes ViT-B/32 geometry (`EMBED_DIM 768`, 12 heads/layers, patch 32, 50 positional
-  embeddings, optional 768→512 `proj`). Embeddings are always 512-d. A different checkpoint size means
-  editing those constants, not just swapping the file.
-- `build.rs` publishes `models/` (and `src/models/`) into `target/<profile>/models`, hardlinking after the
-  first build instead of re-copying ~600 MB. `find_model_path()` tries CWD-relative paths first, then
-  `<exe dir>/models`.
+  embeddings, optional 768→512 `proj`). Embeddings are always 512-d. A different checkpoint means editing
+  those constants, not just swapping the file.
+- `build.rs` publishes `models/` (and `src/models/`) into `target/<profile>/models`, hardlinking after
+  the first build. `find_model_path()` tries CWD-relative paths first, then `<exe dir>/models`.
 
 ## State written at runtime
 
 `profiles.json`, `settings.json`, `photo_cache.db`, `last_execution_manifest.json` are opened by **relative
-path**, so they land in the process CWD (repo root under `cargo run`), not next to the binary as the README
-implies. All four are gitignored and safe to delete. The SQLite cache is keyed by BLAKE3 of file contents;
-schema self-migrates with `CREATE TABLE IF NOT EXISTS` + best-effort `ALTER TABLE`.
+path** (land in process CWD, not next to the binary). All four gitignored, safe to delete. SQLite cache
+keyed by BLAKE3 of file contents; schema self-migrates via `CREATE TABLE IF NOT EXISTS` + best-effort
+`ALTER TABLE`.
 
 `settings.json` is deliberately *not* folded into `profiles.json`: profiles are learned data, settings are
-knobs, and keeping them apart is what stops an older `profiles.json` carrying a stale copy of a value the
-UI owns. `Settings::clamp_threshold` runs on both load and save — serde will happily read `99.0`, which would
-classify every photo as Unsorted.
+knobs. `Settings::clamp_threshold` runs on load and save (serde will read `99.0`, classifying everything
+as Unsorted).
 
-`Cargo.lock` is committed even though `.gitignore` lists it — the rule is inert for tracked files. Don't
-commit a regenerated lock unless dependencies actually changed.
+`Cargo.lock` is committed even though `.gitignore` lists it. Don't commit a regenerated lock unless deps
+changed.
 
 ## Execution flow
 
-`src/main.rs` → `PhotoOrganizerApp::update`: drain the high-res channel, drain scan messages, then
-render toolbar → footer → grid → modals. Actions discovered during drawing are collected into a
-`ModalActions`/`SettingsActions` struct or a local flag and applied *after* the frame, because acting
-mid-draw would re-enter `open_modal`. `rfd`'s pickers block for the same reason, so they are opened once the
-row (or the modal card) has finished laying out, never from inside the button handler. Panel order is
-load-bearing — egui hands `CentralPanel` whatever the top and bottom panels leave, so `render_footer` has to
-be shown *before* `render_grid`.
+`src/main.rs` → `PhotoOrganizerApp::update`: drain high-res channel, drain scan messages, then render
+toolbar → footer → grid → modals. Actions discovered during drawing collect into a `ModalActions`/
+`SettingsActions` struct or local flag and apply *after* the frame (mid-draw would re-enter `open_modal`).
+`rfd` pickers block for the same reason: open once the row/modal card finished laying out, never from a
+button handler. Panel order is load-bearing — `render_footer` must show *before* `render_grid`.
 
 All three modals share `src/app/chrome.rs` (`show_modal_card`): dimming backdrop, centred card,
-backdrop-click-to-close. Two traps live in there — the card is sized on the ui *around* the window
-`Frame`, not inside it (asking for the full card from within the frame overflows by the frame's margin,
-which is what `the_profile_modal_fits_its_card` guards), and `ui.with_layout(Layout::right_to_left)` does
-**not** advance the parent ui's cursor, so a widget added after one lands past it. The settings modal
-puts its Browse buttons on section headers for that reason.
+backdrop-click-to-close. Two traps: card is sized on the ui *around* the window `Frame`, not inside it
+(overflow by the frame's margin — `the_profile_modal_fits_its_card` guards); and
+`ui.with_layout(Layout::right_to_left)` does **not** advance the parent ui's cursor, so a widget added
+after one lands past it (settings modal puts Browse buttons on section headers for this reason).
 
-- **Scan** (`src/scanner.rs`): one spawned thread walks the folder (non-recursive, files only) and runs a
-  *dedicated* rayon pool, not the global one — sized `scan_thread_count()` = `(cores / 2).clamp(2, 12)`,
-  overridable with `PHOTO_ORGANIZER_SCAN_THREADS`. Bandwidth-bound CLIP, not core-bound. It streams
-  `ScanMessage::Item` (thumbnail now, `Classification::Pending`) → `ScanMessage::Update` (final call) →
-  `Complete`, so the UI is usable while classification runs. Every message is tagged with the id of the
-  scan that sent it and `drain_scan_messages` drops any but the current scan's: starting a scan clears
-  `items` but cannot un-send what a superseded scan already put on the shared channel, and that scan's
-  `Update` was decided against the profile store as it was at the time.
-- **Decode** (`src/media.rs`): a scan never full-decodes. JPEG goes through `jpeg-decoder`'s DCT scaling;
-  every other format full-decodes then rescales. `ScanPreview::original_*` carries the true frame size
-  because the heuristics key off resolution.
-- **Classify** (`src/profile_store.rs`): `ProfileStore::classify(&PhotoFacts, threshold) -> Classification` is
-  the *only* entry point. CLIP centroid match above the user's confidence threshold (default
-  `settings::DEFAULT_CONFIDENCE_THRESHOLD` = 0.65, slider range 0.30..=0.95) → rules
-  (screenshot/document/EXIF) → `Unsorted`. The threshold is a **parameter**, not a store field: profiles
-  are learned data, the bar is a setting, and keeping them apart means a `profiles.json` never carries a
-  stale copy of a knob the UI owns. It reaches the scanner through `ScanConfig.threshold`. That threshold
-  is the only path into the rules tier, so dropping it would make screenshot/document/EXIF detection
-  unreachable for anyone with a trained profile.
+- **Scan** (`src/scanner.rs`): one spawned thread walks the folder (non-recursive, files only) running a
+  *dedicated* rayon pool sized `scan_thread_count()` = `(cores / 2).clamp(2, 12)`, overridable via
+  `PHOTO_ORGANIZER_SCAN_THREADS`. Streams `ScanMessage::Item` (thumbnail, `Classification::Pending`) →
+  `Update` (final call) → `Complete`. Every message tagged with the scan id; `drain_scan_messages` drops
+  any but the current scan's.
+- **Decode** (`src/media.rs`): scan never full-decodes. JPEG via `jpeg-decoder` DCT scaling; others
+  full-decode then rescale. `ScanPreview::original_*` carries true frame size (heuristics key on it).
+- **Classify** (`src/profile_store.rs`): `ProfileStore::classify(&PhotoFacts, threshold)` is the *only*
+  entry point: CLIP centroid match above threshold → rules (screenshot/document/EXIF) → `Unsorted`.
+  Threshold is a **parameter**, not a store field. Reaches scanner via `ScanConfig.threshold`; it's the
+  only path into the rules tier.
 - **Settings** (`src/settings.rs`, `src/app/settings_modal.rs`): threshold slider, output folder, model
-  path. Edits are written on change rather than on a Save button. The slider re-classifies when it comes to
-  rest at a value other than `classified_threshold` (kept in step by `reclassify_all`, the only place the
-  grid's classifications are rewritten) — *not* on `changed()` and *not* on `Response::drag_stopped()`.
-  Neither of those works: egui puts a slider where the pointer is on the press frame and on every frame the
-  handle travels, so the release frame carries no change at all and a per-frame test misses the decision;
-  and the arrow keys never start a drag. Per-frame firing would re-run `reclassify_all` ~60×/sec. The same
-  "rest, not movement" rule governs `settings.json`, via `SettingsActions::worth_persisting`: a drag in
-  flight (`threshold_settling`) writes nothing, the commit frame writes. The output-folder and model rows
-  are discrete edits and still go to disk as they happen — a deferred write there would lose a path. Note
-  the live threshold *is* written back to `self.settings` during a drag, or the handle would jump back on
-  every frame; only the file write waits.
-  A threshold moved mid-scan sets `pending_reclassify` instead, which `ScanMessage::Complete` spends: the scan
-  classifies against the threshold it started with, so re-running it there would only fix half the grid.
-  Switching model deletes `photo_cache.db` (embeddings from one checkpoint are meaningless in another's
-  space) but keeps `profiles.json`: the centroids are stale too, but they are the user's work. The chosen
-  path is preferred but not required — the row warns when what resolves isn't what was chosen, because a
-  green dot next to a silently substituted checkpoint reads as confirmation.
-- **Grid view and order** (`src/app/view.rs`): the one answer to "is this photo in view". The grid
-  draws `visible_indices`, and the footer count, **All**/**None**, both training routes, the transfer
-  batch and the modal's paging all read the same list — a second copy of the predicate is the bug this
-  module exists to prevent. It runs over `Row`, a borrowing view of the fields that decide visibility,
-  because nothing in it looks at a texture and the ordering rules should stay assertable without a live
-  `Context`. It is recomputed per frame rather than cached: items change underneath it (a scan `Update`,
-  a combo rename, a threshold re-classification), and a cache would be stale in whichever writer was
-  missed. Two orderings are not the plain comparison: `rank_confidence` scales a rule-assigned photo
-  into the band *below* the threshold it failed, and `category_sort_key` files the unsorted bucket last
-  (under `ZZZZ`, so lower-cased real names sort after it). Descending inverts the key (`Reverse`), never
-  the run, so `sort_by_cached_key`'s positional tie-break survives and ties keep their order. See
-  `docs/classification_pipeline.md` → **Ordering and narrowing the grid** for the rules and why.
-- `PhotoDate.day` is `Option<u32>` and `photo_cache.day` is nullable. A row written before the column has
-  none, and `Option` says "unknown" without inventing a day nobody recorded; `StagedItem` carries a whole
-  `PhotoDate` rather than loose year/month/day so the three cannot drift. Range filtering is interval
-  overlap over `PhotoDate::span()`, not tuple comparison — that is what lets "March 2021" keep a photo taken
-  on the 14th, and a month-wide range keep a photo with no recorded day. Don't "simplify" it to `Ord`.
-  A photo's day used to be parsed and then dropped by `extract_date`, which made every photo in a month tie
-  under a date sort. If a day is ever added to `RawPhotoInput`, note that the output layout
-  `<Category>/<YYYY>/<MM>/` is month-granular **by contract** and does not take one.
-  **The missing day is repaired, and it has to be.** The scanner's cached branch re-reads a row with no
-  day off the file and writes it back, beside the frame-size repair it already does, because the reader
-  reporting `None` is not a repair: it hands `PhotoFacts` a dateless photo and `insert_cache` then writes
-  that `None` straight back out. Without the repair every returning user keeps their month-tied sort for
-  the life of the folder — which is the complaint the day was added to answer — and the comments here and
-  in `db.rs` read like the repair exists. It was asserted by three comments and a PR body before it was
-  implemented; `a_rescan_backfills_the_day_a_legacy_row_is_missing` is what pins it. `is_exif_date` is
-  rewritten with it, since `extract_date` returns the pair together and a filesystem date on a row that
-  claims EXIF is not a row anyone can reason about.
-- `src/app/calendar.rs` is the month-grid date picker the date filter is set from — egui 0.30 has no date
-  picker and the crate alternatives are unusable here, so it is hand-rolled. Two invariants: every month is
-  padded to **whole weeks** (`month_grid`), or the picker changes height as the user pages between a 28-day
-  February and a 31-day May; and `first_weekday` goes through `chrono`, because an off-by-one there shifts a
-  whole month by a column and every wrong day then reads as a real date the user could pick.
-  `range_after_click` is the selection state machine. Three rules, each of which replaced a complaint:
-  **one click is one day** (it sets both bounds — an open-ended reading filtered to every photo from that day
-  onwards while *drawing* as a bar to the end of the month, so the picker looked right and the grid
-  disagreed); **the second click widens**, and widening **backwards swaps** the two bounds, because clicking
-  end-then-start is the natural gesture and an inverted range reads as empty; and **the third click starts
-  over**, the "not that, this instead" gesture every other date picker has. The absorb-it-alternative — a
-  range that grows to meet any later click — was tried and reverted: a fortnight silently becomes a year
-  with no way back. Restating is cheap *because* a single day costs one click. The two states are told apart
-  by whether the bounds are the same day, not by a flag, and a one-sided selection (unreachable from a
-  click) resets rather than narrowing forever. Bounds compare through `start()`/`end()`, never by start date
-  alone — a whole-month bound covers that month.
-  Three layout facts that cost measurement to find, all of which look like styling and are not:
-  - The weekday initials and the days are rows of **one** grid, not two. Two grids means two independent
-    column sets and nothing makes them agree.
-  - The grid sets **`min_col_width(DAY_SIZE)`**. `egui::Grid` otherwise forces every cell to
-    `spacing.interact_size`, 40pt wide by default, so a date smaller than that sat in a wider column and the
-    difference read as a gap that no `Grid::spacing` setting could close — because it was never the spacing.
-    With `DAY_SPACING_X` at 0 the dates are edge to edge.
-  - **The horizontal spacing is 0 and the vertical is not.** They want opposite things: abutting cells are what
-    make a selected range read as one bar, while a gap between weeks is what stops a range that wraps looking
-    continuous with itself. `ROW_SPACING` exists for that second reason alone.
-  A selected range is **one continuous bar per week**, so corner rounding belongs to the *bar*, not to a date:
-  `day_fill` decides `Starts`/`Middle`/`Ends`/`Only` by asking whether the day either side is selected **and in
-  the same row of the grid**, and `DayFill::rounding` rounds only the corners the bar turns at. Round all four
-  on every day and the range reads as loose pills; round none and it is a block with square ends. Two bugs
-  live in `day_fill`: the column must be taken `(leading + day - 1) % 7`, or a day in the second week looks as
-  though it had a day to its left and the bar runs off the row; and `first_weekday` converts chrono with
-  **`+ 1`**, not `+ 6` — chrono counts Monday from 0 and this counts Sunday from 0.
-  The picker is a **popup**, not a toolbar row: inline it pushed the grid down 505pt
-  (measured by `opening_the_calendar_does_not_move_the_grid`), so choosing a date moved
-  the photos the date was about. Open/closed state is egui's popup memory; only the
-  month cursor is `CalendarControl`'s. `CloseOnClickOutside`, **not** `CloseOnClick` —
-  the day cells are clicks *inside* the popup, and closing on them would dismiss the
-  calendar after every date picked.
-  The heading is **three explicit slots** — `ARROW_SLOT`, title, `ARROW_SLOT` — in a band the width of
-  the grid, not a row of widgets. A bare `ui.horizontal` greedily fills the panel, and a filter panel is
-  much wider than seven 38pt days: the arrows spread to the panel edges and `«`/`»` land outside it,
-  clipped. A nested `with_layout` ui is no better — it claims *all* the remaining width, leaving the
-  right arrows nothing. And a plain `label` left-aligns in its slot rather than centring. Equal slots at
-  each end are what centre the title, and they keep it centred for "September 2026", whose wider label
-  would otherwise push the heading off axis. Do not "simplify" this into a `horizontal`.
-- **Transfer** (`src/transfer/`): `plan_batch` → `execute_batch` → `TransferJournal` →
-  `undo`, `_1` collision suffixes instead of overwriting, `.xmp`/`.aae` sidecars travelling
-  with the photo. One module owns the on-disk layout on purpose: with the reverse
-  direction in `undo_engine.rs` it became a second implementation of the same layout, and
-  the journal recorded no `TransferMode`, so Undo assumed every batch was a move and
-  deleting a batch of twenty *copies* deleted twenty copies. Both directions now go
-  through one `place()` rule, the journal records the mode plus a length/mtime
-  `Fingerprint` per file, and undo refuses to overwrite an occupied path or touch a file
-  that changed since it was filed. The manifest records the whole batch and Undo reverses
-  **only the last batch**. `execute_transfer` holds back photos that are still
-  `Pending` rather than filing them under the placeholder (see **Classification types**).
-  Two things distinguish *failed* from *landed but not as asked*, because the journal
-  records what happened rather than what was attempted: `place` returns a
-  `Placed.warning` for a cross-device Move whose original could not be unlinked (the
-  file is in both places, so the operation stays in `completed_ops` and is still
-  undoable, and the warning becomes its own `failed_ops` entry), and a batch that lands
-  nothing is not journalled at all, so it cannot displace the previous batch's Undo.
-  `discover_sidecars` claims sidecar files batch-wide — `photo.jpg` and `photo.jpeg`
-  both want `photo.xmp` at the same destination, and the second attempt failing used to
-  report a sidecar as broken when it had in fact travelled. The batch is also scoped to
-  `visible_indices`, so a photo the grid's filters exclude is not transferred even if a
-  tick on it from before the filter outlived it. That is what keeps the removal honest:
-  it keys off `completed_ops`, and a photo that was never offered to the engine cannot
-  appear there — so the "held back" case stays narrow and does not need its own check.
-- **Bulk move** (`src/app/bulk_move_modal.rs`): the fourth route to a category, and the only one that
-  trains nothing — a name typed over a selection becomes a `Manual` pick, which is exactly what makes it
-  survive re-classification. `assign_selected_to_category` labels the items, then `execute_transfer_to`
-  runs the *same* plan → execute → journal → report sequence the toolbar's Move and Copy use, with the
-  typed name passed as `override_subject` so nothing about the bulk move re-implements a transfer. Its
-  toolbar button is gated on the *selection*, not the destination, which is the opposite of Move and
-  Copy: the card carries its own folder picker, so an unconfigured output folder must not disable it.
-  The names it remembers live in `Settings::custom_categories`, deliberately *not* in `profiles.json` —
-  a name with no centroid is a label the user chose not to retype, and folding it in as learned data
-  would put a profile in the file for an event that has none. `remember_custom_category` is the only
-  writer and it keeps `Unsorted` out: the fallback bucket is a directory every unmatched photo already
-  lands in, so offering it back would file photos where they were headed anyway while looking like a
-  choice. The card closes only on a batch that *landed* something, since `execute_transfer_to` returns
-  that count — a batch that filed nothing keeps the card up with its name and folder, which is what
-  makes the retry the same press.
+  path; edits written on change. Slider re-classifies when it *comes to rest* at a value other than
+  `classified_threshold` (via `reclassify_all`) — not on `changed()` or `drag_stopped()`. Same "rest, not
+  movement" rule governs `settings.json` via `SettingsActions::worth_persisting`: a drag in flight
+  (`threshold_settling`) writes nothing, commit frame writes. Output-folder and model rows are discrete
+  edits and still hit disk immediately. Live threshold is written back to `self.settings` during a drag
+  (else the handle jumps back); only the file write waits. A threshold moved mid-scan sets
+  `pending_reclassify`, spent by `ScanMessage::Complete`. Switching model deletes `photo_cache.db` but
+  keeps `profiles.json`. Chosen model path is preferred, not required — warn when what resolves isn't
+  what was chosen.
+- **Transfer** (`src/transfer/`): `plan_batch` → `execute_batch` → `TransferJournal` → `undo`. `_1`
+  collision suffixes, `.xmp`/`.aae` sidecars travel with the photo. One module owns the on-disk layout:
+  both directions go through one `place()` rule, journal records mode + per-file length/mtime
+  `Fingerprint`, undo refuses to overwrite an occupied path or touch a changed file. Manifest records the
+  whole batch; Undo reverses only the last batch. `execute_transfer` holds back `Pending` photos.
+  `place` returns `Placed.warning` for cross-device Move whose original couldn't be unlinked (stays in
+  `completed_ops`, warning becomes its own `failed_ops` entry); a batch landing nothing isn't journalled.
+  `discover_sidecars` claims sidecars batch-wide. The batch is scoped to `visible_indices`, so a photo the
+  grid's filters exclude is not transferred even if a tick on it outlived the filter.
+- **Bulk move** (`src/app/bulk_move_modal.rs`): fourth route to a category, trains nothing; typed name
+  becomes a `Manual` pick (survives re-classification). `assign_selected_to_category` labels items, then
+  `execute_transfer_to` runs the same plan→execute→journal→report sequence with the name as
+  `override_subject`. Toolbar button gated on the *selection*, not the destination. Remembered names live
+  in `Settings::custom_categories` (not `profiles.json`); `remember_custom_category` is the only writer and
+  keeps `Unsorted` out. Card closes only on a batch that landed something. Scoped to `visible_indices`
+  like every other route that consumes the selection.
+- **Grid view and order** (`src/app/view.rs`): the one answer to "is this photo in view" — grid, footer
+  count, **All**/**None**, both training routes, the transfer batch and modal paging all read
+  `visible_indices`. Runs over `Row`, a borrowing view of the fields that decide visibility, so ordering
+  stays assertable without a live `Context`. Recomputed per frame (items change underneath). Two
+  orderings aren't the plain comparison: `rank_confidence` scales a rule-assigned photo into the band
+  *below* the threshold it failed; `category_sort_key` files the unsorted bucket last (under `ZZZZ`).
+  Descending inverts the key (`Reverse`), never the run, so `sort_by_cached_key`'s tie-break survives.
+  See `docs/classification_pipeline.md` → **Ordering and narrowing the grid**.
+- **Grid must not reorder while a cell's category editor holds focus** (`holding_order`). Editing a
+  category changes the Category sort key, and egui identifies a cell's widgets by position, so a
+  reordering frame makes the focused field the *next* photo's. `render_custom_category_input` returns
+  whether it has focus and `render_grid` records it at frame end; `render_grid_cell_controls` returns
+  `(train_request, editing)`. Check focus via `ui.memory(|m| m.has_focus(response.id))`, not
+  `Response::has_focus()` (the latter also requires OS window focus). The hold releases on sort change
+  (`order_sort`), not only on focus leaving (clicking doesn't move keyboard focus in egui 0.30). The hold
+  keeps **the order the grid last drew** (`drawn_order`), not the absence of one — `view::held_order`
+  reapplies it to the current admitted set. Tests: `custom_sorted_grid` stages photos in Category-sort
+  order, so `items` order equals sorted order — stage against the sort or the regression passes.
+- **Sort and filters are one row** (`render_sort_and_filter_row`), not a sort row plus a filter panel
+  behind a toggle. `horizontal_wrapped` so a narrow window folds it rather than running the category
+  picker off the end. `Clear` appears only when something is narrowed.
+- **Calendar** (`src/app/calendar.rs`): hand-rolled month-grid date picker (egui 0.30 has none usable).
+  Whole weeks padding (`month_grid`) so height stays stable across months. `first_weekday` via chrono with
+  `+1` (not `+6`). `range_after_click` state machine: one click = one day (sets both bounds); second
+  widens, widening backwards swaps the bounds; third starts over. States told apart by whether bounds are
+  the same day; bounds compare through `start()`/`end()`. Layout: weekday initials and days are rows of
+  **one** grid; `min_col_width(DAY_SIZE)` (else 40pt default); horizontal spacing 0, vertical `ROW_SPACING`
+  (abutting cells read as one bar, gap between weeks stops wrap-around looking continuous). Selected range
+  is one continuous bar per week; `day_fill` decides `Starts`/`Middle`/`Ends`/`Only` by whether the day
+  either side is selected **and in the same grid row** (column `(leading + day - 1) % 7`); `first_weekday`
+  converts chrono with `+1`. Popup, not toolbar row (inline pushed the grid down 505pt —
+  `opening_the_calendar_does_not_move_the_grid`); open/closed is egui popup memory, only the month cursor
+  is `CalendarControl`'s; `CloseOnClickOutside`, not `CloseOnClick`. Heading is three explicit slots
+  (`ARROW_SLOT`, title, `ARROW_SLOT`) in a band the width of the grid.
 
 ### Classification types
 
-`src/classification.rs` holds the two records the whole pipeline speaks in:
+`src/classification.rs` holds two records:
 
-- **`PhotoFacts`** — what a photo *is*: `path`, `date`, `frame: Option<FrameSize>`, `is_exif`, `embedding`.
-  The true frame size lives here, which is what stopped three call sites reconstructing it (two of them
-  from the ≤200x140 thumbnail). `frame` is `Option` because a `photo_cache` row written before the
-  `original_width`/`original_height` columns existed has none; the scanner backfills one from the file
-  header on the next rescan, and the resolution rule declines to fire meanwhile.
-- **`Classification`** — `Pending`, or a `Decision { category: CategoryName, confidence, source }`.
-  `Pending` replaced the `"Classifying..."` string that was stored as a real category: it read as a custom
-  name, so the grid rendered a `TextEdit` bound to it and one keystroke set `source = Manual`, after which
-  the real `Update` was skipped and the photo stayed filed as "Classifying..." forever.
-  `Decision` deliberately carries **no** `is_custom`. That question — does a trained profile own this name,
-  and so does the free-text input apply — is about the store the caller writes against, not the one that
-  decided, and a scan clones the store when it starts. So it is asked once, in
-  `StagedItem::apply_classification`, against the store in hand.
+- **`PhotoFacts`**: `path`, `date`, `frame: Option<FrameSize>`, `is_exif`, `embedding`. True frame size
+  lives here. `frame` is `Option` because old `photo_cache` rows lack the columns; scanner backfills from
+  the file header on next rescan, resolution rule declines to fire meanwhile.
+- **`Classification`**: `Pending`, or `Decision { category: CategoryName, confidence, source }`. `Decision`
+  carries no `is_custom`; that's asked once in `StagedItem::apply_classification` against the store in
+  hand.
 
-`Pending` is load-bearing in three places, all of them about nothing *else* getting there first:
-
+`Pending` is load-bearing in three places (nothing else gets there first):
 - `apply_classification` never preserves one, so the decision always lands.
-- The **Re-classify All** button and both training routes are reachable while a scan runs, so
-  `reclassify_all` steps over pending photos. Deciding one would clear the flag the rule above depends on.
-- `StagedItem::is_filable` is false for one, and `execute_transfer` filters on it. Move and Copy are not
-  gated on the scan finishing, and the transfer seam turns whatever is in `category` into a directory
-  name — without the guard a scan's earliest photos land in `<output>/Classifying.../<YYYY>/<MM>/`, out of
-  reach of every later re-classification. Held photos stay in the grid, selected, for the retry.
+- Re-classify All and both training routes are reachable mid-scan, so `reclassify_all` steps over pending
+  photos.
+- `StagedItem::is_filable` is false for one, and `execute_transfer` filters on it.
 
-The one write that clears `pending` is `StagedItem::mark_manual_over_pending`, used solely by
-the bulk move. `mark_manual` stays non-claiming because the per-photo "Other" text box is offered
-the placeholder, not a category the user chose; the bulk move arrives with a name they typed over
-a selection they picked, so it claims the photo and its name survives the answer it raced. Keep
-this to that one call site — the authority to clear the flag is the whole reason the other two
-bullets can hold, and `clicking_other_on_a_pending_photo_claims_nothing` is what pins the "Other"
-path shut.
+The one write clearing `pending` is `StagedItem::mark_manual_over_pending`, used solely by bulk move.
+`mark_manual` stays non-claiming. Both mark methods zero `confidence`. Callers write the category *before*
+calling either; `apply_classification` stays reserved for pipeline decisions.
 
-Both mark methods also zero `confidence`, so the grid's badge cannot print the number belonging to
-the answer a manual pick replaced. Callers write the category *before* calling either, and
-`apply_classification` stays reserved for decisions the pipeline makes.
+Copy clears the grid exactly as Move does (a copy is a completed filing).
 
-Copy clears the grid exactly as Move does. A copy is a completed filing, so keeping its row would
-leave the photo offered again — still selected, looking untouched — and a second press of the same
-button would file it again under a `_1` suffix. What a copy leaves behind is the *original*, on disk.
-
-`ProfileStore::classify` / `classify_with_heuristics` / `classify_heuristics` were collapsed into the one
-entry point — which is also where `classify_with_heuristics`'s `threshold` parameter went, so the
-`CONFIDENCE_THRESHOLD` constant is gone rather than reintroduced here. `ClassificationSource` is
-re-exported from `profile_store` so existing `use` paths and the grid's badge keep working.
+- **Dates** (`PhotoDate`): `day` is `Option<u32>`, `photo_cache.day` nullable. A row written before the
+  column has none; `Option` says "unknown" without inventing a day. `StagedItem` carries a whole
+  `PhotoDate` so year/month/day can't drift. Range filtering is interval overlap over `PhotoDate::span()`,
+  not tuple comparison — that's what lets "March 2021" keep a photo taken on the 14th, and a month-wide
+  range keep a photo with no recorded day. Don't "simplify" to `Ord`. The missing day is repaired by the
+  scanner's cached branch re-reading the file (beside the frame-size repair), because the reader reporting
+  `None` is not a repair — it hands `PhotoFacts` a dateless photo and `insert_cache` writes that `None`
+  back out. `is_exif_date` is rewritten alongside, since `extract_date` returns the pair together. If a day
+  is ever added to `RawPhotoInput`, note the output layout `<Category>/<YYYY>/<MM>/` is month-granular by
+  contract.
 
 ## Testing quirks
 
-- `src/app/layout_tests.rs` uses `egui_kittest` to assert **real** geometry from the production
-  renderers. The grid cell deliberately stacks the custom-category input *below* the combo while the modal
-  puts it *inline* — both directions are asserted. Don't "unify" those layouts. Modal tests filter
-  `placed_widgets` down to what lies inside the card rect, because the backdrop covers the whole screen.
-  The bulk move's harness stages its photos on a `Cell<bool>` rather than on `items.is_empty()`: a move
-  empties the grid, so that condition would put the photos straight back and hide whether they were dropped.
-- The same file drives the settings modal with **real** pointer and key events, which has two traps: egui
-  only hands a widget an `interact_pointer_pos` while a button is held or was released *that* frame, so a
-  press and a release queued into one frame cancel out (hence `press_at`/`drag_to`/`release_at`, one event
-  per frame); and clicking a widget does *not* focus it in egui 0.30, so keyboard tests need kittest's
-  `Node::focus()`, which sends the accesskit Focus action. Those tests commit a threshold change, so they
-  rewrite `settings.json` in the crate root — gitignored, and safe to delete, but expect your threshold to
-  have moved after a test run. The write *policy* is unit-tested in `settings_modal.rs` rather than through
-  the file: a test reading `settings.json` would race the other tests' writes.
-- `categories.rs` has a source-text test (`include_str!`) requiring exactly two call sites of
-  `render_custom_category_input` (grid + modal). Adding a third call site fails the build.
-- `app_with`'s `tune` runs **every frame**. That is right for establishing a standing
-  condition and wrong for anything a test then tries to undo — the frame after the click
-  puts the filter straight back and the click becomes unobservable. `app_with_once` exists
-  for the second case; reaching for `app_with` there produces a test that passes for the
-  wrong reason or fails for no visible reason.
-- `src/app/view.rs` is the single answer to "is this photo in view" — grid, footer, **All**/**None**,
-  both training routes, the transfer batch and the modal navigation all read `visible_indices`. It runs
-  over `Row`, a borrowing view of the fields that decide visibility, because nothing in it looks at a
-  texture and the ordering rules should stay assertable without a live `Context`. Two orderings are not
-  the plain comparison: `rank_confidence` scales a rule-assigned photo into the band *below* the
-  threshold it failed, and `category_sort_key` files the unsorted bucket last. Descending inverts the
-  key, never the run, so ties keep their order. Adding a second copy of the is-it-in-view predicate
-  anywhere else is the bug this module exists to prevent.
-- **The grid must not reorder while a cell's category editor holds focus** —
-  `PhotoOrganizerApp::holding_order`. Editing a category is what changes the Category sort key, and egui
-  identifies a cell's widgets by the position they occupy, so a reordering frame makes the focused field
-  the *next* photo's: the characters land in the wrong photo and the rows behind it look scrambled.
-  `render_custom_category_input` returns whether it has focus and `render_grid` records it at the end of
-  the frame; `render_grid_cell_controls` returns `(train_request, editing)`. Check focus with
-  `ui.memory(|m| m.has_focus(response.id))`, **not** `Response::has_focus()` — the latter also requires
-  the OS window to have focus, so it reports false for a field the user is plainly typing into whenever
-  the window manager says otherwise. The hold is released by the *sort* changing (`order_sort`), not only
-  by focus leaving: clicking a button does not move keyboard focus in egui 0.30, so "editing, therefore
-  frozen" would swallow a click on the direction button.
-  The hold holds **the order the grid last drew** (`drawn_order`, written by `render_grid`), not the
-  absence of one. Implementing it as "skip the sort" substituted `items` order — the scan's arrival
-  order — for the sorted one, so the frame after an editor took focus the whole grid reordered into
-  directory-walk order and stayed there for as long as the field had focus: the characters still
-  landed in the right photo, but the rows the user was reading moved anyway. `view::held_order`
-  reapplies that order to the *current* admitted set, so a filter changed mid-word still narrows the
-  grid and a row it admits is appended rather than displacing one already on screen. Watch for this
-  in tests: `custom_sorted_grid` stages photos in the order a Category sort produces, so its `items`
-  order *is* its sorted order and the two are indistinguishable — stage against the sort or the
-  regression passes.
-- The bulk move is scoped to `visible_indices` like every other route that consumes the selection —
-  its `assign_selected_to_category`, the card's preview count, and the toolbar button's own gate.
-  It was the one PR #52 missed, and the split it left was worse than either reading: it *labelled*
-  every selected photo while the transfer it runs in front of filed only the visible ones, so photos
-  the user could not see were renamed to a name that says where they are and not moved — and the next
-  Move with the filter cleared filed them there.
-- The sort and the filters are **one row** (`render_sort_and_filter_row`), not a sort row
-  plus a filter panel behind a toggle. Both halves were wrong alone: opening the filter row
-  shoved the whole grid down a line, and a filter set then hidden behind a closed panel was a
-  filter the user could not see — which is what forced the `Filters ●` marker button. Now
-  there is nothing to reveal and nothing to mark, and `Clear` appears only when something is
-  narrowed. The row is `horizontal_wrapped` so a narrow window folds it rather than running
-  the category picker off the end.
-- A closed egui `ComboBox` puts **no label** in the accesskit tree, so a kittest assertion has to find it
-  by role — and `accesskit::Role` is not a dependency, so stringify it the way `placed_widgets` does. To
-  assert what is *in* the list, open it (click the combo, run a frame) and query by label instead.
-- `scanner.rs` mutates the process-global `PHOTO_ORGANIZER_SCAN_THREADS` in exactly one test on purpose
-  (cargo runs tests on parallel threads). Don't split it or add another env-mutating test.
-- Tests create temp files as `temp_dir()/name_<pid>.<ext>`, and `src/transfer/` builds a whole
-  temp tree per test (`temp_dir()/transfer_<name>_<pid>`). No fixtures directory exists.
-- Anything that runs a *real* transfer must point `app.journal_path` at a temp directory. It is a
-  field rather than a constant for exactly that: `LAST_JOURNAL` is a relative path, so the default
-  would overwrite the journal in the crate root — the slot the running app's **Undo** reads — every
-  time the suite ran. Nothing else in the repo clobbers it; the settings tests rewrite
-  `settings.json` and that has been accepted as a quirk.
-- `transfer::tests::test_undo_is_the_inverse_of_execute_for_both_modes` asserts that
-  `undo(execute(inputs, mode))` puts the filesystem back exactly as it started, for both
-  modes, sidecars included. It is the reason the two directions share a module — keep it
-  passing, and add to it rather than to a hand-built manifest when you touch either side.
-- The cross-device `Move` fallback is unreachable on one filesystem, so
-  `transfer::tests::set_dir_read_only` provokes its second half instead: a read-only
-  directory refuses `rename` and `unlink` out of it while leaving reads alone, which is
-  the same code path a failed rename takes. It asserts that the read-only bit was
-  honoured rather than skipping when it was not, because a test that quietly stopped
-  testing anything is worse than one that fails.
-- `src/app/` was split out of `app.rs` (commit 161b3e7); `mod.rs` documents the submodule split. Keep the
-  module boundary and the top-of-file `//!` orientation comments that go with it.
+- `src/app/layout_tests.rs` uses `egui_kittest` for real geometry from production renderers. Grid cell
+  stacks the custom-category input *below* the combo; modal puts it *inline* — both asserted, don't unify.
+  Modal tests filter `placed_widgets` to inside the card rect. Bulk move harness stages photos on a
+  `Cell<bool>`, not `items.is_empty()`.
+- Settings modal driven by real pointer/key events: egui only hands `interact_pointer_pos` while a button
+  is held or released *that* frame, so press+release in one frame cancel (use `press_at`/`drag_to`/
+  `release_at`, one event per frame); clicking doesn't focus in egui 0.30, so keyboard tests need
+  kittest's `Node::focus()`. Those tests commit a threshold change, rewriting `settings.json` in crate
+  root (gitignored). Write *policy* is unit-tested in `settings_modal.rs`, not via the file.
+- `categories.rs` source-text test (`include_str!`) requires exactly two call sites of
+  `render_custom_category_input` (grid + modal).
+- Closed egui `ComboBox` puts no label in the accesskit tree; find by role, stringify `accesskit::Role`
+  the way `placed_widgets` does. Open it to assert contents.
+- `scanner.rs` mutates process-global `PHOTO_ORGANIZER_SCAN_THREADS` in exactly one test. Don't split or
+  add another env-mutating test.
+- Tests create temp files as `temp_dir()/name_<pid>.<ext>`; `src/transfer/` builds a whole temp tree per
+  test (`temp_dir()/transfer_<name>_<pid>`). No fixtures dir.
+- Anything running a real transfer must point `app.journal_path` at a temp dir (`LAST_JOURNAL` is a
+  relative path; default overwrites the crate-root journal Undo reads).
+- `transfer::tests::test_undo_is_the_inverse_of_execute_for_both_modes`: `undo(execute(inputs, mode))`
+  restores fs for both modes incl. sidecars. Keep passing; add to it rather than hand-built manifests.
+- Cross-device Move fallback unreachable on one fs; `transfer::tests::set_dir_read_only` provokes its
+  second half (read-only dir refuses `rename`/`unlink`). It asserts the read-only bit was honoured.
+- `src/app/` split out of `app.rs` (commit 161b3e7); `mod.rs` documents the split. Keep module boundary
+  and top-of-file `//!` orientation comments.
+- `app_with`'s `tune` runs **every frame** — right for a standing condition, wrong for anything a test
+  then tries to undo (`app_with_once` exists for that).
+- `view.rs` is the single answer to "is this photo in view" — grid, footer, **All**/**None**, both
+  training routes, the transfer batch and modal navigation all read `visible_indices`. Adding a second
+  copy of the is-it-in-view predicate anywhere is the bug it exists to prevent.
+- `holding_order` details above; the hold holds **the order the grid last drew**. `custom_sorted_grid`
+  stages photos in Category-sort order, so `items` order equals sorted order — stage against the sort or
+  the regression passes.
 
 ## Category names
 
-A category is a dropdown label *and* a directory under the output folder. `src/category_name.rs`
-owns the second job: `CategoryName` is one path component by construction, and
-`from_user_input` is the only way to build one from something a person typed. Separators
-and Windows-reserved characters become `-`, trailing dots and spaces are trimmed, and a
-name that is empty, `.`, `..` or one of the device names Windows reserves (`NUL`,
-`COM1`, `LPT1`, …) falls back to `Unsorted`.
+A category is a dropdown label *and* a directory. `src/category_name.rs` owns the second: `CategoryName`
+is one path component by construction; `from_user_input` is the only way to build one from typed input.
+Separators and Windows-reserved chars become `-`, trailing dots/spaces trimmed, and a name that is empty,
+`.`, `..`, or a reserved device name (`NUL`, `COM1`, `LPT1`, …) falls back to `Unsorted`.
 
-`CategoryProfile::new` and `ProfileStore::load_from_file` are the two points where a
-stored profile name becomes canonical, so a legacy `profiles.json` cannot leave a profile
-whose name is not the one the dropdown shows and the folder is called. Keep it that way:
-profiles are looked up *by* name, so sanitising only where a name is used leaves the
-returned name unable to match the profile it came from.
+`CategoryProfile::new` and `ProfileStore::load_from_file` are the two points where a stored profile name
+becomes canonical. Profiles looked up *by* name, so sanitise only there.
 
-`StagedItem.category` stays a plain `String` — it is display text the user retypes per
-photo, so it is sanitised at the transfer seam (`app/transfer.rs`) rather than on the way
-in. `Decision.category` and `RawPhotoInput.subject` are `CategoryName`. Don't
-join a category into a path any other way; `plan_batch` is the one place that does it.
+`StagedItem.category` stays a plain `String` (sanitised at the transfer seam, `app/transfer.rs`).
+`Decision.category` and `RawPhotoInput.subject` are `CategoryName`. Don't join a category into a path any
+other way; `plan_batch` is the one place that does.
 
 ## Conventions
 
 - Branch with a prefix (`feat/`, `fix/`, `refactor/`, `perf/`, `chore/`) in a worktree (see **Workflow**)
-  and open a PR; `main` history is one squash commit per PR ending in `(#N)`.
-- When scanning, classification or the transfer flow changes, update `README.md` **and**
+  and open a PR; `main` history is one squash commit per PR ending in `(#N)`, with a one-line message.
+- Commit messages stay succinct: short headline, bullets fine, no essays. The diff and PR carry the "why".
+  Less is more.
+- Prefer simple solutions: smallest change that works; avoid new abstractions, indirection, or cleverness
+  unless something concrete needs them. Less is more.
+- When scanning, classification, or the transfer flow changes, update `README.md` **and**
   `docs/classification_pipeline.md` in the same change.
-- Comments explain *why* and cite measurements (e.g. why half the cores, why WAL). Match that density;
-  clippy with `-D warnings` must stay clean.
+- Comments explain *why* and cite measurements. Match that density; clippy with `-D warnings` must stay
+  clean.
 - Tagging `v*` runs `.github/workflows/release.yaml`: Linux + Windows x86_64, binary packaged with
   `models/`. Update it if outputs or asset names change.
