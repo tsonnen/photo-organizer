@@ -163,7 +163,18 @@ impl PhotoOrganizerApp {
 
         // Split out so the closure can read the selection and the remembered
         // names without borrowing all of `self` while the card is drawn.
-        let selected: Vec<&StagedItem> = self.items.iter().filter(|i| i.selected).collect();
+        //
+        // The photos in view, not every staged one: the preview is a promise
+        // about what this batch will do, and what it does is read
+        // `visible_indices` twice over. Counting the whole selection here and
+        // filing the visible part of it is how a card says "12 photos" and moves
+        // three.
+        let visible = self.visible_indices();
+        let selected: Vec<&StagedItem> = visible
+            .iter()
+            .map(|&index| &self.items[index])
+            .filter(|item| item.selected)
+            .collect();
         let remembered: Vec<String> = self.settings.custom_categories.clone();
         let output_folder = self.settings.output_folder.clone();
         let mut draft = BulkMoveDraft {
@@ -456,11 +467,18 @@ impl PhotoOrganizerApp {
         self.bulk_move_folder = None;
     }
 
-    /// Labels every selected photo `name`, training nothing.
+    /// Labels every selected photo in view `name`, training nothing.
     ///
     /// `None` when there is nothing to do — the name is blank — so the caller
     /// can tell "no photos carry this name" from "there was no name", which
     /// read identically in a status message otherwise.
+    ///
+    /// Over [`Self::PhotoOrganizerApp::visible_indices`] rather than every
+    /// staged photo, like every other route that consumes the selection. The
+    /// transfer this runs in front of reads the same list, so labelling the
+    /// whole selection and filing the visible part of it would rename photos
+    /// that never moved — to a name that says where they are, when it does not.
+    /// A `Manual` claim is not something to hand a photo the user cannot see.
     ///
     /// Manual is the point. A `Manual` pick is the one classification
     /// `apply_classification` will not overwrite, so these photos keep this
@@ -488,7 +506,8 @@ impl PhotoOrganizerApp {
 
         let is_custom = self.profiles.is_custom_category(name.as_str());
         let mut assigned = 0;
-        for item in &mut self.items {
+        for index in self.visible_indices() {
+            let item = &mut self.items[index];
             if !item.selected {
                 continue;
             }
