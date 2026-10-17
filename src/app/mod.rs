@@ -117,6 +117,16 @@ pub struct PhotoOrganizerApp {
     /// A held order is only held while the sort itself is unchanged, so pressing
     /// the direction button part-way through typing still takes effect.
     order_sort: (SortBy, SortDirection),
+    /// The order the grid last drew, as indices into `items`.
+    ///
+    /// What [`Self::holding_order`] actually holds. Recording the order rather
+    /// than only whether one was wanted is what keeps the hold a hold: skipping
+    /// the sort instead left the grid in `items` order — the scan's arrival
+    /// order — so the frame after an editor took focus the whole grid reordered
+    /// into directory-walk order and stayed there for as long as the field had
+    /// focus. Written by `render_grid`, which is the one place that knows what
+    /// was drawn; read by `visible_indices`, which every caller goes through.
+    drawn_order: Vec<usize>,
     show_profiles_modal: bool,
     show_settings_modal: bool,
     /// Whether the bulk move card is up. It cannot be open at the same time as
@@ -187,6 +197,7 @@ impl PhotoOrganizerApp {
             show_filter_panel: false,
             editing_cell: false,
             order_sort: (SortBy::default(), SortDirection::default()),
+            drawn_order: Vec::new(),
             show_profiles_modal: false,
             show_settings_modal: false,
             show_bulk_move_modal: false,

@@ -77,7 +77,7 @@ CI (`.github/workflows/build-and-test.yaml`) runs these in order, so match it lo
 cargo fmt --check
 cargo clippy -- -D warnings     # warnings are errors; the tree is currently clean
 cargo build
-cargo test                      # 234 tests, ~5s once built
+cargo test                      # 239 tests, ~5s once built
 ```
 
 - One test / one area: `cargo test media::tests::test_scan_preview_jpeg_scales_down_and_keeps_original_size`,
@@ -307,6 +307,22 @@ re-exported from `profile_store` so existing `use` paths and the grid's badge ke
   the window manager says otherwise. The hold is released by the *sort* changing (`order_sort`), not only
   by focus leaving: clicking a button does not move keyboard focus in egui 0.30, so "editing, therefore
   frozen" would swallow a click on the direction button.
+  The hold holds **the order the grid last drew** (`drawn_order`, written by `render_grid`), not the
+  absence of one. Implementing it as "skip the sort" substituted `items` order — the scan's arrival
+  order — for the sorted one, so the frame after an editor took focus the whole grid reordered into
+  directory-walk order and stayed there for as long as the field had focus: the characters still
+  landed in the right photo, but the rows the user was reading moved anyway. `view::held_order`
+  reapplies that order to the *current* admitted set, so a filter changed mid-word still narrows the
+  grid and a row it admits is appended rather than displacing one already on screen. Watch for this
+  in tests: `custom_sorted_grid` stages photos in the order a Category sort produces, so its `items`
+  order *is* its sorted order and the two are indistinguishable — stage against the sort or the
+  regression passes.
+- The bulk move is scoped to `visible_indices` like every other route that consumes the selection —
+  its `assign_selected_to_category`, the card's preview count, and the toolbar button's own gate.
+  It was the one PR #52 missed, and the split it left was worse than either reading: it *labelled*
+  every selected photo while the transfer it runs in front of filed only the visible ones, so photos
+  the user could not see were renamed to a name that says where they are and not moved — and the next
+  Move with the filter cleared filed them there.
 - The sort row and the filter panel are **two** rows: `render_sort_row` always shows, and the filters sit
   behind a **🔍 Filters** toggle whose label carries a **●** when something is narrowed, so a filter the
   user cannot see is at least marked. Starting a scan clears the filters and keeps the sort.

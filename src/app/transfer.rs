@@ -82,19 +82,14 @@ impl PhotoOrganizerApp {
         // a checkbox.
         if inputs.is_empty() {
             let (shown, staged) = self.view_counts();
-            let held = visible
-                .iter()
-                .filter(|&&i| self.items[i].selected && !self.items[i].is_filable())
-                .count();
             self.set_warning(match (shown, staged, held) {
                 (_, 0, _) => "⚠ Nothing to transfer — no photos are staged.".to_string(),
                 (0, _, _) => {
                     "⚠ Nothing to transfer — no staged photos match the filters.".to_string()
                 }
-                (_, _, 1..) => {
-                    "⚠ Every selected photo is still being classified. Wait for the scan to                      finish, then press again."
-                        .to_string()
-                }
+                (_, _, 1..) => "⚠ Every selected photo is still being classified. \
+                     Wait for the scan to finish, then press again."
+                    .to_string(),
                 (shown, _, _) => {
                     format!(
                         "⚠ Nothing to transfer — none of the {shown} shown photos are selected."

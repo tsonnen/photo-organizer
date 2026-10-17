@@ -8,7 +8,7 @@
 //! pushed the row wider than the grid column.
 
 use super::layout::{self, MIN_CONTROL_WIDTH};
-use super::models::{SortBy, SortDirection, StagedItem};
+use super::models::{Filters, SortBy, SortDirection, StagedItem};
 use super::profiles_modal::DeletePrompt;
 use super::PhotoOrganizerApp;
 use crate::classification::{ClassificationSource, FrameSize};
@@ -839,18 +839,21 @@ fn bulk_move_harness(
             )
         })
         .collect();
-    bulk_move_harness_with(screen, settings, name, staged)
+    bulk_move_harness_with(screen, settings, name, staged, Filters::default())
 }
 
-/// [`bulk_move_harness`] with real source paths, for the tests that move files.
+/// [`bulk_move_harness`] with real source paths, for the tests that move files,
+/// and the filters the grid is narrowed to.
 fn bulk_move_harness_with(
     screen: egui::Vec2,
     settings: crate::settings::Settings,
     name: &str,
     staged: Vec<(PathBuf, u32, u32)>,
+    filters: Filters,
 ) -> Harness<'static, PhotoOrganizerApp> {
     let mut app = PhotoOrganizerApp::new();
     app.settings = settings;
+    app.filters = filters;
     app.show_bulk_move_modal = true;
     app.bulk_move_name = name.to_string();
     // The undo journal's slot is a field precisely so this can point a real
@@ -1240,6 +1243,7 @@ fn assigning_a_name_over_a_scan_in_progress_claims_the_photos_it_has_not_reached
             (PathBuf::from("/photos/decided.jpg"), 2024, 7),
             (PathBuf::from("/photos/still_going.jpg"), 2024, 7),
         ],
+        Filters::default(),
     );
 
     // The one photo the model has not reached: a placeholder, not a decision.
@@ -1314,6 +1318,7 @@ fn bulk_move_puts_the_whole_selection_under_the_typed_name() {
         settings,
         "Beach Trip",
         vec![(july, 2024, 7), (december, 2023, 12)],
+        Filters::default(),
     );
 
     harness
@@ -1364,8 +1369,13 @@ fn a_bulk_move_that_files_nothing_keeps_the_card_and_what_was_typed() {
         output_folder: Some(scratch.join("blocker/under")),
         ..Default::default()
     };
-    let mut harness =
-        bulk_move_harness_with(screen, settings, "Beach Trip", vec![(photo, 2024, 7)]);
+    let mut harness = bulk_move_harness_with(
+        screen,
+        settings,
+        "Beach Trip",
+        vec![(photo, 2024, 7)],
+        Filters::default(),
+    );
 
     harness
         .query_all_by_label_contains("Move Selected")
@@ -1410,6 +1420,69 @@ fn a_bulk_move_that_files_nothing_keeps_the_card_and_what_was_typed() {
 }
 
 #[test]
+fn a_bulk_move_leaves_the_photos_the_filters_hide_alone() {
+    // The bulk move is the fourth route to a category and it was the one the
+    // scoping missed: it *labelled* every selected photo while the transfer it
+    // runs in front of filed only the visible ones. The result was photos the
+    // user could not see, renamed to a name that says where they are, and not
+    // moved — so the next Move with the filter cleared filed them there.
+    //
+    // Both halves are checked: the hidden photo keeps its own category, and it
+    // keeps its file.
+    let scratch = Scratch::new("bulk_move_respects_the_filters");
+    let july = scratch.write("incoming/july.jpg", "july bytes");
+    let december = scratch.write("incoming/december.jpg", "december bytes");
+
+    let screen = egui::vec2(1240.0, 900.0);
+    let settings = crate::settings::Settings {
+        output_folder: Some(scratch.join("sorted")),
+        ..Default::default()
+    };
+    let mut harness = bulk_move_harness_with(
+        screen,
+        settings,
+        "Beach Trip",
+        vec![(july, 2024, 7), (december, 2023, 12)],
+        Filters {
+            date_from: Some((2024, 1)),
+            date_to: Some((2024, 12)),
+            ..Filters::default()
+        },
+    );
+
+    harness
+        .query_all_by_label_contains("Move Selected")
+        .next()
+        .expect("expected a Move Selected button")
+        .click();
+    harness.run();
+
+    assert!(
+        scratch.exists("sorted/Beach Trip/2024/07/july.jpg"),
+        "the photo in view is filed under the typed name"
+    );
+    assert!(
+        !scratch.exists("sorted/Beach Trip/2023/12/december.jpg"),
+        "and the one the filters hide is not filed at all"
+    );
+    assert!(
+        scratch.exists("incoming/december.jpg"),
+        "so it still has its original, where a Move otherwise would have taken it"
+    );
+    assert_eq!(
+        harness.state().items.len(),
+        1,
+        "and one photo is left staged: the one that was not in the batch"
+    );
+    assert_eq!(
+        harness.state().items[0].category,
+        "Unsorted",
+        "which must keep the category it had, rather than claiming one the move \
+         never gave it"
+    );
+}
+
+#[test]
 fn bulk_copy_leaves_the_originals_and_clears_the_grid() {
     // The same batch as a copy: the files are duplicated under the typed name and
     // the originals stay where they were, which is the whole difference between
@@ -1429,6 +1502,7 @@ fn bulk_copy_leaves_the_originals_and_clears_the_grid() {
         settings,
         "Beach Trip",
         vec![(july.clone(), 2024, 7)],
+        Filters::default(),
     );
 
     harness
@@ -1470,8 +1544,13 @@ fn a_name_typed_with_separators_cannot_create_a_directory_level() {
         output_folder: Some(scratch.join("sorted")),
         ..Default::default()
     };
-    let mut harness =
-        bulk_move_harness_with(screen, settings, "../../escaped", vec![(photo, 2024, 7)]);
+    let mut harness = bulk_move_harness_with(
+        screen,
+        settings,
+        "../../escaped",
+        vec![(photo, 2024, 7)],
+        Filters::default(),
+    );
 
     harness
         .query_all_by_label_contains("Move Selected")
@@ -2851,6 +2930,54 @@ fn typing_a_category_keeps_the_row_and_the_caret_where_they_are() {
             "the grid must not move while a cell is being typed into"
         );
     }
+}
+
+#[test]
+fn the_held_order_is_the_sorted_one_not_the_scan_one() {
+    // The hold was implemented as "skip the sort", which substituted `items`
+    // order — the scan's arrival order — for the sorted one. So the frame after
+    // an editor took focus the whole grid reordered into directory-walk order and
+    // stayed there for as long as the field had focus: the characters still landed
+    // in the right photo, but the rows the user was reading moved anyway.
+    //
+    // `custom_sorted_grid` cannot see this, because it stages photos in the order
+    // a Category sort produces, so its `items` order *is* its sorted order and the
+    // two are indistinguishable. Staged deliberately against the sort here.
+    let mut harness = app_with(
+        vec![
+            photo("alpha", 2021, 1, "mmm"),
+            photo("beta", 2021, 2, "aaa"),
+            photo("gamma", 2021, 3, "zzz"),
+        ],
+        |app| {
+            for item in &mut app.items {
+                item.is_custom = true;
+            }
+            app.sort_by = SortBy::Category;
+            app.sort_direction = SortDirection::Ascending;
+        },
+    );
+
+    harness.run();
+    assert_eq!(
+        drawn_photo_order(&harness),
+        vec!["beta.jpg", "alpha.jpg", "gamma.jpg"],
+        "the sorted order is not the order the photos were staged in"
+    );
+
+    focus_editor(&mut harness, "zzz");
+    type_text(&mut harness, "!");
+
+    assert_eq!(
+        harness.state().items[2].category,
+        "zzz!",
+        "the photo being edited should receive the character"
+    );
+    assert_eq!(
+        drawn_photo_order(&harness),
+        vec!["beta.jpg", "alpha.jpg", "gamma.jpg"],
+        "and the grid must stay in the sorted order while the editor holds focus"
+    );
 }
 
 #[test]

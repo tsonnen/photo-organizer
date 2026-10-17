@@ -95,7 +95,15 @@ impl PhotoOrganizerApp {
             // its own folder, so it does not need an output folder configured,
             // and it can label a selection without moving anything at all. With
             // nothing selected there is nothing for it to act on.
-            let has_selection = self.items.iter().any(|i| i.selected);
+            //
+            // Over `visible_indices` like the two buttons below it act: every
+            // route out of this toolbar works on the photos on screen, and a
+            // Bulk Move enabled by a tick the filters hid would open a card that
+            // says there is nothing selected.
+            let has_selection = self
+                .visible_indices()
+                .iter()
+                .any(|&i| self.items[i].selected);
             let bulk_hint = if has_selection {
                 "File every selected photo under one name of your own, without training"
             } else {

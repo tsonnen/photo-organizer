@@ -122,6 +122,11 @@ impl PhotoOrganizerApp {
                 // frame to take focus, which it could not have done sooner.
                 self.editing_cell = editing_this_frame;
                 self.order_sort = (self.sort_by, self.sort_direction);
+                // The order this frame drew, which is what a held order holds.
+                // Written while the hold is on too: a filter changed mid-word
+                // admits rows at the end, and recording that keeps the next frame
+                // from admitting them somewhere else.
+                self.drawn_order = visible;
             });
     }
 

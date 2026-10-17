@@ -244,18 +244,27 @@ impl PhotoOrganizerApp {
 
     pub(super) fn visible_indices(&self) -> Vec<usize> {
         let threshold = self.settings.confidence_threshold;
-        let mut rows: Vec<(Row<'_>, usize)> = self
+        let admitted: Vec<usize> = self
             .items
             .iter()
             .enumerate()
             .filter(|(_, item)| admits(&self.filters, &Row::from(*item), threshold))
-            .map(|(index, item)| (Row::from(item), index))
+            .map(|(index, _)| index)
             .collect();
 
-        if !self.holding_order() {
-            sort_rows(&mut rows, self.sort_by, self.sort_direction, threshold);
+        if self.holding_order() {
+            // The order the grid last drew, not the order `items` happens to be in.
+            // See [`held_order`]: skipping the sort instead left the grid in scan
+            // order, which is a reorder like any other and the one the hold exists
+            // to prevent.
+            return held_order(&admitted, &self.drawn_order, self.items.len());
         }
 
+        let mut rows: Vec<(Row<'_>, usize)> = admitted
+            .iter()
+            .map(|&index| (Row::from(&self.items[index]), index))
+            .collect();
+        sort_rows(&mut rows, self.sort_by, self.sort_direction, threshold);
         rows.into_iter().map(|(_, index)| index).collect()
     }
 
@@ -266,6 +275,51 @@ impl PhotoOrganizerApp {
     pub(super) fn view_counts(&self) -> (usize, usize) {
         (self.visible_indices().len(), self.items.len())
     }
+}
+
+/// The admitted rows in the order the grid already had them.
+///
+/// What [`PhotoOrganizerApp::holding_order`] holds is the *order*, not the absence
+/// of one. Skipping the sort entirely — which is what a `if !holding { sort }`
+/// amounted to — substituted `items` order, and `items` is the scan's arrival
+/// order: the grid therefore snapped out of date order into directory-walk order
+/// the frame after an editor took focus, and stayed there for as long as it had
+/// focus. The characters still landed in the right photo, which is what the
+/// original fix was for, but the rows the user was reading moved out from under
+/// them anyway.
+///
+/// Filters stay live through the hold. Clicking a slider or a combo does not move
+/// keyboard focus in egui 0.30, so the editor keeps focus while the user changes
+/// a filter, and a filter that quietly stopped narrowing anything until the field
+/// lost focus would be the same invisible filter this stack removed elsewhere. A
+/// row the remembered order does not contain — one a filter has just admitted —
+/// therefore has nowhere to go and is appended in `items` order rather than
+/// displacing a row that was already on screen.
+///
+/// `staged` bounds the rank table rather than the longest index: `drawn_order` is
+/// a snapshot of an earlier frame, and items are removed from the grid by a
+/// transfer, so an index in it can outrun the vector it came from.
+fn held_order(admitted: &[usize], previous: &[usize], staged: usize) -> Vec<usize> {
+    // Rank table over `staged`, not a `position` lookup per row: the lookup is
+    // O(previous) and the grid asks this every frame for as long as the editor
+    // has focus, which on a large folder is the difference between one pass and
+    // one quadratic pass.
+    let mut rank = vec![usize::MAX; staged];
+    for (position, &index) in previous.iter().enumerate() {
+        if let Some(slot) = rank.get_mut(index) {
+            *slot = position;
+        }
+    }
+
+    // A stable sort by rank: rows the previous order knew keep exactly the place
+    // it gave them, and the ones it did not — all of which share `usize::MAX` —
+    // land at the end in `admitted`'s own order, which is `items` order.
+    let mut ranked: Vec<(usize, usize)> = admitted
+        .iter()
+        .map(|&index| (rank.get(index).copied().unwrap_or(usize::MAX), index))
+        .collect();
+    ranked.sort_by_key(|(position, _)| *position);
+    ranked.into_iter().map(|(_, index)| index).collect()
 }
 
 /// The category names worth offering in the filter picker: lower-cased and
@@ -765,6 +819,46 @@ mod tests {
             sorted_names(rows, SortBy::Category, SortDirection::Descending),
             vec![UNSORTED, "", "Travel", "Beaches", "apples"]
         );
+    }
+
+    #[test]
+    fn the_held_order_is_the_one_the_grid_had_not_the_one_items_holds() {
+        // The bug this pins down. Holding the order by *skipping* the sort
+        // substituted `items` order — the scan's arrival order — for the sorted
+        // one, so the grid reordered into directory-walk order the frame after an
+        // editor took focus and stayed there for as long as it had focus.
+        assert_eq!(
+            held_order(&[0, 1, 2], &[2, 1, 0], 3),
+            vec![2, 1, 0],
+            "an unchanged set keeps the order the grid had"
+        );
+    }
+
+    #[test]
+    fn a_filter_still_narrows_the_grid_while_the_order_is_held() {
+        // The hold is on the order, not on the set. Clicking a slider or a combo
+        // does not move keyboard focus in egui 0.30, so the editor keeps focus
+        // while the filter changes — and a filter that stopped narrowing anything
+        // until the field let go would be exactly the invisible filter this stack
+        // removed.
+        assert_eq!(
+            held_order(&[0, 1], &[2, 1, 0], 3),
+            vec![1, 0],
+            "a row a filter drops is dropped, and the rest keep their order"
+        );
+        assert_eq!(
+            held_order(&[0, 1, 2, 3], &[2, 1, 0], 4),
+            vec![2, 1, 0, 3],
+            "a row a filter admits is added at the end rather than displacing one"
+        );
+    }
+
+    #[test]
+    fn a_held_order_survives_an_index_past_the_end_of_the_grid() {
+        // `drawn_order` is a snapshot of an earlier frame and a transfer removes
+        // items from `items`, so an index in it can outrun the vector it came
+        // from. A panic there would take the grid down mid-session.
+        assert_eq!(held_order(&[0, 1], &[9, 1, 0], 2), vec![1, 0]);
     }
 
     #[test]
