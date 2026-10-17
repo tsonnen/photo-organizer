@@ -27,7 +27,7 @@ impl PhotoOrganizerApp {
         let ctx_clone = ctx.clone();
         std::thread::spawn(move || {
             if let Ok(dyn_img) = crate::media::load_image(&path) {
-                let color_img = crate::media::dynamic_to_preview_color_image(&dyn_img, 1920);
+                let color_img = crate::media::dynamic_to_color_image(&dyn_img, 1920);
                 let _ = tx.send((path, color_img));
                 ctx_clone.request_repaint();
             }
