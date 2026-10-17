@@ -88,7 +88,8 @@ impl PhotoOrganizerApp {
             .file_name()
             .unwrap_or_default()
             .to_string_lossy();
-        let texture = ctx.load_texture(filename, payload.image, egui::TextureOptions::LINEAR);
+        let color_img = crate::media::cached_thumb_to_egui(&payload.thumbnail);
+        let texture = ctx.load_texture(filename, color_img, egui::TextureOptions::LINEAR);
 
         self.items.push(StagedItem::new(
             &self.profiles,
