@@ -1441,8 +1441,8 @@ fn a_bulk_move_leaves_the_photos_the_filters_hide_alone() {
         "Beach Trip",
         vec![(july, 2024, 7), (december, 2023, 12)],
         Filters {
-            date_from: Some((2024, 1)),
-            date_to: Some((2024, 12)),
+            date_from: Some(PhotoDate::new(2024, 1, None)),
+            date_to: Some(PhotoDate::new(2024, 12, None)),
             ..Filters::default()
         },
     );

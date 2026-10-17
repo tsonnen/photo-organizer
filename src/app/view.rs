@@ -341,16 +341,11 @@ pub(super) fn category_choices<'a>(rows: impl IntoIterator<Item = Row<'a>>) -> V
     names
 }
 
-/// The years the staged photos are actually from, ascending.
-///
-/// A picker listing every year from 1970 to next year is a list nobody scrolls;
-/// the years present in the folder are the only ones a filter can usefully name.
-/// Staged rather than every year a photo *could* carry, because a bound on a
-/// year nothing was taken in cannot narrow anything.
 /// Today, as the calendar marks it.
 ///
-/// Passed into the picker rather than read there so that "today" is one decision
-/// the caller makes, and so a test can supply its own.
+/// Read here rather than inside the picker so that "today" is one decision made
+/// in one place, and so a test can be handed its own rather than depending on
+/// the day it happens to run on.
 pub(super) fn today() -> PhotoDate {
     let now = chrono::Local::now().date_naive();
     use chrono::Datelike;
@@ -360,14 +355,17 @@ pub(super) fn today() -> PhotoDate {
 /// The newest `(year, month)` among the staged photos, or today's if nothing is
 /// staged — the month the date picker should open on when there is no bound to
 /// land on.
+///
+/// The folder's own newest month rather than the current one: a picker opening on
+/// a month holding none of the user's photos is a picker they have to page away
+/// from before they can see any of them.
 pub(super) fn newest_date<'a>(rows: impl IntoIterator<Item = Row<'a>>) -> (u32, u32) {
     rows.into_iter()
         .map(|row| (row.date.year, row.date.month))
         .max()
         .unwrap_or_else(|| {
-            let today = chrono::Local::now().date_naive();
-            use chrono::Datelike;
-            (today.year() as u32, today.month())
+            let today = today();
+            (today.year, today.month)
         })
 }
 
