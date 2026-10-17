@@ -70,8 +70,9 @@ impl Database {
             [],
         );
         // Nullable, unlike `year` and `month`: a row cached before this column
-        // existed has no day, and zero is a day that never happened. The scan
-        // backfills one from the file on the next rescan.
+        // existed has no day, and zero is a day that never happened. The scanner
+        // reads a missing one from the file and writes it back
+        // (`a_rescan_backfills_the_day_a_legacy_row_is_missing`).
         let _ = conn.execute("ALTER TABLE photo_cache ADD COLUMN day INTEGER", []);
 
         // The cache takes one insert per photo during a scan and is read back on
@@ -309,10 +310,10 @@ mod tests {
             .get_cached("legacy_hash")
             .expect("query legacy item")
             .expect("item exists");
-        // A legacy row has no day column, so it reports none. The scan backfills one
-        // from the file on the next rescan. What matters is that the reader reports
-        // the absence rather than inventing a day, which would file the photo
-        // somewhere it was never taken.
+        // A legacy row has no day column, so it reports none. The scanner replaces
+        // that with the file's own date on the next scan. What matters here is
+        // that the *reader* reports the absence rather than inventing a day,
+        // which would file the photo somewhere it was never taken.
         assert_eq!(cached.date, PhotoDate::new(2022, 5, None));
         assert!(cached.is_exif_date);
         assert_eq!(cached.embedding, vec![1.0, 2.0]);

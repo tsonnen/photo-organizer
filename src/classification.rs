@@ -77,10 +77,11 @@ pub struct PhotoDate {
     ///
     /// A fresh scan always has one — EXIF `DateTimeOriginal` carries it, and the
     /// filesystem fallback carries it too. `None` is only for a photo whose row in
-    /// `photo_cache` predates the column, in which case the next rescan backfills
-    /// it. Optional for the same reason `PhotoFacts::frame` is: a cached row can
-    /// predate the field, and inventing a day would file the photo somewhere it was
-    /// never taken.
+    /// `photo_cache` predates the column; `scanner.rs` reads the file's date back
+    /// for such a row on the next scan and writes it, so the absence lasts one
+    /// scan rather than forever. Optional for the same reason `PhotoFacts::frame`
+    /// is: a cached row can predate the field, and inventing a day would file the
+    /// photo somewhere it was never taken.
     pub day: Option<u32>,
 }
 

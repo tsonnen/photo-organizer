@@ -227,9 +227,10 @@ pub struct ModalActions {
 /// happened to be walked, and a date order is the one every photo library uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SortBy {
-    /// Oldest first by default. A year and a month is as fine as this can
-    /// honestly be: `extract_date` reduces both EXIF timestamps and file times
-    /// to that pair, so there is no day left to break a tie within a month on.
+    /// Oldest first by default, by `PhotoDate::sort_key`. The key carries the
+    /// day, so a folder of photos from one trip orders as the trip happened
+    /// rather than as the folder happened to be walked; a photo whose day was
+    /// never recorded sorts first in its month, which is arbitrary but stable.
     #[default]
     DateTaken,
     Confidence,
