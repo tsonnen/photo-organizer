@@ -1,9 +1,7 @@
 use crate::classification::{Classification, FrameSize, PhotoFacts};
-use crate::db::{CachedPhotoData, Database};
+use crate::db::{CachedPhotoData, CachedThumbnail, Database};
 use crate::inference::{extract_embedding, init_clip_session};
-use crate::media::{
-    cached_thumb_to_egui, dynamic_to_cached_thumb, extract_date, load_scan_preview,
-};
+use crate::media::{dynamic_to_cached_thumb, extract_date, load_scan_preview};
 use crate::profile_store::ProfileStore;
 use eframe::egui;
 use rayon::prelude::*;
@@ -18,7 +16,7 @@ use std::thread;
 pub struct ProcessedPayload {
     pub facts: PhotoFacts,
     pub classification: Classification,
-    pub image: egui::ColorImage,
+    pub thumbnail: CachedThumbnail,
 }
 
 /// What a scan tells the UI.
@@ -271,19 +269,21 @@ pub fn scan_folder_with_db(
                     };
                     let classification = profiles.classify(&facts, threshold);
 
-                    let image = if let Some(ref thumb) = c.thumbnail {
-                        cached_thumb_to_egui(thumb)
-                    } else if let Ok(preview) = load_scan_preview(path) {
-                        let (cached_thumb, color_img) = dynamic_to_cached_thumb(&preview.image);
-                        c.thumbnail = Some(cached_thumb);
-                        let db_guard = db.lock().unwrap();
-                        if let Some(ref db_conn) = *db_guard {
-                            let _ = db_conn.insert_cache(&file_hash, &c);
+                    // Ensure the cached row carries a thumbnail: rows written before
+                    // the thumbnail column existed have none, so backfill once.
+                    if c.thumbnail.is_none() {
+                        if let Ok(preview) = load_scan_preview(path) {
+                            let (cached_thumb, _color_img) =
+                                dynamic_to_cached_thumb(&preview.image);
+                            c.thumbnail = Some(cached_thumb);
+                            let db_guard = db.lock().unwrap();
+                            if let Some(ref db_conn) = *db_guard {
+                                let _ = db_conn.insert_cache(&file_hash, &c);
+                            }
+                        } else {
+                            return;
                         }
-                        color_img
-                    } else {
-                        return;
-                    };
+                    }
 
                     send(
                         &tx,
@@ -291,7 +291,10 @@ pub fn scan_folder_with_db(
                         ScanMessage::Item(ProcessedPayload {
                             facts,
                             classification,
-                            image,
+                            thumbnail: c
+                                .thumbnail
+                                .clone()
+                                .expect("scan always carries a thumbnail"),
                         }),
                     );
                     ctx.request_repaint();
@@ -299,11 +302,11 @@ pub fn scan_folder_with_db(
                 }
 
                 // 2. Uncached image: decode once, at the size the pipeline consumes
-                let (date_info, preview, cached_thumb, image) = match load_scan_preview(path) {
+                let (date_info, preview, cached_thumb) = match load_scan_preview(path) {
                     Ok(preview) => {
-                        let (thumb, egui_img) = dynamic_to_cached_thumb(&preview.image);
+                        let (thumb, _color_img) = dynamic_to_cached_thumb(&preview.image);
                         let (date, is_exif_date) = extract_date(path);
-                        ((date, is_exif_date), preview, thumb, egui_img)
+                        ((date, is_exif_date), preview, thumb)
                     }
                     Err(_) => return,
                 };
@@ -331,7 +334,7 @@ pub fn scan_folder_with_db(
                     ScanMessage::Item(ProcessedPayload {
                         facts: facts.clone(),
                         classification: Classification::Pending,
-                        image,
+                        thumbnail: cached_thumb.clone(),
                     }),
                 );
                 ctx.request_repaint();
